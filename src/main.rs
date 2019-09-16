@@ -1,0 +1,694 @@
+#![allow(dead_code)]
+
+use clang::Clang;
+
+#[derive(Debug, PartialEq)]
+enum Origin {
+    ObjCCore,
+    Framework(String),
+    Library(String),
+    Unknown,
+}
+
+fn guess_origin(path: &str) -> Origin {
+    use lazy_static::lazy_static;
+    use regex::Regex;
+
+    lazy_static! {
+        static ref FRAMEWORK_PATH_RE: Regex =
+            Regex::new(r"/([^./]+)\.framework/Headers/[^./]+.h\z").unwrap();
+    }
+    if let Some(caps) = FRAMEWORK_PATH_RE.captures(path) {
+        return Origin::Framework(caps.get(1).unwrap().as_str().to_owned());
+    }
+
+    lazy_static! {
+        static ref LIBRARY_PATH_RE: Regex =
+            Regex::new(r"/usr/include/([^./]+)/[^./]+.h\z").unwrap();
+    }
+    if let Some(caps) = LIBRARY_PATH_RE.captures(path) {
+        let library = caps.get(1).unwrap().as_str();
+        if library == "objc" {
+            return Origin::ObjCCore;
+        } else {
+            return Origin::Library(library.to_owned());
+        }
+    }
+
+    Origin::Unknown
+}
+
+fn get_entity_file_path(entity: &clang::Entity) -> Option<String> {
+    let path = entity.get_location()?.get_file_location().file?.get_path();
+    match path.into_os_string().into_string() {
+        Ok(string) => Some(string),
+        _ => None,
+    }
+}
+
+fn guess_entity_origin(entity: &clang::Entity) -> Origin {
+    if let Some(file_path) = get_entity_file_path(entity) {
+        guess_origin(&file_path)
+    } else {
+        Origin::Unknown
+    }
+}
+
+#[derive(Copy, Clone)]
+enum AppleSdk {
+    MacOs,
+    IOs,
+    IOsSimulator,
+    TvOs,
+    TvOsSimulator,
+    WatchOs,
+    WatchOsSimulator,
+}
+
+impl AppleSdk {
+    fn sdk_name(&self) -> &str {
+        match *self {
+            AppleSdk::MacOs => "macosx",
+            AppleSdk::IOs => "iphoneos",
+            AppleSdk::IOsSimulator => "iphonesimulator",
+            AppleSdk::TvOs => "appletvos",
+            AppleSdk::TvOsSimulator => "appletvsimulator",
+            AppleSdk::WatchOs => "watchos",
+            AppleSdk::WatchOsSimulator => "watchsimulator",
+        }
+    }
+}
+
+fn sdk_path(sdk: AppleSdk) -> String {
+    use std::process::Command;
+
+    let output = Command::new("xcrun")
+        .args(&["--sdk", sdk.sdk_name(), "--show-sdk-path"])
+        .output()
+        .expect("xcrun command failed to start");
+    assert!(output.status.success());
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+fn show_type(desc: &str, clang_type: &clang::Type, indent_level: usize) {
+    let indent = (0..indent_level)
+        .map(|_| "   ")
+        .collect::<Vec<&str>>()
+        .concat();
+
+    println!("{}{} type: {:?}", indent, desc, clang_type);
+
+    if let Some(argument_types) = clang_type.get_argument_types() {
+        if !argument_types.is_empty() {
+            println!("{}{} arguments types:", desc, indent);
+            for (i, arg_type) in argument_types.iter().enumerate() {
+                let arg_desc = format!("{} argument type {}", desc, i);
+                show_type(&arg_desc, &arg_type, indent_level);
+            }
+        }
+    }
+
+    if let Some(base_type) = clang_type.get_objc_object_base_type() {
+        println!("{}{} ObjC base type types: {:?}", indent, desc, base_type);
+    }
+
+    if let Some(nullability) = clang_type.get_nullability() {
+        println!("{}{} nullability: {:?}", indent, desc, nullability);
+    }
+
+    let objc_protocol_declarations = clang_type.get_objc_protocol_declarations();
+    if !objc_protocol_declarations.is_empty() {
+        println!(
+            "{}{} objc protocol declarations: {:?}",
+            indent, desc, objc_protocol_declarations
+        );
+    }
+    let objc_type_arguments = clang_type.get_objc_type_arguments();
+    if !objc_type_arguments.is_empty() {
+        println!(
+            "{}{} objc type arguments: {:?}",
+            indent, desc, objc_type_arguments
+        );
+    }
+
+    if let Some(pointee_type) = clang_type.get_pointee_type() {
+        let pointee_desc = format!("{} pointee", desc);
+        show_type(&pointee_desc, &pointee_type, indent_level);
+    }
+
+    if let Some(modified_type) = clang_type.get_modified_type() {
+        let modified_desc = format!("{} modified", desc);
+        show_type(&modified_desc, &modified_type, indent_level);
+    }
+}
+
+fn show_tree(entity: &clang::Entity, indent_level: usize) {
+    let indent = (0..indent_level)
+        .map(|_| "   ")
+        .collect::<Vec<&str>>()
+        .concat();
+
+    if let Some(name) = entity.get_name() {
+        println!("{}*** kind: {:?} - {} ***", indent, entity.get_kind(), name);
+    } else {
+        println!("{}*** kind: {:?} ***", indent, entity.get_kind());
+    }
+    if entity.get_display_name() != entity.get_name() {
+        if let Some(display_name) = entity.get_display_name() {
+            println!("{}display name: {:?}", indent, display_name);
+        }
+    }
+
+    // if let Some(location) = entity.get_location() {
+    //     println!("{}location: {:?}", indent, location);
+    // }
+
+    // if let Some(range) = entity.get_range() {
+    //     println!("{}range: {:?}", indent, range);
+    // }
+
+    if let Some(arguments) = entity.get_arguments() {
+        if !arguments.is_empty() {
+            println!("{}arguments:", indent);
+            for arg in arguments {
+                show_tree(&arg, indent_level + 1);
+            }
+        }
+    }
+
+    let availability = entity.get_availability();
+    if availability != clang::Availability::Available {
+        println!("{}availability: {:?}", indent, availability);
+    }
+
+    let canonical_entity = entity.get_canonical_entity();
+    if &canonical_entity != entity {
+        println!("{}canonical_entity: {:?}", indent, canonical_entity);
+    }
+
+    if let Some(definition) = entity.get_definition() {
+        println!("{}definition: {:?}", indent, definition);
+    }
+
+    if let Some(external_symbol) = entity.get_external_symbol() {
+        println!("{}external symbol: {:?}", indent, external_symbol);
+    }
+
+    if let Some(module) = entity.get_module() {
+        println!("{}module: {:?}", indent, module);
+    }
+
+    if let Some(template) = entity.get_template() {
+        println!("{}template: {:?}", indent, template);
+    }
+
+    if let Some(template_kind) = entity.get_template_kind() {
+        println!("{}template kind: {:?}", indent, template_kind);
+    }
+
+    if let Some(template_arguments) = entity.get_template_arguments() {
+        println!("{}template_arguments: {:?}", indent, template_arguments);
+    }
+
+    if let Some(clang_type) = entity.get_type() {
+        show_type("type", &clang_type, indent_level);
+    }
+
+    if let Some(typedef_underlying_type) = entity.get_typedef_underlying_type() {
+        show_type(
+            "typedef underlying type",
+            &typedef_underlying_type,
+            indent_level,
+        );
+    }
+
+    if let Some(visibility) = entity.get_visibility() {
+        println!("{}visibility: {:?}", indent, visibility);
+    }
+
+    if let Some(result_type) = entity.get_result_type() {
+        show_type("result type", &result_type, indent_level);
+    }
+
+    if let Some(mangled_name) = entity.get_mangled_name() {
+        println!("{}mangled_name: {:?}", indent, mangled_name);
+    }
+
+    if let Some(objc_ib_outlet_collection_type) = entity.get_objc_ib_outlet_collection_type() {
+        println!(
+            "{}objc_ib_outlet_collection_type: {:?}",
+            indent, objc_ib_outlet_collection_type
+        );
+    }
+
+    if let Some(objc_type_encoding) = entity.get_objc_type_encoding() {
+        println!("{}objc type encoding: {:?}", indent, objc_type_encoding);
+    }
+
+    if let Some(objc_selector_index) = entity.get_objc_selector_index() {
+        println!("{}objc selector index: {:?}", indent, objc_selector_index);
+    }
+
+    if let Some(objc_qualifiers) = entity.get_objc_qualifiers() {
+        println!("{}objc qualifiers: {:?}", indent, objc_qualifiers);
+    }
+
+    if let Some(objc_attributes) = entity.get_objc_attributes() {
+        println!("{}objc attributes: {:?}", indent, objc_attributes);
+    }
+
+    if let Some(reference) = entity.get_reference() {
+        println!("{}reference: {:?}", indent, reference);
+    }
+
+    if let Some(storage_class) = entity.get_storage_class() {
+        println!("{}storage class: {:?}", indent, storage_class);
+    }
+
+    // if let Some(semantic_parent) = entity.get_semantic_parent() {
+    //     println!("{}semantic parent: {:?}", indent, semantic_parent);
+    // }
+
+    // if let Some(lexical_parent) = entity.get_lexical_parent() {
+    //     println!("{}lexical parent: {:?}", indent, lexical_parent);
+    // }
+
+    let children = entity.get_children();
+    if !children.is_empty() {
+        println!("{}children:", indent);
+        for child in children {
+            show_tree(&child, indent_level + 1);
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+enum Nullability {
+    NonNull,
+    Nullable,
+    Unspecified,
+}
+
+impl Nullability {
+    fn from(nul: clang::Nullability) -> Nullability {
+        match nul {
+            clang::Nullability::NonNull => Nullability::NonNull,
+            clang::Nullability::Nullable => Nullability::Nullable,
+            clang::Nullability::Unspecified => Nullability::Unspecified,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+struct ObjCObjectPointer {
+    interface_name: String,
+    protocols: Vec<String>,
+    type_arguments: Vec<ObjCObjectPointer>,
+    nullability: Nullability,
+}
+
+impl ObjCObjectPointer {
+    fn with_nullability(self, nullability: Nullability) -> ObjCObjectPointer {
+        ObjCObjectPointer {
+            interface_name: self.interface_name,
+            protocols: self.protocols,
+            type_arguments: self.type_arguments,
+            nullability,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum ObjCType {
+    Void,
+    SChar,
+    UChar,
+    Short,
+    UShort,
+    Int,
+    UInt,
+    Long,
+    ULong,
+    LongLong,
+    ULongLong,
+    Float,
+    Double,
+    Pointer(Box<ObjCType>, Nullability),
+    ObjCObjectPointer(ObjCObjectPointer),
+}
+
+impl ObjCType {
+    fn from(ty: &clang::Type) -> ObjCType {
+        use clang::{EntityKind, TypeKind};
+        match ty.get_kind() {
+            TypeKind::Void => ObjCType::Void,
+            // SChar is "signed char", CharS is "char" when it is signed by default.
+            TypeKind::SChar | TypeKind::CharS => ObjCType::SChar,
+            // UChar is "unsigned char", CharU is "char" when it is unsigned by default.
+            TypeKind::UChar | TypeKind::CharU => ObjCType::UChar,
+            TypeKind::Short => ObjCType::Short,
+            TypeKind::UShort => ObjCType::UShort,
+            TypeKind::Int => ObjCType::Int,
+            TypeKind::UInt => ObjCType::UInt,
+            TypeKind::Long => ObjCType::Long,
+            TypeKind::ULong => ObjCType::ULong,
+            TypeKind::LongLong => ObjCType::LongLong,
+            TypeKind::ULongLong => ObjCType::ULongLong,
+            TypeKind::Float => ObjCType::Float,
+            TypeKind::Double => ObjCType::Double,
+            TypeKind::Pointer => {
+                let pointee_type = ty.get_pointee_type().unwrap();
+                ObjCType::Pointer(
+                    Box::new(ObjCType::from(&pointee_type)),
+                    Nullability::Unspecified,
+                )
+            }
+            TypeKind::ObjCObjectPointer => {
+                let pointee_type = ty.get_pointee_type().unwrap();
+                let protocols = pointee_type
+                    .get_objc_protocol_declarations()
+                    .iter()
+                    .map(|decl| {
+                        assert!(decl.get_kind() == EntityKind::ObjCProtocolDecl);
+                        decl.get_name().unwrap()
+                    })
+                    .collect();
+
+                let type_arguments = pointee_type
+                    .get_objc_type_arguments()
+                    .iter()
+                    .map(|ty| match ObjCType::from(ty) {
+                        ObjCType::ObjCObjectPointer(pointer) => pointer,
+                        _ => panic!("Type arguments should only be ObjC object pointers"),
+                    })
+                    .collect();
+
+                ObjCType::ObjCObjectPointer(ObjCObjectPointer {
+                    interface_name: pointee_type
+                        .get_objc_object_base_type()
+                        .unwrap()
+                        .get_display_name(),
+                    protocols,
+                    type_arguments,
+                    nullability: Nullability::Unspecified,
+                })
+            }
+            TypeKind::Attributed => {
+                let modified = ObjCType::from(&ty.get_modified_type().unwrap());
+                if let Some(nullability) = ty.get_nullability() {
+                    let nullability = Nullability::from(nullability);
+                    match modified {
+                        ObjCType::ObjCObjectPointer(pointer) => {
+                            ObjCType::ObjCObjectPointer(pointer.with_nullability(nullability))
+                        }
+                        ObjCType::Pointer(pointee, _) => ObjCType::Pointer(pointee, nullability),
+                        _ => modified,
+                    }
+                } else {
+                    modified
+                }
+            }
+            unknown_kind => panic!("Unhandled type kind {:?}", unknown_kind),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+struct ObjCArg {
+    name: Option<String>,
+    objc_type: ObjCType,
+}
+
+impl ObjCArg {
+    fn from(entity: &clang::Entity) -> ObjCArg {
+        ObjCArg {
+            name: entity.get_name(),
+            objc_type: ObjCType::from(&entity.get_type().unwrap()),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum ObjCMethodKind {
+    Class,
+    Instance,
+}
+
+#[derive(Debug, PartialEq)]
+struct ObjCMethod {
+    name: String,
+    kind: ObjCMethodKind,
+    arguments: Vec<ObjCArg>,
+    result_type: ObjCType,
+}
+
+impl ObjCMethod {
+    fn from(entity: &clang::Entity) -> ObjCMethod {
+        use clang::EntityKind;
+
+        let kind = match entity.get_kind() {
+            EntityKind::ObjCClassMethodDecl => ObjCMethodKind::Class,
+            EntityKind::ObjCInstanceMethodDecl => ObjCMethodKind::Instance,
+            _ => panic!("entity should be either a class or instance method"),
+        };
+
+        let arguments = entity
+            .get_arguments()
+            .unwrap()
+            .iter()
+            .map(|arg| ObjCArg::from(arg))
+            .collect();
+
+        let result_type = ObjCType::from(&entity.get_result_type().unwrap());
+        ObjCMethod {
+            name: entity.get_name().unwrap(),
+            kind,
+            arguments,
+            result_type,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+struct ObjCInterface {
+    name: String,
+    methods: Vec<ObjCMethod>,
+}
+
+impl ObjCInterface {
+    fn from(entity: &clang::Entity) -> ObjCInterface {
+        use clang::EntityKind;
+        assert!(entity.get_kind() == EntityKind::ObjCInterfaceDecl);
+        let methods = entity
+            .get_children()
+            .iter()
+            .filter(|child| {
+                [
+                    EntityKind::ObjCInstanceMethodDecl,
+                    EntityKind::ObjCClassMethodDecl,
+                ]
+                .contains(&child.get_kind())
+            })
+            .map(|child| ObjCMethod::from(child))
+            .collect();
+        ObjCInterface {
+            name: entity.get_name().unwrap(),
+            methods,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+struct ObjCProtocol {
+    name: String,
+}
+
+impl ObjCProtocol {
+    fn from(entity: &clang::Entity) -> ObjCProtocol {
+        assert!(entity.get_kind() == clang::EntityKind::ObjCProtocolDecl);
+        ObjCProtocol {
+            name: entity.get_name().unwrap(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum ObjCDecl {
+    ObjCProtocol(ObjCProtocol),
+    ObjCInterface(ObjCInterface),
+}
+
+#[derive(Debug)]
+enum ParseError {
+    SourceError(clang::SourceError),
+    CompilationError(String),
+}
+
+impl From<clang::SourceError> for ParseError {
+    fn from(err: clang::SourceError) -> ParseError {
+        ParseError::SourceError(err)
+    }
+}
+
+fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<ObjCDecl>, ParseError> {
+    use clang::diagnostic::Severity;
+
+    // The documentation says that files specified as unsaved must exist so create a dummy temporary empty file
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let index = clang::Index::new(clang, false, true);
+    let mut parser = index.parser(file.path());
+
+    parser.arguments(&[
+        "-x",
+        "objective-c", // The file doesn't have an Objective-C extension so set the language explicitely
+        "-isysroot",
+        &sdk_path(AppleSdk::MacOs),
+    ]);
+    parser.skip_function_bodies(true);
+    parser.include_attributed_types(true);
+    parser.visit_implicit_attributes(true); // TODO: Check if needed
+    parser.unsaved(&[clang::Unsaved::new(file.path(), source)]);
+    let tu = parser.parse()?;
+    // The parser will try to parse as much as possible, even with errors.
+    // In that case, we still want fail because some information will be missing anyway.
+    let diagnostics = tu.get_diagnostics();
+    let mut errors = diagnostics.iter().filter(|diagnostic| {
+        let severity = diagnostic.get_severity();
+        [Severity::Error, Severity::Fatal].contains(&severity)
+    });
+    if let Some(error) = errors.next() {
+        return Err(ParseError::CompilationError(error.get_text()));
+    }
+
+    println!("--------------------------------");
+    show_tree(&tu.get_entity(), 0);
+    println!("--------------------------------");
+
+    let mut objc_decls: Vec<ObjCDecl> = Vec::new();
+    for entity in tu.get_entity().get_children() {
+        match entity.get_kind() {
+            clang::EntityKind::ObjCInterfaceDecl => {
+                objc_decls.push(ObjCDecl::ObjCInterface(ObjCInterface::from(&entity)));
+            }
+            clang::EntityKind::ObjCProtocolDecl => {
+                objc_decls.push(ObjCDecl::ObjCProtocol(ObjCProtocol::from(&entity)));
+            }
+            _ => {}
+        }
+    }
+    Ok(objc_decls)
+}
+
+fn main() {
+    let source = "
+        // #import <Foundation/NSArray.h>
+        @interface A
+        - (void)foo:(int *)x;
+        - (A * _Nullable)bar;
+        @end
+    ";
+    let clang = Clang::new().expect("Could not load libclang");
+    let decls = parse_objc(&clang, source).unwrap();
+    println!("{:?}", decls);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parameter_adopting_protocols() {
+        let clang = Clang::new().expect("Could not load libclang");
+
+        let source = "
+            @protocol P1, P2;
+            @class B;
+            @interface A
+            - (void)foo:(id<P1, P2>)x;
+            + (void)bar:(B<P2>* _Nonnull)y;
+            - (id<P1, P2>)foobar:(B<P2>*)z;
+            @end
+        ";
+
+        let expected_decls = vec![ObjCDecl::ObjCInterface(ObjCInterface {
+            name: "A".to_string(),
+            methods: vec![
+                ObjCMethod {
+                    name: "foo:".to_string(),
+                    kind: ObjCMethodKind::Instance,
+                    arguments: vec![ObjCArg {
+                        name: Option::Some("x".to_string()),
+                        objc_type: ObjCType::ObjCObjectPointer(ObjCObjectPointer {
+                            interface_name: "id".to_string(),
+                            protocols: vec!["P1".to_string(), "P2".to_string()],
+                            type_arguments: vec![],
+                            nullability: Nullability::Unspecified,
+                        }),
+                    }],
+                    result_type: ObjCType::Void,
+                },
+                ObjCMethod {
+                    name: "bar:".to_string(),
+                    kind: ObjCMethodKind::Class,
+                    arguments: vec![ObjCArg {
+                        name: Option::Some("y".to_string()),
+                        objc_type: ObjCType::ObjCObjectPointer(ObjCObjectPointer {
+                            interface_name: "B".to_string(),
+                            protocols: vec!["P2".to_string()],
+                            type_arguments: vec![],
+                            nullability: Nullability::NonNull,
+                        }),
+                    }],
+                    result_type: ObjCType::Void,
+                },
+                ObjCMethod {
+                    name: "foobar:".to_string(),
+                    kind: ObjCMethodKind::Instance,
+                    arguments: vec![ObjCArg {
+                        name: Option::Some("z".to_string()),
+                        objc_type: ObjCType::ObjCObjectPointer(ObjCObjectPointer {
+                            interface_name: "B".to_string(),
+                            protocols: vec!["P2".to_string()],
+                            type_arguments: vec![],
+                            nullability: Nullability::Unspecified,
+                        }),
+                    }],
+                    result_type: ObjCType::ObjCObjectPointer(ObjCObjectPointer {
+                        interface_name: "id".to_string(),
+                        protocols: vec!["P1".to_string(), "P2".to_string()],
+                        type_arguments: vec![],
+                            nullability: Nullability::Unspecified,
+                    }),
+                },
+            ],
+        })];
+
+        let parsed_decls = parse_objc(&clang, source).unwrap();
+        assert_eq!(parsed_decls, expected_decls);
+    }
+
+    #[test]
+    fn test_guess_origin() {
+        assert_eq!(guess_origin(""), Origin::Unknown);
+        assert_eq!(
+            guess_origin("/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.13.sdk/System/Library/Frameworks/Foundation.framework/Headers/NSValue.h"),
+            Origin::Framework("Foundation".to_owned()),
+        );
+        assert_eq!(
+            guess_origin("/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.13.sdk/System/Library/Frameworks/Metal.framework/Headers/MTLCaptureManager.h"),
+            Origin::Framework("Metal".to_owned()),
+        );
+        assert_eq!(
+            guess_origin("/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.13.sdk/usr/include/objc/NSObject.h"),
+            Origin::ObjCCore,
+        );
+        assert_eq!(
+            guess_origin("/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.13.sdk/usr/include/dispatch/object.h"),
+            Origin::Library("dispatch".to_owned()),
+        );
+        assert_eq!(
+            guess_origin("/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.13.sdk/usr/include/dispatch/queue.h"),
+            Origin::Library("dispatch".to_owned()),
+        );
+    }
+}
