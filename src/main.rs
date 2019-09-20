@@ -404,6 +404,8 @@ enum ObjCType {
     ObjCObjectPointer(ObjCObjectPointer),
     ObjCTypeParam(String),
     ObjCId(ObjCId),
+    ObjCClass,
+    ObjCSel,
 }
 
 impl ObjCType {
@@ -498,6 +500,8 @@ impl ObjCType {
                 protocols: Vec::new(),
                 nullability: Nullability::Unspecified,
             }),
+            TypeKind::ObjCSel => ObjCType::ObjCSel,
+            TypeKind::ObjCClass => ObjCType::ObjCClass,
             TypeKind::Typedef => ObjCType::Typedef {
                 name: ty.get_display_name(),
                 canonical: Box::new(ObjCType::from(&ty.get_canonical_type())),
@@ -775,10 +779,7 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<ObjCDecl>, ParseError> 
 
 fn main() {
     let source = "
-        typedef int I;
-        @interface A
-        - (I)foo;
-        @end
+        #import <AVFoundation/AVFoundation.h>
     ";
     let clang = Clang::new().expect("Could not load libclang");
     let decls = parse_objc(&clang, source).unwrap();
