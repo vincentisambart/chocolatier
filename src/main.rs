@@ -371,6 +371,7 @@ enum ObjCType {
     Double,
     Pointer(Box<ObjCType>, Nullability),
     ObjCObjectPointer(ObjCObjectPointer),
+    ObjCTypeParam(String),
 }
 
 impl ObjCType {
@@ -444,6 +445,7 @@ impl ObjCType {
                     modified
                 }
             }
+            TypeKind::ObjCTypeParam => ObjCType::ObjCTypeParam(ty.get_display_name()),
             unknown_kind => panic!("Unhandled type kind {:?}", unknown_kind),
         }
     }
@@ -509,6 +511,7 @@ impl ObjCMethod {
 struct ObjCInterface {
     name: String,
     superclass: Option<String>,
+    template_params: Vec<String>,
     methods: Vec<ObjCMethod>,
 }
 
@@ -521,6 +524,11 @@ impl ObjCInterface {
             .iter()
             .find(|child| child.get_kind() == EntityKind::ObjCSuperClassRef)
             .map(|child| child.get_name().unwrap());
+        let template_params = children
+            .iter()
+            .filter(|child| child.get_kind() == EntityKind::TemplateTypeParameter)
+            .map(|child| child.get_name().unwrap())
+            .collect();
         let methods = children
             .iter()
             .filter(|child| {
@@ -535,6 +543,7 @@ impl ObjCInterface {
         ObjCInterface {
             name: entity.get_name().unwrap(),
             superclass,
+            template_params,
             methods,
         }
     }
@@ -623,10 +632,10 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<ObjCDecl>, ParseError> 
 
 fn main() {
     let source = "
-        // #import <Foundation/NSArray.h>
         @interface A
         @end
-        @interface B: A
+        @interface B<X, Y, Z>: A
+        - (X)x;
         @end
     ";
     let clang = Clang::new().expect("Could not load libclang");
@@ -655,6 +664,7 @@ mod tests {
         let expected_decls = vec![ObjCDecl::ObjCInterface(ObjCInterface {
             name: "A".to_string(),
             superclass: None,
+            template_params: vec![],
             methods: vec![
                 ObjCMethod {
                     name: "foo:".to_string(),
@@ -725,11 +735,13 @@ mod tests {
             ObjCDecl::ObjCInterface(ObjCInterface {
                 name: "A".to_string(),
                 superclass: None,
+                template_params: vec![],
                 methods: vec![],
             }),
             ObjCDecl::ObjCInterface(ObjCInterface {
                 name: "B".to_string(),
                 superclass: Some("A".to_string()),
+                template_params: vec![],
                 methods: vec![],
             }),
         ];
@@ -738,6 +750,41 @@ mod tests {
         assert_eq!(parsed_decls, expected_decls);
     }
 
+    #[test]
+    fn test_template_params() {
+        let clang = Clang::new().expect("Could not load libclang");
+
+        let source = "
+            @interface A
+            @end
+            @interface B<X, Y, Z>: A
+            - (X)x;
+            @end
+        ";
+
+        let expected_decls = vec![
+            ObjCDecl::ObjCInterface(ObjCInterface {
+                name: "A".to_string(),
+                superclass: None,
+                template_params: vec![],
+                methods: vec![],
+            }),
+            ObjCDecl::ObjCInterface(ObjCInterface {
+                name: "B".to_string(),
+                superclass: Some("A".to_string()),
+                template_params: vec!["X".to_string(), "Y".to_string(), "Z".to_string()],
+                methods: vec![ObjCMethod {
+                    name: "x".to_string(),
+                    kind: ObjCMethodKind::Instance,
+                    arguments: vec![],
+                    result_type: ObjCType::ObjCTypeParam("X".to_string()),
+                }],
+            }),
+        ];
+
+        let parsed_decls = parse_objc(&clang, source).unwrap();
+        assert_eq!(parsed_decls, expected_decls);
+    }
     #[test]
     fn test_guess_origin() {
         assert_eq!(guess_origin(""), Origin::Unknown);
