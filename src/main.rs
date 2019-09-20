@@ -4,13 +4,11 @@ use clang::{Clang, EntityKind};
 
 // TODO: Try to get:
 // - class and method OS version annotations
-// - categories
 // - annotations for Swift
 // - consume/retained/not retained
 // - properties
 // - template parameters
 // - exception throwing info (maybe from annotations from Swift)
-// - protocol optional methods
 
 #[derive(Debug, PartialEq)]
 enum Origin {
@@ -528,6 +526,7 @@ impl ObjCInterface {
     fn from(entity: &clang::Entity) -> ObjCInterface {
         assert!(entity.get_kind() == EntityKind::ObjCInterfaceDecl);
         let children = entity.get_children();
+
         let superclass = children
             .iter()
             .find(|child| child.get_kind() == EntityKind::ObjCSuperClassRef)
@@ -558,6 +557,51 @@ impl ObjCInterface {
             superclass,
             adopted_protocols,
             template_params,
+            methods,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+struct ObjCCategory {
+    name: String,
+    class: String,
+    adopted_protocols: Vec<String>,
+    methods: Vec<ObjCMethod>,
+}
+
+impl ObjCCategory {
+    fn from(entity: &clang::Entity) -> ObjCCategory {
+        assert!(entity.get_kind() == EntityKind::ObjCCategoryDecl);
+        let children = entity.get_children();
+
+        let class = children
+            .iter()
+            .find(|child| child.get_kind() == EntityKind::ObjCClassRef)
+            .unwrap()
+            .get_name()
+            .unwrap();
+
+        let adopted_protocols = children
+            .iter()
+            .filter(|child| child.get_kind() == EntityKind::ObjCProtocolRef)
+            .map(|child| child.get_name().unwrap())
+            .collect();
+        let methods = children
+            .iter()
+            .filter(|child| {
+                [
+                    EntityKind::ObjCInstanceMethodDecl,
+                    EntityKind::ObjCClassMethodDecl,
+                ]
+                .contains(&child.get_kind())
+            })
+            .map(|child| ObjCMethod::from(child))
+            .collect();
+        ObjCCategory {
+            name: entity.get_name().unwrap(),
+            class,
+            adopted_protocols,
             methods,
         }
     }
@@ -614,6 +658,7 @@ impl ObjCProtocol {
 enum ObjCDecl {
     ObjCProtocol(ObjCProtocol),
     ObjCInterface(ObjCInterface),
+    ObjCCategory(ObjCCategory),
 }
 
 #[derive(Debug)]
@@ -671,6 +716,9 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<ObjCDecl>, ParseError> 
             EntityKind::ObjCProtocolDecl => {
                 objc_decls.push(ObjCDecl::ObjCProtocol(ObjCProtocol::from(&entity)));
             }
+            EntityKind::ObjCCategoryDecl => {
+                objc_decls.push(ObjCDecl::ObjCCategory(ObjCCategory::from(&entity)));
+            }
             _ => {}
         }
     }
@@ -679,16 +727,11 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<ObjCDecl>, ParseError> 
 
 fn main() {
     let source = "
-        @protocol B, C;
-        @protocol D
+        @protocol P;
+        @interface A
         @end
-        @protocol A<D>
-        - (void)x;
-        @optional
-        + (void)y;
-        + (int)z;
-        @end
-        @interface I<A>
+        @interface A (Categ) <P>
+        - (void)foo;
         @end
     ";
     let clang = Clang::new().expect("Could not load libclang");
@@ -898,6 +941,44 @@ mod tests {
                         is_optional: true,
                     },
                 ],
+            }),
+        ];
+
+        let parsed_decls = parse_objc(&clang, source).unwrap();
+        assert_eq!(parsed_decls, expected_decls);
+    }
+
+    #[test]
+    fn test_category() {
+        let clang = Clang::new().expect("Could not load libclang");
+
+        let source = "
+            @protocol P;
+            @interface A
+            @end
+            @interface A (Categ) <P>
+            - (void)foo;
+            @end
+        ";
+
+        let expected_decls = vec![
+            ObjCDecl::ObjCInterface(ObjCInterface {
+                name: "A".to_string(),
+                superclass: None,
+                adopted_protocols: vec![],
+                template_params: vec![],
+                methods: vec![],
+            }),
+            ObjCDecl::ObjCCategory(ObjCCategory {
+                name: "Categ".to_string(),
+                class: "A".to_string(),
+                adopted_protocols: vec!["P".to_string()],
+                methods: vec![ObjCMethod {
+                    name: "foo".to_string(),
+                    kind: ObjCMethodKind::Instance,
+                    arguments: vec![],
+                    result_type: ObjCType::Void,
+                }],
             }),
         ];
 
