@@ -9,6 +9,7 @@ use clang::{Clang, EntityKind};
 // - properties
 // - exception throwing info (maybe from annotations from Swift)
 // - support parsing code for different platforms (iOS, macOS, ...)
+// - alignment, packing (and make sure the size and offset of each item is the same for clang and Rust as bindgen does)
 
 #[derive(Debug, PartialEq)]
 enum Origin {
@@ -392,7 +393,14 @@ enum ObjCType {
     ULongLong,
     Float,
     Double,
-    Pointer(Box<ObjCType>, Nullability),
+    Typedef {
+        name: String,
+        canonical: Box<ObjCType>,
+    },
+    Pointer {
+        pointee: Box<ObjCType>,
+        nullability: Nullability,
+    },
     ObjCObjectPointer(ObjCObjectPointer),
     ObjCTypeParam(String),
     ObjCId(ObjCId),
@@ -419,10 +427,10 @@ impl ObjCType {
             TypeKind::Double => ObjCType::Double,
             TypeKind::Pointer => {
                 let pointee_type = ty.get_pointee_type().unwrap();
-                ObjCType::Pointer(
-                    Box::new(ObjCType::from(&pointee_type)),
-                    Nullability::Unspecified,
-                )
+                ObjCType::Pointer {
+                    pointee: Box::new(ObjCType::from(&pointee_type)),
+                    nullability: Nullability::Unspecified,
+                }
             }
             TypeKind::ObjCObjectPointer => {
                 let pointee_type = ty.get_pointee_type().unwrap();
@@ -468,7 +476,13 @@ impl ObjCType {
                 if let Some(nullability) = ty.get_nullability() {
                     let nullability = Nullability::from(nullability);
                     match modified {
-                        ObjCType::Pointer(pointee, _) => ObjCType::Pointer(pointee, nullability),
+                        ObjCType::Pointer {
+                            pointee,
+                            nullability: _,
+                        } => ObjCType::Pointer {
+                            pointee,
+                            nullability,
+                        },
                         ObjCType::ObjCObjectPointer(pointer) => {
                             ObjCType::ObjCObjectPointer(pointer.with_nullability(nullability))
                         }
@@ -484,7 +498,11 @@ impl ObjCType {
                 protocols: Vec::new(),
                 nullability: Nullability::Unspecified,
             }),
-            unknown_kind => panic!("Unhandled type kind {:?}", unknown_kind),
+            TypeKind::Typedef => ObjCType::Typedef {
+                name: ty.get_display_name(),
+                canonical: Box::new(ObjCType::from(&ty.get_canonical_type())),
+            },
+            unknown_kind => panic!("Unhandled type kind {:?}: {:?}", unknown_kind, ty),
         }
     }
 }
@@ -757,12 +775,9 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<ObjCDecl>, ParseError> 
 
 fn main() {
     let source = "
-        // #import <AVFoundation/AVFoundation.h>
-        @protocol P;
+        typedef int I;
         @interface A
-        - (id)x;
-        - (id<P>)y;
-        - (id<P> _Nonnull)z;
+        - (I)foo;
         @end
     ";
     let clang = Clang::new().expect("Could not load libclang");
@@ -773,6 +788,31 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_guess_origin() {
+        assert_eq!(guess_origin(""), Origin::Unknown);
+        assert_eq!(
+            guess_origin("/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.13.sdk/System/Library/Frameworks/Foundation.framework/Headers/NSValue.h"),
+            Origin::Framework("Foundation".to_owned()),
+        );
+        assert_eq!(
+            guess_origin("/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.13.sdk/System/Library/Frameworks/Metal.framework/Headers/MTLCaptureManager.h"),
+            Origin::Framework("Metal".to_owned()),
+        );
+        assert_eq!(
+            guess_origin("/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.13.sdk/usr/include/objc/NSObject.h"),
+            Origin::ObjCCore,
+        );
+        assert_eq!(
+            guess_origin("/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.13.sdk/usr/include/dispatch/object.h"),
+            Origin::Library("dispatch".to_owned()),
+        );
+        assert_eq!(
+            guess_origin("/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.13.sdk/usr/include/dispatch/queue.h"),
+            Origin::Library("dispatch".to_owned()),
+        );
+    }
 
     #[test]
     fn test_parameter_adopting_protocols() {
@@ -1067,27 +1107,33 @@ mod tests {
     }
 
     #[test]
-    fn test_guess_origin() {
-        assert_eq!(guess_origin(""), Origin::Unknown);
-        assert_eq!(
-            guess_origin("/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.13.sdk/System/Library/Frameworks/Foundation.framework/Headers/NSValue.h"),
-            Origin::Framework("Foundation".to_owned()),
-        );
-        assert_eq!(
-            guess_origin("/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.13.sdk/System/Library/Frameworks/Metal.framework/Headers/MTLCaptureManager.h"),
-            Origin::Framework("Metal".to_owned()),
-        );
-        assert_eq!(
-            guess_origin("/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.13.sdk/usr/include/objc/NSObject.h"),
-            Origin::ObjCCore,
-        );
-        assert_eq!(
-            guess_origin("/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.13.sdk/usr/include/dispatch/object.h"),
-            Origin::Library("dispatch".to_owned()),
-        );
-        assert_eq!(
-            guess_origin("/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.13.sdk/usr/include/dispatch/queue.h"),
-            Origin::Library("dispatch".to_owned()),
-        );
+    fn test_typedef() {
+        let clang = Clang::new().expect("Could not load libclang");
+
+        let source = "
+            typedef int I;
+            @interface A
+            - (I)foo;
+            @end
+        ";
+
+        let expected_decls = vec![ObjCDecl::ObjCInterface(ObjCInterface {
+            name: "A".to_string(),
+            superclass: None,
+            adopted_protocols: vec![],
+            template_params: vec![],
+            methods: vec![ObjCMethod {
+                name: "foo".to_string(),
+                kind: ObjCMethodKind::Instance,
+                arguments: vec![],
+                result_type: ObjCType::Typedef {
+                    name: "I".to_string(),
+                    canonical: Box::new(ObjCType::Int),
+                },
+            }],
+        })];
+
+        let parsed_decls = parse_objc(&clang, source).unwrap();
+        assert_eq!(parsed_decls, expected_decls);
     }
 }
