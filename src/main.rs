@@ -7,8 +7,8 @@ use clang::{Clang, EntityKind};
 // - annotations for Swift
 // - consume/retained/not retained
 // - properties
-// - template parameters
 // - exception throwing info (maybe from annotations from Swift)
+// - support parsing code for different platforms (iOS, macOS, ...)
 
 #[derive(Debug, PartialEq)]
 enum Origin {
@@ -363,6 +363,21 @@ impl ObjCObjectPointer {
 }
 
 #[derive(Debug, PartialEq)]
+struct ObjCId {
+    protocols: Vec<String>,
+    nullability: Nullability,
+}
+
+impl ObjCId {
+    fn with_nullability(self, nullability: Nullability) -> ObjCId {
+        ObjCId {
+            protocols: self.protocols,
+            nullability,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
 enum ObjCType {
     Void,
     SChar,
@@ -380,6 +395,7 @@ enum ObjCType {
     Pointer(Box<ObjCType>, Nullability),
     ObjCObjectPointer(ObjCObjectPointer),
     ObjCTypeParam(String),
+    ObjCId(ObjCId),
 }
 
 impl ObjCType {
@@ -419,7 +435,7 @@ impl ObjCType {
                     })
                     .collect();
 
-                let type_arguments = pointee_type
+                let type_arguments: Vec<ObjCObjectPointer> = pointee_type
                     .get_objc_type_arguments()
                     .iter()
                     .map(|ty| match ObjCType::from(ty) {
@@ -428,25 +444,35 @@ impl ObjCType {
                     })
                     .collect();
 
-                ObjCType::ObjCObjectPointer(ObjCObjectPointer {
-                    interface_name: pointee_type
-                        .get_objc_object_base_type()
-                        .unwrap()
-                        .get_display_name(),
-                    protocols,
-                    type_arguments,
-                    nullability: Nullability::Unspecified,
-                })
+                let base_type = pointee_type.get_objc_object_base_type().unwrap();
+
+                if base_type.get_kind() == TypeKind::ObjCId {
+                    assert!(type_arguments.is_empty());
+                    assert!(base_type.get_display_name() == "id");
+                    // TODO: nullability
+                    return ObjCType::ObjCId(ObjCId {
+                        protocols,
+                        nullability: Nullability::Unspecified,
+                    });
+                } else {
+                    ObjCType::ObjCObjectPointer(ObjCObjectPointer {
+                        interface_name: base_type.get_display_name(),
+                        protocols,
+                        type_arguments,
+                        nullability: Nullability::Unspecified,
+                    })
+                }
             }
             TypeKind::Attributed => {
                 let modified = ObjCType::from(&ty.get_modified_type().unwrap());
                 if let Some(nullability) = ty.get_nullability() {
                     let nullability = Nullability::from(nullability);
                     match modified {
+                        ObjCType::Pointer(pointee, _) => ObjCType::Pointer(pointee, nullability),
                         ObjCType::ObjCObjectPointer(pointer) => {
                             ObjCType::ObjCObjectPointer(pointer.with_nullability(nullability))
                         }
-                        ObjCType::Pointer(pointee, _) => ObjCType::Pointer(pointee, nullability),
+                        ObjCType::ObjCId(id) => ObjCType::ObjCId(id.with_nullability(nullability)),
                         _ => modified,
                     }
                 } else {
@@ -454,6 +480,10 @@ impl ObjCType {
                 }
             }
             TypeKind::ObjCTypeParam => ObjCType::ObjCTypeParam(ty.get_display_name()),
+            TypeKind::ObjCId => ObjCType::ObjCId(ObjCId {
+                protocols: Vec::new(),
+                nullability: Nullability::Unspecified,
+            }),
             unknown_kind => panic!("Unhandled type kind {:?}", unknown_kind),
         }
     }
@@ -727,11 +757,12 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<ObjCDecl>, ParseError> 
 
 fn main() {
     let source = "
+        // #import <AVFoundation/AVFoundation.h>
         @protocol P;
         @interface A
-        @end
-        @interface A (Categ) <P>
-        - (void)foo;
+        - (id)x;
+        - (id<P>)y;
+        - (id<P> _Nonnull)z;
         @end
     ";
     let clang = Clang::new().expect("Could not load libclang");
@@ -768,10 +799,8 @@ mod tests {
                     kind: ObjCMethodKind::Instance,
                     arguments: vec![ObjCArg {
                         name: Option::Some("x".to_string()),
-                        objc_type: ObjCType::ObjCObjectPointer(ObjCObjectPointer {
-                            interface_name: "id".to_string(),
+                        objc_type: ObjCType::ObjCId(ObjCId {
                             protocols: vec!["P1".to_string(), "P2".to_string()],
-                            type_arguments: vec![],
                             nullability: Nullability::Unspecified,
                         }),
                     }],
@@ -803,10 +832,8 @@ mod tests {
                             nullability: Nullability::Unspecified,
                         }),
                     }],
-                    result_type: ObjCType::ObjCObjectPointer(ObjCObjectPointer {
-                        interface_name: "id".to_string(),
+                    result_type: ObjCType::ObjCId(ObjCId {
                         protocols: vec!["P1".to_string(), "P2".to_string()],
-                        type_arguments: vec![],
                         nullability: Nullability::Unspecified,
                     }),
                 },
@@ -981,6 +1008,59 @@ mod tests {
                 }],
             }),
         ];
+
+        let parsed_decls = parse_objc(&clang, source).unwrap();
+        assert_eq!(parsed_decls, expected_decls);
+    }
+
+    #[test]
+    fn test_id() {
+        let clang = Clang::new().expect("Could not load libclang");
+
+        let source = "
+            @protocol P;
+            @interface A
+            - (id)x;
+            - (id<P>)y;
+            - (id<P> _Nonnull)z;
+            @end
+        ";
+
+        let expected_decls = vec![ObjCDecl::ObjCInterface(ObjCInterface {
+            name: "A".to_string(),
+            superclass: None,
+            adopted_protocols: vec![],
+            template_params: vec![],
+            methods: vec![
+                ObjCMethod {
+                    name: "x".to_string(),
+                    kind: ObjCMethodKind::Instance,
+                    arguments: vec![],
+                    result_type: ObjCType::ObjCId(ObjCId {
+                        protocols: vec![],
+                        nullability: Nullability::Unspecified,
+                    }),
+                },
+                ObjCMethod {
+                    name: "y".to_string(),
+                    kind: ObjCMethodKind::Instance,
+                    arguments: vec![],
+                    result_type: ObjCType::ObjCId(ObjCId {
+                        protocols: vec!["P".to_string()],
+                        nullability: Nullability::Unspecified,
+                    }),
+                },
+                ObjCMethod {
+                    name: "z".to_string(),
+                    kind: ObjCMethodKind::Instance,
+                    arguments: vec![],
+                    result_type: ObjCType::ObjCId(ObjCId {
+                        protocols: vec!["P".to_string()],
+                        nullability: Nullability::NonNull,
+                    }),
+                },
+            ],
+        })];
 
         let parsed_decls = parse_objc(&clang, source).unwrap();
         assert_eq!(parsed_decls, expected_decls);
