@@ -2,6 +2,16 @@
 
 use clang::Clang;
 
+// TODO: Try to get:
+// - class and method OS version annotations
+// - categories
+// - annotations for Swift
+// - consume/retained/not retained
+// - properties
+// - template parameters
+// - exception throwing info (maybe from annotations from Swift)
+// - protocol optional methods
+
 #[derive(Debug, PartialEq)]
 enum Origin {
     ObjCCore,
@@ -96,7 +106,7 @@ fn show_type(desc: &str, clang_type: &clang::Type, indent_level: usize) {
         .collect::<Vec<&str>>()
         .concat();
 
-    println!("{}{} type: {:?}", indent, desc, clang_type);
+    println!("{}{}: {:?}", indent, desc, clang_type);
 
     if let Some(argument_types) = clang_type.get_argument_types() {
         if !argument_types.is_empty() {
@@ -114,6 +124,10 @@ fn show_type(desc: &str, clang_type: &clang::Type, indent_level: usize) {
 
     if let Some(nullability) = clang_type.get_nullability() {
         println!("{}{} nullability: {:?}", indent, desc, nullability);
+    }
+
+    if let Some(class_type) = clang_type.get_class_type() {
+        println!("{}{} class type: {:?}", indent, desc, class_type);
     }
 
     let objc_protocol_declarations = clang_type.get_objc_protocol_declarations();
@@ -139,6 +153,13 @@ fn show_type(desc: &str, clang_type: &clang::Type, indent_level: usize) {
     if let Some(modified_type) = clang_type.get_modified_type() {
         let modified_desc = format!("{} modified", desc);
         show_type(&modified_desc, &modified_type, indent_level);
+    }
+
+    if let Some(template_argument_types) = clang_type.get_template_argument_types() {
+        println!(
+            "{}{} template argument type: {:?}",
+            indent, desc, template_argument_types
+        );
     }
 }
 
@@ -256,6 +277,21 @@ fn show_tree(entity: &clang::Entity, indent_level: usize) {
     if let Some(objc_attributes) = entity.get_objc_attributes() {
         println!("{}objc attributes: {:?}", indent, objc_attributes);
     }
+
+    // Seems to crash...
+    // if let Some(objc_receiver_type) = entity.get_objc_receiver_type() {
+    //     println!("{}objc receiver type: {:?}", indent, objc_receiver_type);
+    // }
+
+    // Getting a "pointer being freed was not allocated" when trying to use it...
+    // if let Some(platform_availability) = entity.get_platform_availability() {
+    //     if !platform_availability.is_empty() {
+    //         println!(
+    //             "{}platform availability: {:?}",
+    //             indent, platform_availability
+    //         );
+    //     }
+    // }
 
     if let Some(reference) = entity.get_reference() {
         println!("{}reference: {:?}", indent, reference);
@@ -472,6 +508,7 @@ impl ObjCMethod {
 #[derive(Debug, PartialEq)]
 struct ObjCInterface {
     name: String,
+    superclass: Option<String>,
     methods: Vec<ObjCMethod>,
 }
 
@@ -479,8 +516,12 @@ impl ObjCInterface {
     fn from(entity: &clang::Entity) -> ObjCInterface {
         use clang::EntityKind;
         assert!(entity.get_kind() == EntityKind::ObjCInterfaceDecl);
-        let methods = entity
-            .get_children()
+        let children = entity.get_children();
+        let superclass = children
+            .iter()
+            .find(|child| child.get_kind() == EntityKind::ObjCSuperClassRef)
+            .map(|child| child.get_name().unwrap());
+        let methods = children
             .iter()
             .filter(|child| {
                 [
@@ -493,6 +534,7 @@ impl ObjCInterface {
             .collect();
         ObjCInterface {
             name: entity.get_name().unwrap(),
+            superclass,
             methods,
         }
     }
@@ -545,7 +587,7 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<ObjCDecl>, ParseError> 
         &sdk_path(AppleSdk::MacOs),
     ]);
     parser.skip_function_bodies(true);
-    parser.include_attributed_types(true);
+    parser.include_attributed_types(true); // Needed to get nullability
     parser.visit_implicit_attributes(true); // TODO: Check if needed
     parser.unsaved(&[clang::Unsaved::new(file.path(), source)]);
     let tu = parser.parse()?;
@@ -583,8 +625,8 @@ fn main() {
     let source = "
         // #import <Foundation/NSArray.h>
         @interface A
-        - (void)foo:(int *)x;
-        - (A * _Nullable)bar;
+        @end
+        @interface B: A
         @end
     ";
     let clang = Clang::new().expect("Could not load libclang");
@@ -612,6 +654,7 @@ mod tests {
 
         let expected_decls = vec![ObjCDecl::ObjCInterface(ObjCInterface {
             name: "A".to_string(),
+            superclass: None,
             methods: vec![
                 ObjCMethod {
                     name: "foo:".to_string(),
@@ -657,11 +700,39 @@ mod tests {
                         interface_name: "id".to_string(),
                         protocols: vec!["P1".to_string(), "P2".to_string()],
                         type_arguments: vec![],
-                            nullability: Nullability::Unspecified,
+                        nullability: Nullability::Unspecified,
                     }),
                 },
             ],
         })];
+
+        let parsed_decls = parse_objc(&clang, source).unwrap();
+        assert_eq!(parsed_decls, expected_decls);
+    }
+
+    #[test]
+    fn test_superclass() {
+        let clang = Clang::new().expect("Could not load libclang");
+
+        let source = "
+            @interface A
+            @end
+            @interface B: A
+            @end
+        ";
+
+        let expected_decls = vec![
+            ObjCDecl::ObjCInterface(ObjCInterface {
+                name: "A".to_string(),
+                superclass: None,
+                methods: vec![],
+            }),
+            ObjCDecl::ObjCInterface(ObjCInterface {
+                name: "B".to_string(),
+                superclass: Some("A".to_string()),
+                methods: vec![],
+            }),
+        ];
 
         let parsed_decls = parse_objc(&clang, source).unwrap();
         assert_eq!(parsed_decls, expected_decls);
