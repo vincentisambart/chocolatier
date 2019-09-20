@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use clang::Clang;
+use clang::{Clang, EntityKind};
 
 // TODO: Try to get:
 // - class and method OS version annotations
@@ -178,6 +178,16 @@ fn show_tree(entity: &clang::Entity, indent_level: usize) {
         if let Some(display_name) = entity.get_display_name() {
             println!("{}display name: {:?}", indent, display_name);
         }
+    }
+
+    if [
+        EntityKind::ObjCInstanceMethodDecl,
+        EntityKind::ObjCClassMethodDecl,
+        EntityKind::ObjCPropertyDecl,
+    ]
+    .contains(&entity.get_kind())
+    {
+        println!("{}objc optional: {:?}", indent, entity.is_objc_optional());
     }
 
     // if let Some(location) = entity.get_location() {
@@ -376,7 +386,7 @@ enum ObjCType {
 
 impl ObjCType {
     fn from(ty: &clang::Type) -> ObjCType {
-        use clang::{EntityKind, TypeKind};
+        use clang::TypeKind;
         match ty.get_kind() {
             TypeKind::Void => ObjCType::Void,
             // SChar is "signed char", CharS is "char" when it is signed by default.
@@ -482,8 +492,6 @@ struct ObjCMethod {
 
 impl ObjCMethod {
     fn from(entity: &clang::Entity) -> ObjCMethod {
-        use clang::EntityKind;
-
         let kind = match entity.get_kind() {
             EntityKind::ObjCClassMethodDecl => ObjCMethodKind::Class,
             EntityKind::ObjCInstanceMethodDecl => ObjCMethodKind::Instance,
@@ -511,19 +519,24 @@ impl ObjCMethod {
 struct ObjCInterface {
     name: String,
     superclass: Option<String>,
+    adopted_protocols: Vec<String>,
     template_params: Vec<String>,
     methods: Vec<ObjCMethod>,
 }
 
 impl ObjCInterface {
     fn from(entity: &clang::Entity) -> ObjCInterface {
-        use clang::EntityKind;
         assert!(entity.get_kind() == EntityKind::ObjCInterfaceDecl);
         let children = entity.get_children();
         let superclass = children
             .iter()
             .find(|child| child.get_kind() == EntityKind::ObjCSuperClassRef)
             .map(|child| child.get_name().unwrap());
+        let adopted_protocols = children
+            .iter()
+            .filter(|child| child.get_kind() == EntityKind::ObjCProtocolRef)
+            .map(|child| child.get_name().unwrap())
+            .collect();
         let template_params = children
             .iter()
             .filter(|child| child.get_kind() == EntityKind::TemplateTypeParameter)
@@ -543,6 +556,7 @@ impl ObjCInterface {
         ObjCInterface {
             name: entity.get_name().unwrap(),
             superclass,
+            adopted_protocols,
             template_params,
             methods,
         }
@@ -550,15 +564,48 @@ impl ObjCInterface {
 }
 
 #[derive(Debug, PartialEq)]
+struct ObjCProtocolMethod {
+    method: ObjCMethod,
+    is_optional: bool,
+}
+
+#[derive(Debug, PartialEq)]
 struct ObjCProtocol {
     name: String,
+    inherited_protocols: Vec<String>,
+    methods: Vec<ObjCProtocolMethod>,
 }
 
 impl ObjCProtocol {
     fn from(entity: &clang::Entity) -> ObjCProtocol {
-        assert!(entity.get_kind() == clang::EntityKind::ObjCProtocolDecl);
+        assert!(entity.get_kind() == EntityKind::ObjCProtocolDecl);
+        let children = entity.get_children();
+
+        let inherited_protocols = children
+            .iter()
+            .filter(|child| child.get_kind() == EntityKind::ObjCProtocolRef)
+            .map(|child| child.get_name().unwrap())
+            .collect();
+
+        let methods = children
+            .iter()
+            .filter(|child| {
+                [
+                    EntityKind::ObjCInstanceMethodDecl,
+                    EntityKind::ObjCClassMethodDecl,
+                ]
+                .contains(&child.get_kind())
+            })
+            .map(|child| ObjCProtocolMethod {
+                method: ObjCMethod::from(child),
+                is_optional: child.is_objc_optional(),
+            })
+            .collect();
+
         ObjCProtocol {
             name: entity.get_name().unwrap(),
+            inherited_protocols,
+            methods,
         }
     }
 }
@@ -618,10 +665,10 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<ObjCDecl>, ParseError> 
     let mut objc_decls: Vec<ObjCDecl> = Vec::new();
     for entity in tu.get_entity().get_children() {
         match entity.get_kind() {
-            clang::EntityKind::ObjCInterfaceDecl => {
+            EntityKind::ObjCInterfaceDecl => {
                 objc_decls.push(ObjCDecl::ObjCInterface(ObjCInterface::from(&entity)));
             }
-            clang::EntityKind::ObjCProtocolDecl => {
+            EntityKind::ObjCProtocolDecl => {
                 objc_decls.push(ObjCDecl::ObjCProtocol(ObjCProtocol::from(&entity)));
             }
             _ => {}
@@ -632,10 +679,16 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<ObjCDecl>, ParseError> 
 
 fn main() {
     let source = "
-        @interface A
+        @protocol B, C;
+        @protocol D
         @end
-        @interface B<X, Y, Z>: A
-        - (X)x;
+        @protocol A<D>
+        - (void)x;
+        @optional
+        + (void)y;
+        + (int)z;
+        @end
+        @interface I<A>
         @end
     ";
     let clang = Clang::new().expect("Could not load libclang");
@@ -664,6 +717,7 @@ mod tests {
         let expected_decls = vec![ObjCDecl::ObjCInterface(ObjCInterface {
             name: "A".to_string(),
             superclass: None,
+            adopted_protocols: vec![],
             template_params: vec![],
             methods: vec![
                 ObjCMethod {
@@ -735,12 +789,14 @@ mod tests {
             ObjCDecl::ObjCInterface(ObjCInterface {
                 name: "A".to_string(),
                 superclass: None,
+                adopted_protocols: vec![],
                 template_params: vec![],
                 methods: vec![],
             }),
             ObjCDecl::ObjCInterface(ObjCInterface {
                 name: "B".to_string(),
                 superclass: Some("A".to_string()),
+                adopted_protocols: vec![],
                 template_params: vec![],
                 methods: vec![],
             }),
@@ -766,12 +822,14 @@ mod tests {
             ObjCDecl::ObjCInterface(ObjCInterface {
                 name: "A".to_string(),
                 superclass: None,
+                adopted_protocols: vec![],
                 template_params: vec![],
                 methods: vec![],
             }),
             ObjCDecl::ObjCInterface(ObjCInterface {
                 name: "B".to_string(),
                 superclass: Some("A".to_string()),
+                adopted_protocols: vec![],
                 template_params: vec!["X".to_string(), "Y".to_string(), "Z".to_string()],
                 methods: vec![ObjCMethod {
                     name: "x".to_string(),
@@ -785,6 +843,68 @@ mod tests {
         let parsed_decls = parse_objc(&clang, source).unwrap();
         assert_eq!(parsed_decls, expected_decls);
     }
+
+    #[test]
+    fn test_protocol() {
+        let clang = Clang::new().expect("Could not load libclang");
+
+        let source = "
+            @protocol B
+            @end
+            @protocol C, D;
+            @protocol A
+            - (void)x;
+            @optional
+            + (void)y;
+            - (int)z;
+            @end
+        ";
+
+        let expected_decls = vec![
+            ObjCDecl::ObjCProtocol(ObjCProtocol {
+                name: "B".to_string(),
+                inherited_protocols: vec![],
+                methods: vec![],
+            }),
+            ObjCDecl::ObjCProtocol(ObjCProtocol {
+                name: "A".to_string(),
+                inherited_protocols: vec![],
+                methods: vec![
+                    ObjCProtocolMethod {
+                        method: ObjCMethod {
+                            name: "x".to_string(),
+                            kind: ObjCMethodKind::Instance,
+                            arguments: vec![],
+                            result_type: ObjCType::Void,
+                        },
+                        is_optional: false,
+                    },
+                    ObjCProtocolMethod {
+                        method: ObjCMethod {
+                            name: "y".to_string(),
+                            kind: ObjCMethodKind::Class,
+                            arguments: vec![],
+                            result_type: ObjCType::Void,
+                        },
+                        is_optional: true,
+                    },
+                    ObjCProtocolMethod {
+                        method: ObjCMethod {
+                            name: "z".to_string(),
+                            kind: ObjCMethodKind::Instance,
+                            arguments: vec![],
+                            result_type: ObjCType::Int,
+                        },
+                        is_optional: true,
+                    },
+                ],
+            }),
+        ];
+
+        let parsed_decls = parse_objc(&clang, source).unwrap();
+        assert_eq!(parsed_decls, expected_decls);
+    }
+
     #[test]
     fn test_guess_origin() {
         assert_eq!(guess_origin(""), Origin::Unknown);
