@@ -12,6 +12,7 @@ use clang::{Clang, EntityKind};
 // - alignment, packing (and make sure the size and offset of each item is the same for clang and Rust as bindgen does)
 // - instancetype
 // - function & block pointers
+// - namespacing of ObjC exported from Swift (though that might be fine as we're calling from generated ObjC)
 
 #[derive(Debug, PartialEq)]
 enum Origin {
@@ -1214,6 +1215,128 @@ mod tests {
                     canonical: Box::new(ObjCType::Int),
                 },
             }],
+        })];
+
+        let parsed_decls = parse_objc(&clang, source).unwrap();
+        assert_eq!(parsed_decls, expected_decls);
+    }
+
+    #[test]
+    fn test_struct() {
+        let clang = Clang::new().expect("Could not load libclang");
+
+        let source = "
+            typedef struct S { int x; } T;
+            @interface A
+            - (struct S)standardStruct;
+            - (struct { float f; union { int i; double d; }; })inlineUnnamedStruct;
+            - (T *)pointerToStructTypedef;
+            - (struct Undeclared *)pointerToUndeclaredStruct;
+            - (struct DeclaredAfterwards *)pointerToStructDeclaredAfterwards;
+            @end
+            struct DeclaredAfterwards { char c; };
+        ";
+
+        let expected_decls = vec![ObjCDecl::ObjCInterface(ObjCInterface {
+            name: "A".to_string(),
+            superclass: None,
+            adopted_protocols: vec![],
+            template_params: vec![],
+            methods: vec![
+                ObjCMethod {
+                    name: "standardStruct".to_string(),
+                    kind: ObjCMethodKind::Instance,
+                    arguments: vec![],
+                    result_type: ObjCType::Record(Record {
+                        name: Some("S".to_string()),
+                        kind: RecordKind::Struct,
+                        fields: Some(vec![Field {
+                            name: Some("x".to_string()),
+                            field_type: ObjCType::Int,
+                        }]),
+                    }),
+                },
+                ObjCMethod {
+                    name: "inlineUnnamedStruct".to_string(),
+                    kind: ObjCMethodKind::Instance,
+                    arguments: vec![],
+                    result_type: ObjCType::Record(Record {
+                        name: None,
+                        kind: RecordKind::Struct,
+                        fields: Some(vec![
+                            Field {
+                                name: Some("f".to_string()),
+                                field_type: ObjCType::Float,
+                            },
+                            Field {
+                                name: None,
+                                field_type: ObjCType::Record(Record {
+                                    name: None,
+                                    kind: RecordKind::Union,
+                                    fields: Some(vec![
+                                        Field {
+                                            name: Some("i".to_string()),
+                                            field_type: ObjCType::Int,
+                                        },
+                                        Field {
+                                            name: Some("d".to_string()),
+                                            field_type: ObjCType::Double,
+                                        },
+                                    ]),
+                                }),
+                            },
+                        ]),
+                    }),
+                },
+                ObjCMethod {
+                    name: "pointerToStructTypedef".to_string(),
+                    kind: ObjCMethodKind::Instance,
+                    arguments: vec![],
+                    result_type: ObjCType::Pointer {
+                        pointee: Box::new(ObjCType::Typedef {
+                            name: "T".to_string(),
+                            canonical: Box::new(ObjCType::Record(Record {
+                                name: Some("S".to_string()),
+                                kind: RecordKind::Struct,
+                                fields: Some(vec![Field {
+                                    name: Some("x".to_string()),
+                                    field_type: ObjCType::Int,
+                                }]),
+                            })),
+                        }),
+                        nullability: Nullability::Unspecified,
+                    },
+                },
+                ObjCMethod {
+                    name: "pointerToUndeclaredStruct".to_string(),
+                    kind: ObjCMethodKind::Instance,
+                    arguments: vec![],
+                    result_type: ObjCType::Pointer {
+                        pointee: Box::new(ObjCType::Record(Record {
+                            name: Some("Undeclared".to_string()),
+                            kind: RecordKind::Struct,
+                            fields: None,
+                        })),
+                        nullability: Nullability::Unspecified,
+                    },
+                },
+                ObjCMethod {
+                    name: "pointerToStructDeclaredAfterwards".to_string(),
+                    kind: ObjCMethodKind::Instance,
+                    arguments: vec![],
+                    result_type: ObjCType::Pointer {
+                        pointee: Box::new(ObjCType::Record(Record {
+                            name: Some("DeclaredAfterwards".to_string()),
+                            kind: RecordKind::Struct,
+                            fields: Some(vec![Field {
+                                name: Some("c".to_string()),
+                                field_type: ObjCType::SChar,
+                            }]),
+                        })),
+                        nullability: Nullability::Unspecified,
+                    },
+                },
+            ],
         })];
 
         let parsed_decls = parse_objc(&clang, source).unwrap();
