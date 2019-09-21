@@ -10,6 +10,8 @@ use clang::{Clang, EntityKind};
 // - exception throwing info (maybe from annotations from Swift)
 // - support parsing code for different platforms (iOS, macOS, ...)
 // - alignment, packing (and make sure the size and offset of each item is the same for clang and Rust as bindgen does)
+// - instancetype
+// - function & block pointers
 
 #[derive(Debug, PartialEq)]
 enum Origin {
@@ -149,9 +151,18 @@ fn show_type(desc: &str, clang_type: &clang::Type, indent_level: usize) {
         show_type(&pointee_desc, &pointee_type, indent_level);
     }
 
+    if let Some(elaborated_type) = clang_type.get_elaborated_type() {
+        let pointee_desc = format!("{} elaborated type", desc);
+        show_type(&pointee_desc, &elaborated_type, indent_level);
+    }
+
     if let Some(modified_type) = clang_type.get_modified_type() {
         let modified_desc = format!("{} modified", desc);
         show_type(&modified_desc, &modified_type, indent_level);
+    }
+
+    if let Some(decl) = clang_type.get_declaration() {
+        println!("{}{} decl: {:?}", indent, desc, decl);
     }
 
     if let Some(template_argument_types) = clang_type.get_template_argument_types() {
@@ -159,6 +170,13 @@ fn show_type(desc: &str, clang_type: &clang::Type, indent_level: usize) {
             "{}{} template argument type: {:?}",
             indent, desc, template_argument_types
         );
+    }
+
+    if let Some(fields) = clang_type.get_fields() {
+        println!("{}{} fields:", indent, desc);
+        for field in fields {
+            show_tree(&field, indent_level + 1);
+        }
     }
 }
 
@@ -379,6 +397,35 @@ impl ObjCId {
 }
 
 #[derive(Debug, PartialEq)]
+struct Field {
+    name: Option<String>,
+    field_type: ObjCType,
+}
+
+impl Field {
+    fn from(entity: &clang::Entity) -> Field {
+        assert!(entity.get_kind() == EntityKind::FieldDecl);
+        Field {
+            name: entity.get_name(),
+            field_type: ObjCType::from(&entity.get_type().unwrap()),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum RecordKind {
+    Struct,
+    Union,
+}
+
+#[derive(Debug, PartialEq)]
+struct Record {
+    name: Option<String>,
+    kind: RecordKind,
+    fields: Option<Vec<Field>>,
+}
+
+#[derive(Debug, PartialEq)]
 enum ObjCType {
     Void,
     SChar,
@@ -401,6 +448,7 @@ enum ObjCType {
         pointee: Box<ObjCType>,
         nullability: Nullability,
     },
+    Record(Record),
     ObjCObjectPointer(ObjCObjectPointer),
     ObjCTypeParam(String),
     ObjCId(ObjCId),
@@ -506,6 +554,29 @@ impl ObjCType {
                 name: ty.get_display_name(),
                 canonical: Box::new(ObjCType::from(&ty.get_canonical_type())),
             },
+            TypeKind::Elaborated => Self::from(&ty.get_elaborated_type().unwrap()),
+            TypeKind::Record => {
+                let decl = ty.get_declaration().unwrap();
+                let fields = if decl.get_definition().is_some() {
+                    Some(ty.get_fields().unwrap().iter().map(Field::from).collect())
+                } else {
+                    None
+                };
+                let kind = match decl.get_kind() {
+                    EntityKind::StructDecl => RecordKind::Struct,
+                    EntityKind::UnionDecl => RecordKind::Union,
+                    unexpected_kind => panic!(
+                        "Unexpecte kind for record declaration {:?}: {:?}",
+                        unexpected_kind, ty
+                    ),
+                };
+
+                ObjCType::Record(Record {
+                    name: decl.get_name(),
+                    kind,
+                    fields,
+                })
+            }
             unknown_kind => panic!("Unhandled type kind {:?}: {:?}", unknown_kind, ty),
         }
     }
@@ -552,7 +623,7 @@ impl ObjCMethod {
             .get_arguments()
             .unwrap()
             .iter()
-            .map(|arg| ObjCArg::from(arg))
+            .map(ObjCArg::from)
             .collect();
 
         let result_type = ObjCType::from(&entity.get_result_type().unwrap());
@@ -602,7 +673,7 @@ impl ObjCInterface {
                 ]
                 .contains(&child.get_kind())
             })
-            .map(|child| ObjCMethod::from(child))
+            .map(ObjCMethod::from)
             .collect();
         ObjCInterface {
             name: entity.get_name().unwrap(),
@@ -648,7 +719,7 @@ impl ObjCCategory {
                 ]
                 .contains(&child.get_kind())
             })
-            .map(|child| ObjCMethod::from(child))
+            .map(ObjCMethod::from)
             .collect();
         ObjCCategory {
             name: entity.get_name().unwrap(),
@@ -779,7 +850,18 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<ObjCDecl>, ParseError> 
 
 fn main() {
     let source = "
-        #import <AVFoundation/AVFoundation.h>
+        // #import <AVFoundation/AVFoundation.h>
+        // typedef struct S { int x; } T;
+        // enum E { X1 };
+        // union U { int i; float f; };
+        @interface A
+        // - (struct S)a;
+        // - (struct { float f; union { int i; double d; }; })b;
+        // - (T*)c;
+        - (struct Undecl *)d;
+        - (struct LaterDecl *)e;
+        @end
+        struct LaterDecl { int i; };
     ";
     let clang = Clang::new().expect("Could not load libclang");
     let decls = parse_objc(&clang, source).unwrap();
