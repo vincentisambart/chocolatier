@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use clang::{Clang, EntityKind};
+use clang::{Clang, EntityKind, TypeKind};
 
 // TODO: Try to get:
 // - class and method OS version annotations
@@ -112,7 +112,7 @@ fn show_type(desc: &str, clang_type: &clang::Type, indent_level: usize) {
 
     if let Some(argument_types) = clang_type.get_argument_types() {
         if !argument_types.is_empty() {
-            println!("{}{} arguments types:", desc, indent);
+            println!("{}{} arguments types:", indent, desc);
             for (i, arg_type) in argument_types.iter().enumerate() {
                 let arg_desc = format!("{} argument type {}", desc, i);
                 show_type(&arg_desc, &arg_type, indent_level);
@@ -171,6 +171,11 @@ fn show_type(desc: &str, clang_type: &clang::Type, indent_level: usize) {
             "{}{} template argument type: {:?}",
             indent, desc, template_argument_types
         );
+    }
+
+    if let Some(result_type) = clang_type.get_result_type() {
+        let result_type_desc = format!("{} result type", desc);
+        show_type(&result_type_desc, &result_type, indent_level);
     }
 
     if let Some(fields) = clang_type.get_fields() {
@@ -426,6 +431,93 @@ struct Record {
     fields: Option<Vec<Field>>,
 }
 
+impl Record {
+    fn from(ty: &clang::Type) -> Record {
+        let decl = ty.get_declaration().unwrap();
+        let fields = if decl.get_definition().is_some() {
+            Some(ty.get_fields().unwrap().iter().map(Field::from).collect())
+        } else {
+            None
+        };
+        let kind = match decl.get_kind() {
+            EntityKind::StructDecl => RecordKind::Struct,
+            EntityKind::UnionDecl => RecordKind::Union,
+            unexpected_kind => panic!(
+                "Unexpected kind for record declaration {:?}: {:?}",
+                unexpected_kind, ty
+            ),
+        };
+
+        Record {
+            name: decl.get_name(),
+            kind,
+            fields,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+struct Param {
+    name: Option<String>,
+    param_type: ObjCType,
+}
+
+#[derive(Debug, PartialEq)]
+struct Function {
+    result_type: Box<ObjCType>,
+    params: Option<Vec<Param>>,
+    is_variadic: bool,
+}
+
+impl Function {
+    fn from(ty: &clang::Type) -> Function {
+        let params = match ty.get_kind() {
+            TypeKind::FunctionNoPrototype => None,
+            TypeKind::FunctionPrototype => Some(
+                ty.get_argument_types()
+                    .unwrap()
+                    .iter()
+                    .map(|arg_type| Param {
+                        name: None, // TODO
+                        param_type: ObjCType::from(arg_type),
+                    })
+                    .collect(),
+            ),
+            unexpected_kind => panic!(
+                "Unexpected kind for function declaration {:?}: {:?}",
+                unexpected_kind, ty
+            ),
+        };
+
+        Function {
+            result_type: Box::new(ObjCType::from(&ty.get_result_type().unwrap())),
+            params,
+            is_variadic: ty.is_variadic(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+struct Typedef {
+    name: String,
+    canonical: Box<ObjCType>,
+}
+
+#[derive(Debug, PartialEq)]
+struct Pointer {
+    pointee: Box<ObjCType>,
+    nullability: Nullability,
+}
+
+impl Pointer {
+    fn with_nullability(self, nullability: Nullability) -> Pointer {
+        Pointer {
+            pointee: self.pointee,
+            nullability,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq)]
 enum ObjCType {
     Void,
@@ -441,15 +533,10 @@ enum ObjCType {
     ULongLong,
     Float,
     Double,
-    Typedef {
-        name: String,
-        canonical: Box<ObjCType>,
-    },
-    Pointer {
-        pointee: Box<ObjCType>,
-        nullability: Nullability,
-    },
+    Typedef(Typedef),
+    Pointer(Pointer),
     Record(Record),
+    Function(Function),
     ObjCObjectPointer(ObjCObjectPointer),
     ObjCTypeParam(String),
     ObjCId(ObjCId),
@@ -459,7 +546,6 @@ enum ObjCType {
 
 impl ObjCType {
     fn from(ty: &clang::Type) -> ObjCType {
-        use clang::TypeKind;
         match ty.get_kind() {
             TypeKind::Void => ObjCType::Void,
             // SChar is "signed char", CharS is "char" when it is signed by default.
@@ -478,10 +564,10 @@ impl ObjCType {
             TypeKind::Double => ObjCType::Double,
             TypeKind::Pointer => {
                 let pointee_type = ty.get_pointee_type().unwrap();
-                ObjCType::Pointer {
+                ObjCType::Pointer(Pointer {
                     pointee: Box::new(ObjCType::from(&pointee_type)),
                     nullability: Nullability::Unspecified,
-                }
+                })
             }
             TypeKind::ObjCObjectPointer => {
                 let pointee_type = ty.get_pointee_type().unwrap();
@@ -527,13 +613,9 @@ impl ObjCType {
                 if let Some(nullability) = ty.get_nullability() {
                     let nullability = Nullability::from(nullability);
                     match modified {
-                        ObjCType::Pointer {
-                            pointee,
-                            nullability: _,
-                        } => ObjCType::Pointer {
-                            pointee,
-                            nullability,
-                        },
+                        ObjCType::Pointer(pointer) => {
+                            ObjCType::Pointer(pointer.with_nullability(nullability))
+                        }
                         ObjCType::ObjCObjectPointer(pointer) => {
                             ObjCType::ObjCObjectPointer(pointer.with_nullability(nullability))
                         }
@@ -551,32 +633,14 @@ impl ObjCType {
             }),
             TypeKind::ObjCSel => ObjCType::ObjCSel,
             TypeKind::ObjCClass => ObjCType::ObjCClass,
-            TypeKind::Typedef => ObjCType::Typedef {
+            TypeKind::Typedef => ObjCType::Typedef(Typedef {
                 name: ty.get_display_name(),
                 canonical: Box::new(ObjCType::from(&ty.get_canonical_type())),
-            },
+            }),
             TypeKind::Elaborated => Self::from(&ty.get_elaborated_type().unwrap()),
-            TypeKind::Record => {
-                let decl = ty.get_declaration().unwrap();
-                let fields = if decl.get_definition().is_some() {
-                    Some(ty.get_fields().unwrap().iter().map(Field::from).collect())
-                } else {
-                    None
-                };
-                let kind = match decl.get_kind() {
-                    EntityKind::StructDecl => RecordKind::Struct,
-                    EntityKind::UnionDecl => RecordKind::Union,
-                    unexpected_kind => panic!(
-                        "Unexpecte kind for record declaration {:?}: {:?}",
-                        unexpected_kind, ty
-                    ),
-                };
-
-                ObjCType::Record(Record {
-                    name: decl.get_name(),
-                    kind,
-                    fields,
-                })
+            TypeKind::Record => ObjCType::Record(Record::from(&ty)),
+            TypeKind::FunctionNoPrototype | TypeKind::FunctionPrototype => {
+                ObjCType::Function(Function::from(&ty))
             }
             unknown_kind => panic!("Unhandled type kind {:?}: {:?}", unknown_kind, ty),
         }
@@ -585,14 +649,15 @@ impl ObjCType {
 
 #[derive(Debug, PartialEq)]
 struct ObjCArg {
-    name: Option<String>,
+    name: String,
     objc_type: ObjCType,
 }
 
 impl ObjCArg {
     fn from(entity: &clang::Entity) -> ObjCArg {
+        assert!(entity.get_kind() == EntityKind::ParmDecl);
         ObjCArg {
-            name: entity.get_name(),
+            name: entity.get_name().unwrap(),
             objc_type: ObjCType::from(&entity.get_type().unwrap()),
         }
     }
@@ -853,16 +918,14 @@ fn main() {
     let source = "
         // #import <AVFoundation/AVFoundation.h>
         // typedef struct S { int x; } T;
-        // enum E { X1 };
-        // union U { int i; float f; };
+        typedef void (*poo)(int iop);
         @interface A
-        // - (struct S)a;
-        // - (struct { float f; union { int i; double d; }; })b;
-        // - (T*)c;
-        - (struct Undecl *)d;
-        - (struct LaterDecl *)e;
+        // - (A *(*)())a;
+        // - (A *(*)(int qwe))b;
+        - (poo)hoge;
+        // - (A *(*)(int i))c;
+        // - (A *(*)(int i, ...))d;
         @end
-        struct LaterDecl { int i; };
     ";
     let clang = Clang::new().expect("Could not load libclang");
     let decls = parse_objc(&clang, source).unwrap();
@@ -922,7 +985,7 @@ mod tests {
                     name: "foo:".to_string(),
                     kind: ObjCMethodKind::Instance,
                     arguments: vec![ObjCArg {
-                        name: Option::Some("x".to_string()),
+                        name: "x".to_string(),
                         objc_type: ObjCType::ObjCId(ObjCId {
                             protocols: vec!["P1".to_string(), "P2".to_string()],
                             nullability: Nullability::Unspecified,
@@ -934,7 +997,7 @@ mod tests {
                     name: "bar:".to_string(),
                     kind: ObjCMethodKind::Class,
                     arguments: vec![ObjCArg {
-                        name: Option::Some("y".to_string()),
+                        name: "y".to_string(),
                         objc_type: ObjCType::ObjCObjectPointer(ObjCObjectPointer {
                             interface_name: "B".to_string(),
                             protocols: vec!["P2".to_string()],
@@ -948,7 +1011,7 @@ mod tests {
                     name: "foobar:".to_string(),
                     kind: ObjCMethodKind::Instance,
                     arguments: vec![ObjCArg {
-                        name: Option::Some("z".to_string()),
+                        name: "z".to_string(),
                         objc_type: ObjCType::ObjCObjectPointer(ObjCObjectPointer {
                             interface_name: "B".to_string(),
                             protocols: vec!["P2".to_string()],
@@ -1210,10 +1273,10 @@ mod tests {
                 name: "foo".to_string(),
                 kind: ObjCMethodKind::Instance,
                 arguments: vec![],
-                result_type: ObjCType::Typedef {
+                result_type: ObjCType::Typedef(Typedef {
                     name: "I".to_string(),
                     canonical: Box::new(ObjCType::Int),
-                },
+                }),
             }],
         })];
 
@@ -1292,8 +1355,8 @@ mod tests {
                     name: "pointerToStructTypedef".to_string(),
                     kind: ObjCMethodKind::Instance,
                     arguments: vec![],
-                    result_type: ObjCType::Pointer {
-                        pointee: Box::new(ObjCType::Typedef {
+                    result_type: ObjCType::Pointer(Pointer {
+                        pointee: Box::new(ObjCType::Typedef(Typedef {
                             name: "T".to_string(),
                             canonical: Box::new(ObjCType::Record(Record {
                                 name: Some("S".to_string()),
@@ -1303,28 +1366,28 @@ mod tests {
                                     field_type: ObjCType::Int,
                                 }]),
                             })),
-                        }),
+                        })),
                         nullability: Nullability::Unspecified,
-                    },
+                    }),
                 },
                 ObjCMethod {
                     name: "pointerToUndeclaredStruct".to_string(),
                     kind: ObjCMethodKind::Instance,
                     arguments: vec![],
-                    result_type: ObjCType::Pointer {
+                    result_type: ObjCType::Pointer(Pointer {
                         pointee: Box::new(ObjCType::Record(Record {
                             name: Some("Undeclared".to_string()),
                             kind: RecordKind::Struct,
                             fields: None,
                         })),
                         nullability: Nullability::Unspecified,
-                    },
+                    }),
                 },
                 ObjCMethod {
                     name: "pointerToStructDeclaredAfterwards".to_string(),
                     kind: ObjCMethodKind::Instance,
                     arguments: vec![],
-                    result_type: ObjCType::Pointer {
+                    result_type: ObjCType::Pointer(Pointer {
                         pointee: Box::new(ObjCType::Record(Record {
                             name: Some("DeclaredAfterwards".to_string()),
                             kind: RecordKind::Struct,
@@ -1334,7 +1397,7 @@ mod tests {
                             }]),
                         })),
                         nullability: Nullability::Unspecified,
-                    },
+                    }),
                 },
             ],
         })];
