@@ -370,18 +370,18 @@ impl Nullability {
 
 #[derive(Debug, PartialEq)]
 struct ObjCObjectPointer {
-    interface_name: String,
+    interface: String,
     protocols: Vec<String>,
-    type_arguments: Vec<ObjCObjectPointer>,
+    type_args: Vec<ObjCObjectPointer>,
     nullability: Nullability,
 }
 
 impl ObjCObjectPointer {
     fn with_nullability(self, nullability: Nullability) -> ObjCObjectPointer {
         ObjCObjectPointer {
-            interface_name: self.interface_name,
+            interface: self.interface,
             protocols: self.protocols,
-            type_arguments: self.type_arguments,
+            type_args: self.type_args,
             nullability,
         }
     }
@@ -405,7 +405,7 @@ impl ObjCId {
 #[derive(Debug, PartialEq)]
 struct Field {
     name: Option<String>,
-    field_type: ObjCType,
+    objc_type: ObjCType,
 }
 
 impl Field {
@@ -413,7 +413,7 @@ impl Field {
         assert!(entity.get_kind() == EntityKind::FieldDecl);
         Field {
             name: entity.get_name(),
-            field_type: ObjCType::from(&entity.get_type().unwrap()),
+            objc_type: ObjCType::from(&entity.get_type().unwrap()),
         }
     }
 }
@@ -459,40 +459,41 @@ impl Record {
 #[derive(Debug, PartialEq)]
 struct Param {
     name: Option<String>,
-    param_type: ObjCType,
+    objc_type: ObjCType,
 }
 
 #[derive(Debug, PartialEq)]
 struct Function {
-    result_type: Box<ObjCType>,
+    result: Box<ObjCType>,
     params: Option<Vec<Param>>,
     is_variadic: bool,
 }
 
 impl Function {
-    fn from(ty: &clang::Type) -> Function {
-        let params = match ty.get_kind() {
+    fn from(clang_type: &clang::Type) -> Function {
+        let params = match clang_type.get_kind() {
             TypeKind::FunctionNoPrototype => None,
             TypeKind::FunctionPrototype => Some(
-                ty.get_argument_types()
+                clang_type
+                    .get_argument_types()
                     .unwrap()
                     .iter()
                     .map(|arg_type| Param {
                         name: None, // TODO
-                        param_type: ObjCType::from(arg_type),
+                        objc_type: ObjCType::from(arg_type),
                     })
                     .collect(),
             ),
             unexpected_kind => panic!(
                 "Unexpected kind for function declaration {:?}: {:?}",
-                unexpected_kind, ty
+                unexpected_kind, clang_type
             ),
         };
 
         Function {
-            result_type: Box::new(ObjCType::from(&ty.get_result_type().unwrap())),
+            result: Box::new(ObjCType::from(&clang_type.get_result_type().unwrap())),
             params,
-            is_variadic: ty.is_variadic(),
+            is_variadic: clang_type.is_variadic(),
         }
     }
 }
@@ -545,8 +546,8 @@ enum ObjCType {
 }
 
 impl ObjCType {
-    fn from(ty: &clang::Type) -> ObjCType {
-        match ty.get_kind() {
+    fn from(clang_type: &clang::Type) -> ObjCType {
+        match clang_type.get_kind() {
             TypeKind::Void => ObjCType::Void,
             // SChar is "signed char", CharS is "char" when it is signed by default.
             TypeKind::SChar | TypeKind::CharS => ObjCType::SChar,
@@ -563,14 +564,14 @@ impl ObjCType {
             TypeKind::Float => ObjCType::Float,
             TypeKind::Double => ObjCType::Double,
             TypeKind::Pointer => {
-                let pointee_type = ty.get_pointee_type().unwrap();
+                let pointee_type = clang_type.get_pointee_type().unwrap();
                 ObjCType::Pointer(Pointer {
                     pointee: Box::new(ObjCType::from(&pointee_type)),
                     nullability: Nullability::Unspecified,
                 })
             }
             TypeKind::ObjCObjectPointer => {
-                let pointee_type = ty.get_pointee_type().unwrap();
+                let pointee_type = clang_type.get_pointee_type().unwrap();
                 let protocols = pointee_type
                     .get_objc_protocol_declarations()
                     .iter()
@@ -580,7 +581,7 @@ impl ObjCType {
                     })
                     .collect();
 
-                let type_arguments: Vec<ObjCObjectPointer> = pointee_type
+                let type_args: Vec<ObjCObjectPointer> = pointee_type
                     .get_objc_type_arguments()
                     .iter()
                     .map(|ty| match ObjCType::from(ty) {
@@ -592,25 +593,24 @@ impl ObjCType {
                 let base_type = pointee_type.get_objc_object_base_type().unwrap();
 
                 if base_type.get_kind() == TypeKind::ObjCId {
-                    assert!(type_arguments.is_empty());
+                    assert!(type_args.is_empty());
                     assert!(base_type.get_display_name() == "id");
-                    // TODO: nullability
                     return ObjCType::ObjCId(ObjCId {
                         protocols,
                         nullability: Nullability::Unspecified,
                     });
                 } else {
                     ObjCType::ObjCObjectPointer(ObjCObjectPointer {
-                        interface_name: base_type.get_display_name(),
+                        interface: base_type.get_display_name(),
                         protocols,
-                        type_arguments,
+                        type_args,
                         nullability: Nullability::Unspecified,
                     })
                 }
             }
             TypeKind::Attributed => {
-                let modified = ObjCType::from(&ty.get_modified_type().unwrap());
-                if let Some(nullability) = ty.get_nullability() {
+                let modified = ObjCType::from(&clang_type.get_modified_type().unwrap());
+                if let Some(nullability) = clang_type.get_nullability() {
                     let nullability = Nullability::from(nullability);
                     match modified {
                         ObjCType::Pointer(pointer) => {
@@ -626,7 +626,7 @@ impl ObjCType {
                     modified
                 }
             }
-            TypeKind::ObjCTypeParam => ObjCType::ObjCTypeParam(ty.get_display_name()),
+            TypeKind::ObjCTypeParam => ObjCType::ObjCTypeParam(clang_type.get_display_name()),
             TypeKind::ObjCId => ObjCType::ObjCId(ObjCId {
                 protocols: Vec::new(),
                 nullability: Nullability::Unspecified,
@@ -634,29 +634,29 @@ impl ObjCType {
             TypeKind::ObjCSel => ObjCType::ObjCSel,
             TypeKind::ObjCClass => ObjCType::ObjCClass,
             TypeKind::Typedef => ObjCType::Typedef(Typedef {
-                name: ty.get_display_name(),
-                canonical: Box::new(ObjCType::from(&ty.get_canonical_type())),
+                name: clang_type.get_display_name(),
+                canonical: Box::new(ObjCType::from(&clang_type.get_canonical_type())),
             }),
-            TypeKind::Elaborated => Self::from(&ty.get_elaborated_type().unwrap()),
-            TypeKind::Record => ObjCType::Record(Record::from(&ty)),
+            TypeKind::Elaborated => Self::from(&clang_type.get_elaborated_type().unwrap()),
+            TypeKind::Record => ObjCType::Record(Record::from(&clang_type)),
             TypeKind::FunctionNoPrototype | TypeKind::FunctionPrototype => {
-                ObjCType::Function(Function::from(&ty))
+                ObjCType::Function(Function::from(&clang_type))
             }
-            unknown_kind => panic!("Unhandled type kind {:?}: {:?}", unknown_kind, ty),
+            unknown_kind => panic!("Unhandled type kind {:?}: {:?}", unknown_kind, clang_type),
         }
     }
 }
 
 #[derive(Debug, PartialEq)]
-struct ObjCArg {
+struct ObjCParam {
     name: String,
     objc_type: ObjCType,
 }
 
-impl ObjCArg {
-    fn from(entity: &clang::Entity) -> ObjCArg {
+impl ObjCParam {
+    fn from(entity: &clang::Entity) -> ObjCParam {
         assert!(entity.get_kind() == EntityKind::ParmDecl);
-        ObjCArg {
+        ObjCParam {
             name: entity.get_name().unwrap(),
             objc_type: ObjCType::from(&entity.get_type().unwrap()),
         }
@@ -673,8 +673,8 @@ enum ObjCMethodKind {
 struct ObjCMethod {
     name: String,
     kind: ObjCMethodKind,
-    arguments: Vec<ObjCArg>,
-    result_type: ObjCType,
+    params: Vec<ObjCParam>,
+    result: ObjCType,
 }
 
 impl ObjCMethod {
@@ -685,19 +685,19 @@ impl ObjCMethod {
             _ => panic!("entity should be either a class or instance method"),
         };
 
-        let arguments = entity
+        let params = entity
             .get_arguments()
             .unwrap()
             .iter()
-            .map(ObjCArg::from)
+            .map(ObjCParam::from)
             .collect();
 
-        let result_type = ObjCType::from(&entity.get_result_type().unwrap());
+        let result = ObjCType::from(&entity.get_result_type().unwrap());
         ObjCMethod {
             name: entity.get_name().unwrap(),
             kind,
-            arguments,
-            result_type,
+            params,
+            result,
         }
     }
 }
@@ -918,11 +918,11 @@ fn main() {
     let source = "
         // #import <AVFoundation/AVFoundation.h>
         // typedef struct S { int x; } T;
-        typedef void (*poo)(int iop);
+        // typedef void (*poo)(int iop);
         @interface A
         // - (A *(*)())a;
-        // - (A *(*)(int qwe))b;
-        - (poo)hoge;
+        - (A *(^)(int qwe))b;
+        // - (poo)hoge;
         // - (A *(*)(int i))c;
         // - (A *(*)(int i, ...))d;
         @end
@@ -984,42 +984,42 @@ mod tests {
                 ObjCMethod {
                     name: "foo:".to_string(),
                     kind: ObjCMethodKind::Instance,
-                    arguments: vec![ObjCArg {
+                    params: vec![ObjCParam {
                         name: "x".to_string(),
                         objc_type: ObjCType::ObjCId(ObjCId {
                             protocols: vec!["P1".to_string(), "P2".to_string()],
                             nullability: Nullability::Unspecified,
                         }),
                     }],
-                    result_type: ObjCType::Void,
+                    result: ObjCType::Void,
                 },
                 ObjCMethod {
                     name: "bar:".to_string(),
                     kind: ObjCMethodKind::Class,
-                    arguments: vec![ObjCArg {
+                    params: vec![ObjCParam {
                         name: "y".to_string(),
                         objc_type: ObjCType::ObjCObjectPointer(ObjCObjectPointer {
-                            interface_name: "B".to_string(),
+                            interface: "B".to_string(),
                             protocols: vec!["P2".to_string()],
-                            type_arguments: vec![],
+                            type_args: vec![],
                             nullability: Nullability::NonNull,
                         }),
                     }],
-                    result_type: ObjCType::Void,
+                    result: ObjCType::Void,
                 },
                 ObjCMethod {
                     name: "foobar:".to_string(),
                     kind: ObjCMethodKind::Instance,
-                    arguments: vec![ObjCArg {
+                    params: vec![ObjCParam {
                         name: "z".to_string(),
                         objc_type: ObjCType::ObjCObjectPointer(ObjCObjectPointer {
-                            interface_name: "B".to_string(),
+                            interface: "B".to_string(),
                             protocols: vec!["P2".to_string()],
-                            type_arguments: vec![],
+                            type_args: vec![],
                             nullability: Nullability::Unspecified,
                         }),
                     }],
-                    result_type: ObjCType::ObjCId(ObjCId {
+                    result: ObjCType::ObjCId(ObjCId {
                         protocols: vec!["P1".to_string(), "P2".to_string()],
                         nullability: Nullability::Unspecified,
                     }),
@@ -1091,8 +1091,8 @@ mod tests {
                 methods: vec![ObjCMethod {
                     name: "x".to_string(),
                     kind: ObjCMethodKind::Instance,
-                    arguments: vec![],
-                    result_type: ObjCType::ObjCTypeParam("X".to_string()),
+                    params: vec![],
+                    result: ObjCType::ObjCTypeParam("X".to_string()),
                 }],
             }),
         ];
@@ -1131,8 +1131,8 @@ mod tests {
                         method: ObjCMethod {
                             name: "x".to_string(),
                             kind: ObjCMethodKind::Instance,
-                            arguments: vec![],
-                            result_type: ObjCType::Void,
+                            params: vec![],
+                            result: ObjCType::Void,
                         },
                         is_optional: false,
                     },
@@ -1140,8 +1140,8 @@ mod tests {
                         method: ObjCMethod {
                             name: "y".to_string(),
                             kind: ObjCMethodKind::Class,
-                            arguments: vec![],
-                            result_type: ObjCType::Void,
+                            params: vec![],
+                            result: ObjCType::Void,
                         },
                         is_optional: true,
                     },
@@ -1149,8 +1149,8 @@ mod tests {
                         method: ObjCMethod {
                             name: "z".to_string(),
                             kind: ObjCMethodKind::Instance,
-                            arguments: vec![],
-                            result_type: ObjCType::Int,
+                            params: vec![],
+                            result: ObjCType::Int,
                         },
                         is_optional: true,
                     },
@@ -1190,8 +1190,8 @@ mod tests {
                 methods: vec![ObjCMethod {
                     name: "foo".to_string(),
                     kind: ObjCMethodKind::Instance,
-                    arguments: vec![],
-                    result_type: ObjCType::Void,
+                    params: vec![],
+                    result: ObjCType::Void,
                 }],
             }),
         ];
@@ -1222,8 +1222,8 @@ mod tests {
                 ObjCMethod {
                     name: "x".to_string(),
                     kind: ObjCMethodKind::Instance,
-                    arguments: vec![],
-                    result_type: ObjCType::ObjCId(ObjCId {
+                    params: vec![],
+                    result: ObjCType::ObjCId(ObjCId {
                         protocols: vec![],
                         nullability: Nullability::Unspecified,
                     }),
@@ -1231,8 +1231,8 @@ mod tests {
                 ObjCMethod {
                     name: "y".to_string(),
                     kind: ObjCMethodKind::Instance,
-                    arguments: vec![],
-                    result_type: ObjCType::ObjCId(ObjCId {
+                    params: vec![],
+                    result: ObjCType::ObjCId(ObjCId {
                         protocols: vec!["P".to_string()],
                         nullability: Nullability::Unspecified,
                     }),
@@ -1240,8 +1240,8 @@ mod tests {
                 ObjCMethod {
                     name: "z".to_string(),
                     kind: ObjCMethodKind::Instance,
-                    arguments: vec![],
-                    result_type: ObjCType::ObjCId(ObjCId {
+                    params: vec![],
+                    result: ObjCType::ObjCId(ObjCId {
                         protocols: vec!["P".to_string()],
                         nullability: Nullability::NonNull,
                     }),
@@ -1272,8 +1272,8 @@ mod tests {
             methods: vec![ObjCMethod {
                 name: "foo".to_string(),
                 kind: ObjCMethodKind::Instance,
-                arguments: vec![],
-                result_type: ObjCType::Typedef(Typedef {
+                params: vec![],
+                result: ObjCType::Typedef(Typedef {
                     name: "I".to_string(),
                     canonical: Box::new(ObjCType::Int),
                 }),
@@ -1309,41 +1309,41 @@ mod tests {
                 ObjCMethod {
                     name: "standardStruct".to_string(),
                     kind: ObjCMethodKind::Instance,
-                    arguments: vec![],
-                    result_type: ObjCType::Record(Record {
+                    params: vec![],
+                    result: ObjCType::Record(Record {
                         name: Some("S".to_string()),
                         kind: RecordKind::Struct,
                         fields: Some(vec![Field {
                             name: Some("x".to_string()),
-                            field_type: ObjCType::Int,
+                            objc_type: ObjCType::Int,
                         }]),
                     }),
                 },
                 ObjCMethod {
                     name: "inlineUnnamedStruct".to_string(),
                     kind: ObjCMethodKind::Instance,
-                    arguments: vec![],
-                    result_type: ObjCType::Record(Record {
+                    params: vec![],
+                    result: ObjCType::Record(Record {
                         name: None,
                         kind: RecordKind::Struct,
                         fields: Some(vec![
                             Field {
                                 name: Some("f".to_string()),
-                                field_type: ObjCType::Float,
+                                objc_type: ObjCType::Float,
                             },
                             Field {
                                 name: None,
-                                field_type: ObjCType::Record(Record {
+                                objc_type: ObjCType::Record(Record {
                                     name: None,
                                     kind: RecordKind::Union,
                                     fields: Some(vec![
                                         Field {
                                             name: Some("i".to_string()),
-                                            field_type: ObjCType::Int,
+                                            objc_type: ObjCType::Int,
                                         },
                                         Field {
                                             name: Some("d".to_string()),
-                                            field_type: ObjCType::Double,
+                                            objc_type: ObjCType::Double,
                                         },
                                     ]),
                                 }),
@@ -1354,8 +1354,8 @@ mod tests {
                 ObjCMethod {
                     name: "pointerToStructTypedef".to_string(),
                     kind: ObjCMethodKind::Instance,
-                    arguments: vec![],
-                    result_type: ObjCType::Pointer(Pointer {
+                    params: vec![],
+                    result: ObjCType::Pointer(Pointer {
                         pointee: Box::new(ObjCType::Typedef(Typedef {
                             name: "T".to_string(),
                             canonical: Box::new(ObjCType::Record(Record {
@@ -1363,7 +1363,7 @@ mod tests {
                                 kind: RecordKind::Struct,
                                 fields: Some(vec![Field {
                                     name: Some("x".to_string()),
-                                    field_type: ObjCType::Int,
+                                    objc_type: ObjCType::Int,
                                 }]),
                             })),
                         })),
@@ -1373,8 +1373,8 @@ mod tests {
                 ObjCMethod {
                     name: "pointerToUndeclaredStruct".to_string(),
                     kind: ObjCMethodKind::Instance,
-                    arguments: vec![],
-                    result_type: ObjCType::Pointer(Pointer {
+                    params: vec![],
+                    result: ObjCType::Pointer(Pointer {
                         pointee: Box::new(ObjCType::Record(Record {
                             name: Some("Undeclared".to_string()),
                             kind: RecordKind::Struct,
@@ -1386,14 +1386,14 @@ mod tests {
                 ObjCMethod {
                     name: "pointerToStructDeclaredAfterwards".to_string(),
                     kind: ObjCMethodKind::Instance,
-                    arguments: vec![],
-                    result_type: ObjCType::Pointer(Pointer {
+                    params: vec![],
+                    result: ObjCType::Pointer(Pointer {
                         pointee: Box::new(ObjCType::Record(Record {
                             name: Some("DeclaredAfterwards".to_string()),
                             kind: RecordKind::Struct,
                             fields: Some(vec![Field {
                                 name: Some("c".to_string()),
-                                field_type: ObjCType::SChar,
+                                objc_type: ObjCType::SChar,
                             }]),
                         })),
                         nullability: Nullability::Unspecified,
