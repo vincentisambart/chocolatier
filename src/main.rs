@@ -273,6 +273,10 @@ fn show_tree(entity: &clang::Entity, indent_level: usize) {
         show_type("type", &clang_type, indent_level);
     }
 
+    if let Some(enum_underlying_type) = entity.get_enum_underlying_type() {
+        show_type("enum underlying type", &enum_underlying_type, indent_level);
+    }
+
     if let Some(typedef_underlying_type) = entity.get_typedef_underlying_type() {
         show_type(
             "typedef underlying type",
@@ -593,9 +597,15 @@ struct Array {
 }
 
 #[derive(Debug, PartialEq)]
+enum SignedOrNotInt {
+    Signed(i64),
+    Unsigned(u64),
+}
+
+#[derive(Debug, PartialEq)]
 struct EnumValue {
     name: String,
-    value: i64, // TODO: Should be either signed or unsigned depending of underlying type
+    value: SignedOrNotInt,
 }
 
 #[derive(Debug, PartialEq)]
@@ -608,24 +618,36 @@ struct Enum {
 impl Enum {
     fn from(clang_type: &clang::Type) -> Self {
         let decl = clang_type.get_declaration().unwrap();
+
+        let underlying = decl.get_enum_underlying_type().map(|underlying| {
+            Box::new(ObjCType::from(&underlying, &mut parm_decl_children(&decl)))
+        });
+
         let values = if decl.get_definition().is_some() {
+            let underlying = underlying.as_ref().unwrap();
+            let signedness = underlying
+                .signedness()
+                .expect("The underlying type of an enum should have a signedness");
             Some(
                 decl.get_children()
                     .into_iter()
                     .filter(|child| child.get_kind() == EntityKind::EnumConstantDecl)
-                    .map(|decl| EnumValue {
-                        name: decl.get_name().unwrap(),
-                        value: decl.get_enum_constant_value().unwrap().0,
+                    .map(|decl| {
+                        let values = decl.get_enum_constant_value().unwrap();
+
+                        EnumValue {
+                            name: decl.get_name().unwrap(),
+                            value: match signedness {
+                                Signedness::Signed => SignedOrNotInt::Signed(values.0),
+                                Signedness::Unsigned => SignedOrNotInt::Unsigned(values.1),
+                            },
+                        }
                     })
                     .collect(),
             )
         } else {
             None
         };
-
-        let underlying = decl.get_enum_underlying_type().map(|underlying| {
-            Box::new(ObjCType::from(&underlying, &mut parm_decl_children(&decl)))
-        });
 
         Enum {
             name: decl.get_name(),
@@ -639,6 +661,12 @@ impl Enum {
 enum ObjCTypeArg {
     ObjCObjectPointer(ObjCObjectPointer),
     ObjCTypeParam(String),
+}
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+enum Signedness {
+    Signed,
+    Unsigned,
 }
 
 #[derive(Debug, PartialEq)]
@@ -803,6 +831,24 @@ impl ObjCType {
             }),
             TypeKind::Enum => ObjCType::Enum(Enum::from(&clang_type)),
             unknown_kind => panic!("Unhandled type kind {:?}: {:?}", unknown_kind, clang_type),
+        }
+    }
+
+    fn signedness(&self) -> Option<Signedness> {
+        match self {
+            Self::SChar => Some(Signedness::Signed),
+            Self::UChar => Some(Signedness::Unsigned),
+            Self::Short => Some(Signedness::Signed),
+            Self::UShort => Some(Signedness::Unsigned),
+            Self::Int => Some(Signedness::Signed),
+            Self::UInt => Some(Signedness::Unsigned),
+            Self::Long => Some(Signedness::Signed),
+            Self::ULong => Some(Signedness::Unsigned),
+            Self::LongLong => Some(Signedness::Signed),
+            Self::ULongLong => Some(Signedness::Unsigned),
+            Self::Float => Some(Signedness::Signed),
+            Self::Double => Some(Signedness::Signed),
+            _ => None,
         }
     }
 }
@@ -1080,9 +1126,10 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<ObjCDecl>, ParseError> 
 fn main() {
     let source = "
         // #import <AVFoundation/AVFoundation.h>
-        struct ll { struct ll *next; };
+        // struct ll { struct ll *next; };
         @interface I
-        - (struct ll)foo;
+        // - (struct ll)foo;
+        - (enum { V1 = -10000000000, V2 })bar;
         @end
     ";
     let clang = Clang::new().expect("Could not load libclang");
