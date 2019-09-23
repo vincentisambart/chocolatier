@@ -924,6 +924,24 @@ impl ObjCMethod {
     }
 }
 
+fn is_generated_from_property(method_entity: &clang::Entity) -> bool {
+    assert!([
+        EntityKind::ObjCInstanceMethodDecl,
+        EntityKind::ObjCClassMethodDecl,
+    ]
+    .contains(&method_entity.get_kind()));
+    let parent = method_entity.get_semantic_parent().unwrap();
+    assert!(
+        [EntityKind::ObjCInterfaceDecl, EntityKind::ObjCProtocolDecl].contains(&parent.get_kind())
+    );
+    let method_location = method_entity.get_location().unwrap();
+    parent
+        .get_children()
+        .into_iter()
+        .filter(|sibling| sibling.get_kind() == EntityKind::ObjCPropertyDecl)
+        .any(|sibling| sibling.get_location().unwrap() == method_location)
+}
+
 #[derive(Debug, PartialEq)]
 struct ObjCInterface {
     name: String,
@@ -961,6 +979,9 @@ impl ObjCInterface {
                 ]
                 .contains(&child.get_kind())
             })
+            // Methods generated from property don't have children with the type info we want
+            // so for the time being just ignore them.
+            .filter(|child| !is_generated_from_property(child))
             .map(ObjCMethod::from)
             .collect();
         ObjCInterface {
