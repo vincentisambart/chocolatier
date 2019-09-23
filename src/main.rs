@@ -123,6 +123,11 @@ fn show_type(desc: &str, clang_type: &clang::Type, indent_level: usize) {
         println!("{}{} ObjC base type types: {:?}", indent, desc, base_type);
     }
 
+    let canonical_type = clang_type.get_canonical_type();
+    if &canonical_type != clang_type {
+        println!("{}{} canonical type: {:?}", indent, desc, canonical_type);
+    }
+
     if let Some(nullability) = clang_type.get_nullability() {
         println!("{}{} nullability: {:?}", indent, desc, nullability);
     }
@@ -659,6 +664,9 @@ impl Enum {
 enum ObjCTypeArg {
     ObjCObjectPointer(ObjCObjectPointer),
     ObjCTypeParam(String),
+    Typedef(Typedef),
+    ObjCId(ObjCId),
+    ObjCClass(Nullability),
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -744,6 +752,9 @@ impl ObjCType {
                                 ObjCTypeArg::ObjCObjectPointer(pointer)
                             }
                             ObjCType::ObjCTypeParam(name) => ObjCTypeArg::ObjCTypeParam(name),
+                            ObjCType::Typedef(typedef) => ObjCTypeArg::Typedef(typedef),
+                            ObjCType::ObjCId(id) => ObjCTypeArg::ObjCId(id),
+                            ObjCType::ObjCClass(nullability) => ObjCTypeArg::ObjCClass(nullability),
                             unexpected => panic!(
                                 "Type arguments expected not expected to be {:?}",
                                 unexpected
@@ -846,6 +857,10 @@ impl ObjCType {
             Self::ULongLong => Some(Signedness::Unsigned),
             Self::Float => Some(Signedness::Signed),
             Self::Double => Some(Signedness::Signed),
+            Self::Typedef(Typedef {
+                name: _,
+                underlying,
+            }) => underlying.signedness(),
             _ => None,
         }
     }
