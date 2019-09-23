@@ -373,7 +373,7 @@ impl Nullability {
 struct ObjCObjectPointer {
     interface: String,
     protocols: Vec<String>,
-    type_args: Vec<ObjCObjectPointer>,
+    type_args: Vec<ObjCTypeArg>,
     nullability: Nullability,
 }
 
@@ -561,6 +561,18 @@ impl Pointer {
 }
 
 #[derive(Debug, PartialEq)]
+struct Array {
+    size: Option<usize>,
+    element: Box<ObjCType>,
+}
+
+#[derive(Debug, PartialEq)]
+enum ObjCTypeArg {
+    ObjCObjectPointer(ObjCObjectPointer),
+    ObjCTypeParam(String),
+}
+
+#[derive(Debug, PartialEq)]
 enum ObjCType {
     Void,
     SChar,
@@ -584,6 +596,7 @@ enum ObjCType {
     ObjCId(ObjCId),
     ObjCClass(Nullability),
     ObjCSel(Nullability),
+    Array(Array),
 }
 
 impl ObjCType {
@@ -625,13 +638,21 @@ impl ObjCType {
                     })
                     .collect();
 
-                let type_args: Vec<ObjCObjectPointer> = pointee_type
+                println!("type: {:?}", clang_type);
+
+                let type_args: Vec<ObjCTypeArg> = pointee_type
                     .get_objc_type_arguments()
                     .iter()
-                    .map(|ty| match ObjCType::from(ty, &mut Vec::new().into_iter()) {
-                        ObjCType::ObjCObjectPointer(pointer) => pointer,
-                        _ => panic!("Type arguments should only be ObjC object pointers"),
-                    })
+                    .map(|arg|
+                        match ObjCType::from(arg, &mut Vec::new().into_iter()) {
+                            ObjCType::ObjCObjectPointer(pointer) => ObjCTypeArg::ObjCObjectPointer(pointer),
+                            ObjCType::ObjCTypeParam(name) => ObjCTypeArg::ObjCTypeParam(name),
+                            unexpected => panic!(
+                                "Type arguments expected tobe ObjC object pointers or type parameters, not {:?}",
+                                unexpected
+                            ),
+                        }
+                    )
                     .collect();
 
                 let base_type = pointee_type.get_objc_object_base_type().unwrap();
@@ -688,6 +709,20 @@ impl ObjCType {
             TypeKind::FunctionNoPrototype | TypeKind::FunctionPrototype => {
                 ObjCType::Function(Function::from(&clang_type, base_parm_decls))
             }
+            TypeKind::ConstantArray => ObjCType::Array(Array {
+                size: Some(clang_type.get_size().unwrap()),
+                element: Box::new(ObjCType::from(
+                    &clang_type.get_element_type().unwrap(),
+                    base_parm_decls,
+                )),
+            }),
+            TypeKind::IncompleteArray => ObjCType::Array(Array {
+                size: None,
+                element: Box::new(ObjCType::from(
+                    &clang_type.get_element_type().unwrap(),
+                    base_parm_decls,
+                )),
+            }),
             unknown_kind => panic!("Unhandled type kind {:?}: {:?}", unknown_kind, clang_type),
         }
     }
@@ -965,7 +1000,11 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<ObjCDecl>, ParseError> 
 
 fn main() {
     let source = "
-        #import <objc/NSObject.h>
+        #import <AVFoundation/AVFoundation.h>
+        // typedef long array_t[5];
+        // @interface A
+        // - (void)takingArray:(array_t)array;
+        // @end
     ";
     let clang = Clang::new().expect("Could not load libclang");
     let decls = parse_objc(&clang, source).unwrap();
