@@ -440,10 +440,17 @@ struct Record {
 }
 
 impl Record {
-    fn from(ty: &clang::Type) -> Self {
-        let decl = ty.get_declaration().unwrap();
+    fn from(clang_type: &clang::Type) -> Self {
+        let decl = clang_type.get_declaration().unwrap();
         let fields = if decl.get_definition().is_some() {
-            Some(ty.get_fields().unwrap().iter().map(Field::from).collect())
+            Some(
+                clang_type
+                    .get_fields()
+                    .unwrap()
+                    .iter()
+                    .map(Field::from)
+                    .collect(),
+            )
         } else {
             None
         };
@@ -452,7 +459,7 @@ impl Record {
             EntityKind::UnionDecl => RecordKind::Union,
             unexpected_kind => panic!(
                 "Unexpected kind for record declaration {:?}: {:?}",
-                unexpected_kind, ty
+                unexpected_kind, clang_type
             ),
         };
 
@@ -567,6 +574,49 @@ struct Array {
 }
 
 #[derive(Debug, PartialEq)]
+struct EnumValue {
+    name: String,
+    value: i64, // TODO: Should be either signed or unsigned depending of underlying type
+}
+
+#[derive(Debug, PartialEq)]
+struct Enum {
+    name: Option<String>,
+    underlying: Option<Box<ObjCType>>,
+    values: Option<Vec<EnumValue>>,
+}
+
+impl Enum {
+    fn from(clang_type: &clang::Type) -> Self {
+        let decl = clang_type.get_declaration().unwrap();
+        let values = if decl.get_definition().is_some() {
+            Some(
+                decl.get_children()
+                    .into_iter()
+                    .filter(|child| child.get_kind() == EntityKind::EnumConstantDecl)
+                    .map(|decl| EnumValue {
+                        name: decl.get_name().unwrap(),
+                        value: decl.get_enum_constant_value().unwrap().0,
+                    })
+                    .collect(),
+            )
+        } else {
+            None
+        };
+
+        let underlying = decl.get_enum_underlying_type().map(|underlying| {
+            Box::new(ObjCType::from(&underlying, &mut parm_decl_children(&decl)))
+        });
+
+        Enum {
+            name: decl.get_name(),
+            underlying,
+            values,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
 enum ObjCTypeArg {
     ObjCObjectPointer(ObjCObjectPointer),
     ObjCTypeParam(String),
@@ -597,6 +647,7 @@ enum ObjCType {
     ObjCClass(Nullability),
     ObjCSel(Nullability),
     Array(Array),
+    Enum(Enum),
 }
 
 impl ObjCType {
@@ -638,20 +689,20 @@ impl ObjCType {
                     })
                     .collect();
 
-                println!("type: {:?}", clang_type);
-
                 let type_args: Vec<ObjCTypeArg> = pointee_type
                     .get_objc_type_arguments()
                     .iter()
-                    .map(|arg|
-                        match ObjCType::from(arg, &mut Vec::new().into_iter()) {
-                            ObjCType::ObjCObjectPointer(pointer) => ObjCTypeArg::ObjCObjectPointer(pointer),
+                    .map(
+                        |arg| match ObjCType::from(arg, &mut Vec::new().into_iter()) {
+                            ObjCType::ObjCObjectPointer(pointer) => {
+                                ObjCTypeArg::ObjCObjectPointer(pointer)
+                            }
                             ObjCType::ObjCTypeParam(name) => ObjCTypeArg::ObjCTypeParam(name),
                             unexpected => panic!(
-                                "Type arguments expected tobe ObjC object pointers or type parameters, not {:?}",
+                                "Type arguments expected not expected to be {:?}",
                                 unexpected
                             ),
-                        }
+                        },
                     )
                     .collect();
 
@@ -723,6 +774,7 @@ impl ObjCType {
                     base_parm_decls,
                 )),
             }),
+            TypeKind::Enum => ObjCType::Enum(Enum::from(&clang_type)),
             unknown_kind => panic!("Unhandled type kind {:?}: {:?}", unknown_kind, clang_type),
         }
     }
@@ -1001,10 +1053,6 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<ObjCDecl>, ParseError> 
 fn main() {
     let source = "
         #import <AVFoundation/AVFoundation.h>
-        // typedef long array_t[5];
-        // @interface A
-        // - (void)takingArray:(array_t)array;
-        // @end
     ";
     let clang = Clang::new().expect("Could not load libclang");
     let decls = parse_objc(&clang, source).unwrap();
