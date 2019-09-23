@@ -11,9 +11,7 @@ use clang::{Clang, EntityKind, TypeKind};
 // - support parsing code for different platforms (iOS, macOS, ...)
 // - alignment, packing (and make sure the size and offset of each item is the same for clang and Rust as bindgen does)
 // - instancetype
-// - block pointers
 // - namespacing of ObjC exported from Swift (though that might be fine as we're calling from generated ObjC)
-// - arrays
 
 #[derive(Debug, PartialEq)]
 enum Origin {
