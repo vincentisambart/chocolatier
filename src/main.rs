@@ -378,7 +378,7 @@ struct ObjCObjectPointer {
 }
 
 impl ObjCObjectPointer {
-    fn with_nullability(self, nullability: Nullability) -> ObjCObjectPointer {
+    fn with_nullability(self, nullability: Nullability) -> Self {
         ObjCObjectPointer {
             interface: self.interface,
             protocols: self.protocols,
@@ -395,7 +395,7 @@ struct ObjCId {
 }
 
 impl ObjCId {
-    fn with_nullability(self, nullability: Nullability) -> ObjCId {
+    fn with_nullability(self, nullability: Nullability) -> Self {
         ObjCId {
             protocols: self.protocols,
             nullability,
@@ -478,13 +478,13 @@ struct Param {
 }
 
 #[derive(Debug, PartialEq)]
-struct Function {
+struct Callable {
     result: Box<ObjCType>,
     params: Option<Vec<Param>>,
     is_variadic: bool,
 }
 
-impl Function {
+impl Callable {
     fn from<'a>(
         clang_type: &clang::Type,
         base_parm_decls: &mut impl Iterator<Item = clang::Entity<'a>>,
@@ -524,7 +524,7 @@ impl Function {
             ),
         };
 
-        Function {
+        Callable {
             result,
             params,
             is_variadic: clang_type.is_variadic(),
@@ -559,8 +559,23 @@ struct Pointer {
 }
 
 impl Pointer {
-    fn with_nullability(self, nullability: Nullability) -> Pointer {
+    fn with_nullability(self, nullability: Nullability) -> Self {
         Pointer {
+            pointee: self.pointee,
+            nullability,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+struct BlockPointer {
+    pointee: Callable,
+    nullability: Nullability,
+}
+
+impl BlockPointer {
+    fn with_nullability(self, nullability: Nullability) -> Self {
+        BlockPointer {
             pointee: self.pointee,
             nullability,
         }
@@ -640,7 +655,8 @@ enum ObjCType {
     Typedef(Typedef),
     Pointer(Pointer),
     Record(Record),
-    Function(Function),
+    Function(Callable),
+    BlockPointer(BlockPointer),
     ObjCObjectPointer(ObjCObjectPointer),
     ObjCTypeParam(String),
     ObjCId(ObjCId),
@@ -736,6 +752,9 @@ impl ObjCType {
                         ObjCType::ObjCObjectPointer(pointer) => {
                             ObjCType::ObjCObjectPointer(pointer.with_nullability(nullability))
                         }
+                        ObjCType::BlockPointer(pointer) => {
+                            ObjCType::BlockPointer(pointer.with_nullability(nullability))
+                        }
                         ObjCType::ObjCId(id) => ObjCType::ObjCId(id.with_nullability(nullability)),
                         ObjCType::ObjCSel(_) => ObjCType::ObjCSel(nullability),
                         ObjCType::ObjCClass(_) => ObjCType::ObjCClass(nullability),
@@ -758,7 +777,7 @@ impl ObjCType {
             }
             TypeKind::Record => ObjCType::Record(Record::from(&clang_type)),
             TypeKind::FunctionNoPrototype | TypeKind::FunctionPrototype => {
-                ObjCType::Function(Function::from(&clang_type, base_parm_decls))
+                ObjCType::Function(Callable::from(&clang_type, base_parm_decls))
             }
             TypeKind::ConstantArray => ObjCType::Array(Array {
                 size: Some(clang_type.get_size().unwrap()),
@@ -773,6 +792,10 @@ impl ObjCType {
                     &clang_type.get_element_type().unwrap(),
                     base_parm_decls,
                 )),
+            }),
+            TypeKind::BlockPointer => ObjCType::BlockPointer(BlockPointer {
+                pointee: Callable::from(&clang_type.get_pointee_type().unwrap(), base_parm_decls),
+                nullability: Nullability::Unspecified,
             }),
             TypeKind::Enum => ObjCType::Enum(Enum::from(&clang_type)),
             unknown_kind => panic!("Unhandled type kind {:?}: {:?}", unknown_kind, clang_type),
@@ -1028,9 +1051,9 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<ObjCDecl>, ParseError> 
         return Err(ParseError::CompilationError(error.get_text()));
     }
 
-    // println!("--------------------------------");
-    // show_tree(&tu.get_entity(), 0);
-    // println!("--------------------------------");
+    println!("--------------------------------");
+    show_tree(&tu.get_entity(), 0);
+    println!("--------------------------------");
 
     let mut objc_decls: Vec<ObjCDecl> = Vec::new();
     for entity in tu.get_entity().get_children() {
@@ -1052,7 +1075,11 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<ObjCDecl>, ParseError> 
 
 fn main() {
     let source = "
-        #import <AVFoundation/AVFoundation.h>
+        // #import <AVFoundation/AVFoundation.h>
+        @interface I
+        - (void (^ _Nonnull)())foo;
+        - (void (^)(void))bar;
+        @end
     ";
     let clang = Clang::new().expect("Could not load libclang");
     let decls = parse_objc(&clang, source).unwrap();
@@ -1561,7 +1588,7 @@ mod tests {
                     kind: ObjCMethodKind::Instance,
                     params: vec![],
                     result: ObjCType::Pointer(Pointer {
-                        pointee: Box::new(ObjCType::Function(Function {
+                        pointee: Box::new(ObjCType::Function(Callable {
                             result: Box::new(ObjCType::Int),
                             params: None,
                             is_variadic: true,
@@ -1575,7 +1602,7 @@ mod tests {
                     kind: ObjCMethodKind::Instance,
                     params: vec![],
                     result: ObjCType::Pointer(Pointer {
-                        pointee: Box::new(ObjCType::Function(Function {
+                        pointee: Box::new(ObjCType::Function(Callable {
                             result: Box::new(ObjCType::Int),
                             params: Some(vec![Param {
                                 name: None,
@@ -1592,7 +1619,7 @@ mod tests {
                     kind: ObjCMethodKind::Instance,
                     params: vec![],
                     result: ObjCType::Pointer(Pointer {
-                        pointee: Box::new(ObjCType::Function(Function {
+                        pointee: Box::new(ObjCType::Function(Callable {
                             result: Box::new(ObjCType::Int),
                             params: Some(vec![]),
                             is_variadic: false,
@@ -1608,7 +1635,7 @@ mod tests {
                     result: ObjCType::Typedef(Typedef {
                         name: "T".to_string(),
                         underlying: Box::new(ObjCType::Pointer(Pointer {
-                            pointee: Box::new(ObjCType::Function(Function {
+                            pointee: Box::new(ObjCType::Function(Callable {
                                 result: Box::new(ObjCType::Void),
                                 params: Some(vec![Param {
                                     name: Some("typedefParam".to_string()),
@@ -1626,9 +1653,9 @@ mod tests {
                     kind: ObjCMethodKind::Instance,
                     params: vec![],
                     result: ObjCType::Pointer(Pointer {
-                        pointee: Box::new(ObjCType::Function(Function {
+                        pointee: Box::new(ObjCType::Function(Callable {
                             result: Box::new(ObjCType::Pointer(Pointer {
-                                pointee: Box::new(ObjCType::Function(Function {
+                                pointee: Box::new(ObjCType::Function(Callable {
                                     result: Box::new(ObjCType::SChar),
                                     params: Some(vec![Param {
                                         name: Some("outerParam".to_string()),
@@ -1657,7 +1684,7 @@ mod tests {
                             objc_type: ObjCType::Typedef(Typedef {
                                 name: "T".to_string(),
                                 underlying: Box::new(ObjCType::Pointer(Pointer {
-                                    pointee: Box::new(ObjCType::Function(Function {
+                                    pointee: Box::new(ObjCType::Function(Callable {
                                         result: Box::new(ObjCType::Void),
                                         params: Some(vec![Param {
                                             name: Some("typedefParam".to_string()),
@@ -1672,7 +1699,7 @@ mod tests {
                         ObjCParam {
                             name: "complicatedParam".to_string(),
                             objc_type: ObjCType::Pointer(Pointer {
-                                pointee: Box::new(ObjCType::Function(Function {
+                                pointee: Box::new(ObjCType::Function(Callable {
                                     result: Box::new(ObjCType::ObjCObjectPointer(
                                         ObjCObjectPointer {
                                             interface: "A".to_string(),
@@ -1689,7 +1716,7 @@ mod tests {
                                         Param {
                                             name: Some("functionPointerParam".to_string()),
                                             objc_type: ObjCType::Pointer(Pointer {
-                                                pointee: Box::new(ObjCType::Function(Function {
+                                                pointee: Box::new(ObjCType::Function(Callable {
                                                     result: Box::new(ObjCType::Int),
                                                     params: Some(vec![Param {
                                                         name: Some("someChar".to_string()),
@@ -1708,7 +1735,7 @@ mod tests {
                         },
                     ],
                     result: ObjCType::Pointer(Pointer {
-                        pointee: Box::new(ObjCType::Function(Function {
+                        pointee: Box::new(ObjCType::Function(Callable {
                             result: Box::new(ObjCType::ObjCObjectPointer(ObjCObjectPointer {
                                 interface: "A".to_string(),
                                 protocols: vec![],
@@ -1764,7 +1791,7 @@ mod tests {
                     result: ObjCType::Typedef(Typedef {
                         name: "IMP".to_string(),
                         underlying: Box::new(ObjCType::Pointer(Pointer {
-                            pointee: Box::new(ObjCType::Function(Function {
+                            pointee: Box::new(ObjCType::Function(Callable {
                                 result: Box::new(ObjCType::ObjCId(ObjCId {
                                     protocols: vec![],
                                     nullability: Nullability::Nullable,
