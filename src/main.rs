@@ -222,6 +222,10 @@ fn show_tree(entity: &clang::Entity, indent_level: usize) {
     //     println!("{}range: {:?}", indent, range);
     // }
 
+    if let Some(usr) = entity.get_usr() {
+        println!("{}usr: {}", indent, usr.0);
+    }
+
     if let Some(arguments) = entity.get_arguments() {
         if !arguments.is_empty() {
             println!("{}arguments:", indent);
@@ -1076,9 +1080,9 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<ObjCDecl>, ParseError> 
 fn main() {
     let source = "
         // #import <AVFoundation/AVFoundation.h>
+        struct ll { struct ll *next; };
         @interface I
-        - (void (^ _Nonnull)())foo;
-        - (void (^)(void))bar;
+        - (struct ll)foo;
         @end
     ";
     let clang = Clang::new().expect("Could not load libclang");
