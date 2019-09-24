@@ -13,6 +13,8 @@ use clang::{Clang, EntityKind, TypeKind};
 // - instancetype
 // - namespacing of ObjC exported from Swift (though that might be fine as we're calling from generated ObjC)
 // - add test for empty category names
+// - const
+// - add test for parsing "extern void NSLog(NSString *format, ...);""
 
 #[derive(Debug, PartialEq)]
 enum Origin {
@@ -516,14 +518,17 @@ impl CallableDesc {
                 for arg_type in argument_types {
                     let parm_decl = base_parm_decls.next().unwrap();
 
-                    assert_eq!(
-                        ObjCType::from(&arg_type, &mut parm_decl_children(&parm_decl)),
-                        ObjCType::from(
-                            &parm_decl.get_type().unwrap(),
-                            &mut parm_decl_children(&parm_decl)
-                        )
+                    // assert_eq!(
+                    //     ObjCType::from(&arg_type, &mut parm_decl_children(&parm_decl)),
+                    //     ObjCType::from(
+                    //         &parm_decl.get_type().unwrap(),
+                    //         &mut parm_decl_children(&parm_decl)
+                    //     )
+                    // );
+                    let objc_type = ObjCType::from(
+                        &parm_decl.get_type().unwrap(),
+                        &mut parm_decl_children(&parm_decl),
                     );
-                    let objc_type = ObjCType::from(&arg_type, &mut parm_decl_children(&parm_decl));
                     params.push(Param {
                         name: parm_decl.get_name(),
                         objc_type,
@@ -548,19 +553,13 @@ impl CallableDesc {
 #[derive(Clone, Debug, PartialEq)]
 struct Typedef {
     name: String,
-    underlying: Box<ObjCType>,
 }
 
 impl Typedef {
     fn from(clang_type: &clang::Type) -> Self {
         assert_eq!(clang_type.get_kind(), TypeKind::Typedef);
-        let decl = clang_type.get_declaration().unwrap();
         Typedef {
             name: clang_type.get_display_name(),
-            underlying: Box::new(ObjCType::from(
-                &decl.get_typedef_underlying_type().unwrap(),
-                &mut parm_decl_children(&decl),
-            )),
         }
     }
 }
@@ -605,6 +604,36 @@ struct Enum {
     values: Option<Vec<EnumValue>>,
 }
 
+fn type_signedness(clang_type: &clang::Type) -> Option<Signedness> {
+    match clang_type.get_kind() {
+        TypeKind::SChar
+        | TypeKind::CharS
+        | TypeKind::Short
+        | TypeKind::Int
+        | TypeKind::Long
+        | TypeKind::LongLong
+        | TypeKind::Float
+        | TypeKind::Double
+        | TypeKind::LongDouble => Some(Signedness::Signed),
+        TypeKind::UChar
+        | TypeKind::CharU
+        | TypeKind::UShort
+        | TypeKind::UInt
+        | TypeKind::ULong
+        | TypeKind::ULongLong => Some(Signedness::Unsigned),
+        TypeKind::Attributed => type_signedness(&clang_type.get_modified_type().unwrap()),
+        TypeKind::Typedef => type_signedness(
+            &clang_type
+                .get_declaration()
+                .unwrap()
+                .get_typedef_underlying_type()
+                .unwrap(),
+        ),
+        TypeKind::Elaborated => type_signedness(&clang_type.get_elaborated_type().unwrap()),
+        _ => None,
+    }
+}
+
 impl Enum {
     fn from(clang_type: &clang::Type) -> Self {
         let decl = clang_type.get_declaration().unwrap();
@@ -614,9 +643,7 @@ impl Enum {
         });
 
         let values = if decl.get_definition().is_some() {
-            let underlying = underlying.as_ref().unwrap();
-            let signedness = underlying
-                .signedness()
+            let signedness = type_signedness(&decl.get_enum_underlying_type().unwrap())
                 .expect("The underlying type of an enum should have a signedness");
             Some(
                 decl.get_children()
@@ -673,23 +700,7 @@ enum NumKind {
     ULongLong,
     Float,
     Double,
-}
-
-impl NumKind {
-    fn signedness(&self) -> Signedness {
-        match self {
-            Self::SChar
-            | Self::Short
-            | Self::Int
-            | Self::Long
-            | Self::LongLong
-            | Self::Float
-            | Self::Double => Signedness::Signed,
-            Self::UChar | Self::UShort | Self::UInt | Self::ULong | Self::ULongLong => {
-                Signedness::Unsigned
-            }
-        }
-    }
+    LongDouble,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -728,6 +739,7 @@ impl ObjCType {
             TypeKind::ULongLong => ObjCType::Num(NumKind::ULongLong),
             TypeKind::Float => ObjCType::Num(NumKind::Float),
             TypeKind::Double => ObjCType::Num(NumKind::Double),
+            TypeKind::LongDouble => ObjCType::Num(NumKind::LongDouble),
             TypeKind::Pointer => {
                 let pointee_type = clang_type.get_pointee_type().unwrap();
                 ObjCType::Pointer(Pointer {
@@ -860,18 +872,8 @@ impl ObjCType {
                 nullability: Nullability::Unspecified,
             }),
             TypeKind::Enum => ObjCType::Enum(Enum::from(&clang_type)),
+            TypeKind::Bool => ObjCType::Num(NumKind::SChar), // TODO: Do something better
             unknown_kind => panic!("Unhandled type kind {:?}: {:?}", unknown_kind, clang_type),
-        }
-    }
-
-    fn signedness(&self) -> Option<Signedness> {
-        match self {
-            Self::Num(kind) => Some(kind.signedness()),
-            Self::Typedef(Typedef {
-                name: _,
-                underlying,
-            }) => underlying.signedness(),
-            _ => None,
         }
     }
 }
