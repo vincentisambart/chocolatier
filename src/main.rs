@@ -675,9 +675,8 @@ enum Signedness {
     Unsigned,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-enum ObjCType {
-    Void,
+#[derive(Copy, Clone, Debug, PartialEq)]
+enum NumKind {
     SChar,
     UChar,
     Short,
@@ -690,6 +689,29 @@ enum ObjCType {
     ULongLong,
     Float,
     Double,
+}
+
+impl NumKind {
+    fn signedness(&self) -> Signedness {
+        match self {
+            Self::SChar
+            | Self::Short
+            | Self::Int
+            | Self::Long
+            | Self::LongLong
+            | Self::Float
+            | Self::Double => Signedness::Signed,
+            Self::UChar | Self::UShort | Self::UInt | Self::ULong | Self::ULongLong => {
+                Signedness::Unsigned
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum ObjCType {
+    Void,
+    Num(NumKind),
     Typedef(Typedef),
     Pointer(Pointer),
     Record(Record),
@@ -712,19 +734,19 @@ impl ObjCType {
         match clang_type.get_kind() {
             TypeKind::Void => ObjCType::Void,
             // SChar is "signed char", CharS is "char" when it is signed by default.
-            TypeKind::SChar | TypeKind::CharS => ObjCType::SChar,
+            TypeKind::SChar | TypeKind::CharS => ObjCType::Num(NumKind::SChar),
             // UChar is "unsigned char", CharU is "char" when it is unsigned by default.
-            TypeKind::UChar | TypeKind::CharU => ObjCType::UChar,
-            TypeKind::Short => ObjCType::Short,
-            TypeKind::UShort => ObjCType::UShort,
-            TypeKind::Int => ObjCType::Int,
-            TypeKind::UInt => ObjCType::UInt,
-            TypeKind::Long => ObjCType::Long,
-            TypeKind::ULong => ObjCType::ULong,
-            TypeKind::LongLong => ObjCType::LongLong,
-            TypeKind::ULongLong => ObjCType::ULongLong,
-            TypeKind::Float => ObjCType::Float,
-            TypeKind::Double => ObjCType::Double,
+            TypeKind::UChar | TypeKind::CharU => ObjCType::Num(NumKind::UChar),
+            TypeKind::Short => ObjCType::Num(NumKind::Short),
+            TypeKind::UShort => ObjCType::Num(NumKind::UShort),
+            TypeKind::Int => ObjCType::Num(NumKind::Int),
+            TypeKind::UInt => ObjCType::Num(NumKind::UInt),
+            TypeKind::Long => ObjCType::Num(NumKind::Long),
+            TypeKind::ULong => ObjCType::Num(NumKind::ULong),
+            TypeKind::LongLong => ObjCType::Num(NumKind::LongLong),
+            TypeKind::ULongLong => ObjCType::Num(NumKind::ULongLong),
+            TypeKind::Float => ObjCType::Num(NumKind::Float),
+            TypeKind::Double => ObjCType::Num(NumKind::Double),
             TypeKind::Pointer => {
                 let pointee_type = clang_type.get_pointee_type().unwrap();
                 ObjCType::Pointer(Pointer {
@@ -860,18 +882,7 @@ impl ObjCType {
 
     fn signedness(&self) -> Option<Signedness> {
         match self {
-            Self::SChar => Some(Signedness::Signed),
-            Self::UChar => Some(Signedness::Unsigned),
-            Self::Short => Some(Signedness::Signed),
-            Self::UShort => Some(Signedness::Unsigned),
-            Self::Int => Some(Signedness::Signed),
-            Self::UInt => Some(Signedness::Unsigned),
-            Self::Long => Some(Signedness::Signed),
-            Self::ULong => Some(Signedness::Unsigned),
-            Self::LongLong => Some(Signedness::Signed),
-            Self::ULongLong => Some(Signedness::Unsigned),
-            Self::Float => Some(Signedness::Signed),
-            Self::Double => Some(Signedness::Signed),
+            Self::Num(kind) => Some(kind.signedness()),
             Self::Typedef(Typedef {
                 name: _,
                 underlying,
