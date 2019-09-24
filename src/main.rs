@@ -382,34 +382,36 @@ impl Nullability {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct ObjCObjectPointer {
-    interface: String,
+struct IdObjPtr {
     protocols: Vec<String>,
-    type_args: Vec<ObjCTypeArg>,
-    nullability: Nullability,
-}
-
-impl ObjCObjectPointer {
-    fn with_nullability(self, nullability: Nullability) -> Self {
-        ObjCObjectPointer {
-            interface: self.interface,
-            protocols: self.protocols,
-            type_args: self.type_args,
-            nullability,
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct ObjCId {
+struct SomeInstanceObjPtr {
+    interface: String,
     protocols: Vec<String>,
+    type_args: Vec<ObjCTypeArg>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum ObjPtrKind {
+    Class,
+    Id(IdObjPtr),
+    SomeInstance(SomeInstanceObjPtr),
+    Block(Callable),
+    TypeParam(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ObjPtr {
+    kind: ObjPtrKind,
     nullability: Nullability,
 }
 
-impl ObjCId {
+impl ObjPtr {
     fn with_nullability(self, nullability: Nullability) -> Self {
-        ObjCId {
-            protocols: self.protocols,
+        ObjPtr {
+            kind: self.kind,
             nullability,
         }
     }
@@ -579,21 +581,6 @@ impl Pointer {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct BlockPointer {
-    pointee: Callable,
-    nullability: Nullability,
-}
-
-impl BlockPointer {
-    fn with_nullability(self, nullability: Nullability) -> Self {
-        BlockPointer {
-            pointee: self.pointee,
-            nullability,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
 struct Array {
     size: Option<usize>,
     element: Box<ObjCType>,
@@ -662,11 +649,8 @@ impl Enum {
 
 #[derive(Clone, Debug, PartialEq)]
 enum ObjCTypeArg {
-    ObjCObjectPointer(ObjCObjectPointer),
-    ObjCTypeParam(String),
+    ObjPtr(ObjPtr),
     Typedef(Typedef),
-    ObjCId(ObjCId),
-    ObjCClass(Nullability),
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -716,11 +700,7 @@ enum ObjCType {
     Pointer(Pointer),
     Record(Record),
     Function(Callable),
-    BlockPointer(BlockPointer),
-    ObjCObjectPointer(ObjCObjectPointer),
-    ObjCTypeParam(String),
-    ObjCId(ObjCId),
-    ObjCClass(Nullability),
+    ObjPtr(ObjPtr),
     ObjCSel(Nullability),
     Array(Array),
     Enum(Enum),
@@ -785,13 +765,8 @@ impl ObjCType {
                     .iter()
                     .map(
                         |arg| match ObjCType::from(arg, &mut Vec::new().into_iter()) {
-                            ObjCType::ObjCObjectPointer(pointer) => {
-                                ObjCTypeArg::ObjCObjectPointer(pointer)
-                            }
-                            ObjCType::ObjCTypeParam(name) => ObjCTypeArg::ObjCTypeParam(name),
+                            ObjCType::ObjPtr(ptr) => ObjCTypeArg::ObjPtr(ptr),
                             ObjCType::Typedef(typedef) => ObjCTypeArg::Typedef(typedef),
-                            ObjCType::ObjCId(id) => ObjCTypeArg::ObjCId(id),
-                            ObjCType::ObjCClass(nullability) => ObjCTypeArg::ObjCClass(nullability),
                             unexpected => panic!(
                                 "Type arguments expected not expected to be {:?}",
                                 unexpected
@@ -805,15 +780,17 @@ impl ObjCType {
                 if base_type.get_kind() == TypeKind::ObjCId {
                     assert!(type_args.is_empty());
                     assert_eq!(base_type.get_display_name(), "id");
-                    return ObjCType::ObjCId(ObjCId {
-                        protocols,
+                    return ObjCType::ObjPtr(ObjPtr {
+                        kind: ObjPtrKind::Id(IdObjPtr { protocols }),
                         nullability: Nullability::Unspecified,
                     });
                 } else {
-                    ObjCType::ObjCObjectPointer(ObjCObjectPointer {
-                        interface: base_type.get_display_name(),
-                        protocols,
-                        type_args,
+                    ObjCType::ObjPtr(ObjPtr {
+                        kind: ObjPtrKind::SomeInstance(SomeInstanceObjPtr {
+                            interface: base_type.get_display_name(),
+                            protocols,
+                            type_args,
+                        }),
                         nullability: Nullability::Unspecified,
                     })
                 }
@@ -824,31 +801,34 @@ impl ObjCType {
                 if let Some(nullability) = clang_type.get_nullability() {
                     let nullability = Nullability::from(nullability);
                     match modified {
-                        ObjCType::Pointer(pointer) => {
-                            ObjCType::Pointer(pointer.with_nullability(nullability))
+                        ObjCType::Pointer(ptr) => {
+                            ObjCType::Pointer(ptr.with_nullability(nullability))
                         }
-                        ObjCType::ObjCObjectPointer(pointer) => {
-                            ObjCType::ObjCObjectPointer(pointer.with_nullability(nullability))
+                        ObjCType::ObjPtr(ptr) => {
+                            ObjCType::ObjPtr(ptr.with_nullability(nullability))
                         }
-                        ObjCType::BlockPointer(pointer) => {
-                            ObjCType::BlockPointer(pointer.with_nullability(nullability))
-                        }
-                        ObjCType::ObjCId(id) => ObjCType::ObjCId(id.with_nullability(nullability)),
                         ObjCType::ObjCSel(_) => ObjCType::ObjCSel(nullability),
-                        ObjCType::ObjCClass(_) => ObjCType::ObjCClass(nullability),
                         _ => modified,
                     }
                 } else {
                     modified
                 }
             }
-            TypeKind::ObjCTypeParam => ObjCType::ObjCTypeParam(clang_type.get_display_name()),
-            TypeKind::ObjCId => ObjCType::ObjCId(ObjCId {
-                protocols: Vec::new(),
+            TypeKind::ObjCTypeParam => ObjCType::ObjPtr(ObjPtr {
+                kind: ObjPtrKind::TypeParam(clang_type.get_display_name()),
+                nullability: Nullability::Unspecified,
+            }),
+            TypeKind::ObjCId => ObjCType::ObjPtr(ObjPtr {
+                kind: ObjPtrKind::Id(IdObjPtr {
+                    protocols: Vec::new(),
+                }),
                 nullability: Nullability::Unspecified,
             }),
             TypeKind::ObjCSel => ObjCType::ObjCSel(Nullability::Unspecified),
-            TypeKind::ObjCClass => ObjCType::ObjCClass(Nullability::Unspecified),
+            TypeKind::ObjCClass => ObjCType::ObjPtr(ObjPtr {
+                kind: ObjPtrKind::Class,
+                nullability: Nullability::Unspecified,
+            }),
             TypeKind::Typedef => ObjCType::Typedef(Typedef::from(&clang_type)),
             TypeKind::Elaborated => {
                 Self::from(&clang_type.get_elaborated_type().unwrap(), base_parm_decls)
@@ -871,8 +851,11 @@ impl ObjCType {
                     base_parm_decls,
                 )),
             }),
-            TypeKind::BlockPointer => ObjCType::BlockPointer(BlockPointer {
-                pointee: Callable::from(&clang_type.get_pointee_type().unwrap(), base_parm_decls),
+            TypeKind::BlockPointer => ObjCType::ObjPtr(ObjPtr {
+                kind: ObjPtrKind::Block(Callable::from(
+                    &clang_type.get_pointee_type().unwrap(),
+                    base_parm_decls,
+                )),
                 nullability: Nullability::Unspecified,
             }),
             TypeKind::Enum => ObjCType::Enum(Enum::from(&clang_type)),
