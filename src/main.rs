@@ -12,6 +12,7 @@ use clang::{Clang, EntityKind, TypeKind};
 // - alignment, packing (and make sure the size and offset of each item is the same for clang and Rust as bindgen does)
 // - instancetype
 // - namespacing of ObjC exported from Swift (though that might be fine as we're calling from generated ObjC)
+// - add test for empty category names
 
 #[derive(Debug, PartialEq)]
 enum Origin {
@@ -437,47 +438,46 @@ impl Field {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
-enum RecordKind {
-    Struct,
-    Union,
-}
-
 #[derive(Clone, Debug, PartialEq)]
-struct Record {
-    name: Option<String>,
-    kind: RecordKind,
-    fields: Option<Vec<Field>>,
+enum Record {
+    NamedStruct { name: String },
+    UnnamedStruct { fields: Vec<Field> },
+    NamedUnion { name: String },
+    UnnamedUnion { fields: Vec<Field> },
 }
 
 impl Record {
     fn from(clang_type: &clang::Type) -> Self {
         let decl = clang_type.get_declaration().unwrap();
-        let fields = if decl.get_definition().is_some() {
-            Some(
-                clang_type
-                    .get_fields()
-                    .unwrap()
-                    .iter()
-                    .map(Field::from)
-                    .collect(),
-            )
+        let name = decl.get_name();
+        if let Some(name) = name {
+            match decl.get_kind() {
+                EntityKind::StructDecl => Record::NamedStruct { name },
+                EntityKind::UnionDecl => Record::NamedUnion { name },
+                unexpected_kind => panic!(
+                    "Unexpected kind for record declaration {:?}: {:?}",
+                    unexpected_kind, clang_type
+                ),
+            }
         } else {
-            None
-        };
-        let kind = match decl.get_kind() {
-            EntityKind::StructDecl => RecordKind::Struct,
-            EntityKind::UnionDecl => RecordKind::Union,
-            unexpected_kind => panic!(
-                "Unexpected kind for record declaration {:?}: {:?}",
-                unexpected_kind, clang_type
-            ),
-        };
-
-        Record {
-            name: decl.get_name(),
-            kind,
-            fields,
+            assert!(
+                decl.get_definition().is_some(),
+                "An unnamed record should have fields definition"
+            );
+            let fields = clang_type
+                .get_fields()
+                .unwrap()
+                .iter()
+                .map(Field::from)
+                .collect();
+            match decl.get_kind() {
+                EntityKind::StructDecl => Record::UnnamedStruct { fields },
+                EntityKind::UnionDecl => Record::UnnamedUnion { fields },
+                unexpected_kind => panic!(
+                    "Unexpected kind for record declaration {:?}: {:?}",
+                    unexpected_kind, clang_type
+                ),
+            }
         }
     }
 }
@@ -733,7 +733,22 @@ impl ObjCType {
                 })
             }
             TypeKind::ObjCObjectPointer => {
-                let pointee_type = clang_type.get_pointee_type().unwrap();
+                let pointee_type = {
+                    let mut pointee = clang_type.get_pointee_type().unwrap();
+                    loop {
+                        match pointee.get_kind() {
+                            // TODO: Check what's the difference between ObjCObject and ObjCInterface
+                            TypeKind::ObjCObject | TypeKind::ObjCInterface => break pointee,
+                            // Attributed is for example when __kindof is used.
+                            TypeKind::Attributed => {
+                                pointee = pointee.get_modified_type().unwrap();
+                            }
+                            unexpected_kind => {
+                                panic!("unexpected pointee kind {:?}", unexpected_kind)
+                            }
+                        }
+                    }
+                };
                 let protocols = pointee_type
                     .get_objc_protocol_declarations()
                     .iter()
@@ -931,9 +946,12 @@ fn is_generated_from_property(method_entity: &clang::Entity) -> bool {
     ]
     .contains(&method_entity.get_kind()));
     let parent = method_entity.get_semantic_parent().unwrap();
-    assert!(
-        [EntityKind::ObjCInterfaceDecl, EntityKind::ObjCProtocolDecl].contains(&parent.get_kind())
-    );
+    assert!([
+        EntityKind::ObjCInterfaceDecl,
+        EntityKind::ObjCProtocolDecl,
+        EntityKind::ObjCCategoryDecl,
+    ]
+    .contains(&parent.get_kind()));
     let method_location = method_entity.get_location().unwrap();
     parent
         .get_children()
@@ -996,7 +1014,7 @@ impl ObjCInterface {
 
 #[derive(Debug, PartialEq)]
 struct ObjCCategory {
-    name: String,
+    name: Option<String>,
     class: String,
     adopted_protocols: Vec<String>,
     methods: Vec<ObjCMethod>,
@@ -1028,10 +1046,13 @@ impl ObjCCategory {
                 ]
                 .contains(&child.get_kind())
             })
+            // Methods generated from property don't have children with the type info we want
+            // so for the time being just ignore them.
+            .filter(|child| !is_generated_from_property(child))
             .map(ObjCMethod::from)
             .collect();
         ObjCCategory {
-            name: entity.get_name().unwrap(),
+            name: entity.get_name(),
             class,
             adopted_protocols,
             methods,
