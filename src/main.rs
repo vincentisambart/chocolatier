@@ -701,6 +701,7 @@ enum ObjCType {
     Record(Record),
     Function(Callable),
     ObjPtr(ObjPtr),
+    /// `SEL` in Objective-C. A special type of (non-object) pointer.
     ObjCSel(Nullability),
     Array(Array),
     Enum(Enum),
@@ -955,7 +956,7 @@ fn is_generated_from_property(method_entity: &clang::Entity) -> bool {
 }
 
 #[derive(Debug, PartialEq)]
-struct ObjCInterface {
+struct InterfaceDecl {
     name: String,
     superclass: Option<String>,
     adopted_protocols: Vec<String>,
@@ -963,7 +964,7 @@ struct ObjCInterface {
     methods: Vec<ObjCMethod>,
 }
 
-impl ObjCInterface {
+impl InterfaceDecl {
     fn from(entity: &clang::Entity) -> Self {
         assert_eq!(entity.get_kind(), EntityKind::ObjCInterfaceDecl);
         let children = entity.get_children();
@@ -996,7 +997,7 @@ impl ObjCInterface {
             .filter(|child| !is_generated_from_property(child))
             .map(ObjCMethod::from)
             .collect();
-        ObjCInterface {
+        InterfaceDecl {
             name: entity.get_name().unwrap(),
             superclass,
             adopted_protocols,
@@ -1007,14 +1008,14 @@ impl ObjCInterface {
 }
 
 #[derive(Debug, PartialEq)]
-struct ObjCCategory {
+struct CategoryDecl {
     name: Option<String>,
     class: String,
     adopted_protocols: Vec<String>,
     methods: Vec<ObjCMethod>,
 }
 
-impl ObjCCategory {
+impl CategoryDecl {
     fn from(entity: &clang::Entity) -> Self {
         assert_eq!(entity.get_kind(), EntityKind::ObjCCategoryDecl);
         let children = entity.get_children();
@@ -1045,7 +1046,7 @@ impl ObjCCategory {
             .filter(|child| !is_generated_from_property(child))
             .map(ObjCMethod::from)
             .collect();
-        ObjCCategory {
+        CategoryDecl {
             name: entity.get_name(),
             class,
             adopted_protocols,
@@ -1055,19 +1056,19 @@ impl ObjCCategory {
 }
 
 #[derive(Debug, PartialEq)]
-struct ObjCProtocolMethod {
+struct ProtocolMethod {
     method: ObjCMethod,
     is_optional: bool,
 }
 
 #[derive(Debug, PartialEq)]
-struct ObjCProtocol {
+struct ProtocolDecl {
     name: String,
     inherited_protocols: Vec<String>,
-    methods: Vec<ObjCProtocolMethod>,
+    methods: Vec<ProtocolMethod>,
 }
 
-impl ObjCProtocol {
+impl ProtocolDecl {
     fn from(entity: &clang::Entity) -> Self {
         assert_eq!(entity.get_kind(), EntityKind::ObjCProtocolDecl);
         let children = entity.get_children();
@@ -1087,13 +1088,13 @@ impl ObjCProtocol {
                 ]
                 .contains(&child.get_kind())
             })
-            .map(|child| ObjCProtocolMethod {
+            .map(|child| ProtocolMethod {
                 method: ObjCMethod::from(child),
                 is_optional: child.is_objc_optional(),
             })
             .collect();
 
-        ObjCProtocol {
+        ProtocolDecl {
             name: entity.get_name().unwrap(),
             inherited_protocols,
             methods,
@@ -1103,9 +1104,9 @@ impl ObjCProtocol {
 
 #[derive(Debug, PartialEq)]
 enum ObjCDecl {
-    ObjCProtocol(ObjCProtocol),
-    ObjCInterface(ObjCInterface),
-    ObjCCategory(ObjCCategory),
+    Protocol(ProtocolDecl),
+    Interface(InterfaceDecl),
+    Category(CategoryDecl),
 }
 
 #[derive(Debug)]
@@ -1158,13 +1159,13 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<ObjCDecl>, ParseError> 
     for entity in tu.get_entity().get_children() {
         match entity.get_kind() {
             EntityKind::ObjCInterfaceDecl => {
-                objc_decls.push(ObjCDecl::ObjCInterface(ObjCInterface::from(&entity)));
+                objc_decls.push(ObjCDecl::Interface(InterfaceDecl::from(&entity)));
             }
             EntityKind::ObjCProtocolDecl => {
-                objc_decls.push(ObjCDecl::ObjCProtocol(ObjCProtocol::from(&entity)));
+                objc_decls.push(ObjCDecl::Protocol(ProtocolDecl::from(&entity)));
             }
             EntityKind::ObjCCategoryDecl => {
-                objc_decls.push(ObjCDecl::ObjCCategory(ObjCCategory::from(&entity)));
+                objc_decls.push(ObjCDecl::Category(CategoryDecl::from(&entity)));
             }
             _ => {}
         }
