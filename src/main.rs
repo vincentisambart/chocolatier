@@ -380,7 +380,7 @@ impl Nullability {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct ObjCObjectPointer {
     interface: String,
     protocols: Vec<String>,
@@ -399,7 +399,7 @@ impl ObjCObjectPointer {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct ObjCId {
     protocols: Vec<String>,
     nullability: Nullability,
@@ -421,7 +421,7 @@ fn parm_decl_children<'a>(entity: &clang::Entity<'a>) -> impl Iterator<Item = cl
         .filter(|child| child.get_kind() == EntityKind::ParmDecl)
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct Field {
     name: Option<String>,
     objc_type: ObjCType,
@@ -443,7 +443,7 @@ enum RecordKind {
     Union,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct Record {
     name: Option<String>,
     kind: RecordKind,
@@ -482,13 +482,13 @@ impl Record {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct Param {
     name: Option<String>,
     objc_type: ObjCType,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct Callable {
     result: Box<ObjCType>,
     params: Option<Vec<Param>>,
@@ -543,7 +543,7 @@ impl Callable {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct Typedef {
     name: String,
     underlying: Box<ObjCType>,
@@ -563,7 +563,7 @@ impl Typedef {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct Pointer {
     pointee: Box<ObjCType>,
     nullability: Nullability,
@@ -578,7 +578,7 @@ impl Pointer {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct BlockPointer {
     pointee: Callable,
     nullability: Nullability,
@@ -593,25 +593,25 @@ impl BlockPointer {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct Array {
     size: Option<usize>,
     element: Box<ObjCType>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 enum SignedOrNotInt {
     Signed(i64),
     Unsigned(u64),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct EnumValue {
     name: String,
     value: SignedOrNotInt,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct Enum {
     name: Option<String>,
     underlying: Option<Box<ObjCType>>,
@@ -660,7 +660,7 @@ impl Enum {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum ObjCTypeArg {
     ObjCObjectPointer(ObjCObjectPointer),
     ObjCTypeParam(String),
@@ -675,7 +675,7 @@ enum Signedness {
     Unsigned,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum ObjCType {
     Void,
     SChar,
