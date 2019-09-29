@@ -15,6 +15,8 @@ use clang::{Clang, EntityKind, TypeKind};
 // - add test for empty category names
 // - const
 // - add test for parsing "extern void NSLog(NSString *format, ...);""
+// - module name
+// - bit fields
 
 #[derive(Debug, PartialEq)]
 enum Origin {
@@ -171,6 +173,14 @@ fn show_type(desc: &str, clang_type: &clang::Type, indent_level: usize) {
 
     if let Some(decl) = clang_type.get_declaration() {
         println!("{}{} decl: {:?}", indent, desc, decl);
+    }
+
+    if let Ok(alignment) = clang_type.get_alignof() {
+        println!("{}alignment: {:?}", indent, alignment);
+    }
+
+    if let Ok(size) = clang_type.get_sizeof() {
+        println!("{}size: {:?}", indent, size);
     }
 
     if let Some(template_argument_types) = clang_type.get_template_argument_types() {
@@ -347,6 +357,10 @@ fn show_tree(entity: &clang::Entity, indent_level: usize) {
 
     if let Some(storage_class) = entity.get_storage_class() {
         println!("{}storage class: {:?}", indent, storage_class);
+    }
+
+    if let Ok(offset_of_field) = entity.get_offset_of_field() {
+        println!("{}offset of field: {:?}", indent, offset_of_field);
     }
 
     // if let Some(semantic_parent) = entity.get_semantic_parent() {
@@ -703,9 +717,16 @@ enum NumKind {
     LongDouble,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq)]
+enum Unsupported {
+    Vector,
+    Unexposed,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum ObjCType {
     Void,
+    Bool,
     Num(NumKind),
     Typedef(Typedef),
     Pointer(Pointer),
@@ -716,6 +737,7 @@ enum ObjCType {
     ObjCSel(Nullability),
     Array(Array),
     Enum(Enum),
+    Unsupported(Unsupported),
 }
 
 impl ObjCType {
@@ -872,7 +894,9 @@ impl ObjCType {
                 nullability: Nullability::Unspecified,
             }),
             TypeKind::Enum => ObjCType::Enum(Enum::from(&clang_type)),
-            TypeKind::Bool => ObjCType::Num(NumKind::SChar), // TODO: Do something better
+            TypeKind::Bool => ObjCType::Bool,
+            TypeKind::Vector => ObjCType::Unsupported(Unsupported::Vector),
+            TypeKind::Unexposed => ObjCType::Unsupported(Unsupported::Unexposed),
             unknown_kind => panic!("Unhandled type kind {:?}: {:?}", unknown_kind, clang_type),
         }
     }
@@ -1225,13 +1249,18 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<Decl>, ParseError> {
 
 fn main() {
     let source = "
-        int foo();
+        // int foo();
         // #import <AVFoundation/AVFoundation.h>
+        // #import <Cocoa/Cocoa.h>
         // struct ll { struct ll *next; };
         // @interface I
         // - (struct ll)foo;
         // - (enum { V1 = -10000000000, V2 })bar;
         // @end
+struct vm_statistics64 {
+    int a;
+} __attribute__((aligned(8)));
+
     ";
     let clang = Clang::new().expect("Could not load libclang");
     let decls = parse_objc(&clang, source).unwrap();
