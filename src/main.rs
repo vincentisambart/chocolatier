@@ -864,7 +864,17 @@ impl ObjCType {
                 kind: ObjPtrKind::Class,
                 nullability: Nullability::Unspecified,
             }),
-            TypeKind::Typedef => ObjCType::Typedef(Typedef::from(&clang_type)),
+            TypeKind::Typedef => {
+                let decl = clang_type.get_declaration().unwrap();
+                if decl.get_kind() == EntityKind::TemplateTypeParameter {
+                    ObjCType::ObjPtr(ObjPtr {
+                        kind: ObjPtrKind::TypeParam(clang_type.get_display_name()),
+                        nullability: Nullability::Unspecified,
+                    })
+                } else {
+                    ObjCType::Typedef(Typedef::from(&clang_type))
+                }
+            }
             TypeKind::Elaborated => {
                 Self::from(&clang_type.get_elaborated_type().unwrap(), base_parm_decls)
             }
@@ -1249,6 +1259,11 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<Decl>, ParseError> {
 
 fn main() {
     let source = "
+        @interface X
+        @end
+        @interface I<T>: X
+        - (T _Nonnull)foo;
+        @end
         // int foo();
         // #import <AVFoundation/AVFoundation.h>
         // #import <Cocoa/Cocoa.h>
@@ -1257,10 +1272,9 @@ fn main() {
         // - (struct ll)foo;
         // - (enum { V1 = -10000000000, V2 })bar;
         // @end
-struct vm_statistics64 {
-    int a;
-} __attribute__((aligned(8)));
-
+        // struct vm_statistics64 {
+        //     int a;
+        // } __attribute__((aligned(8)));
     ";
     let clang = Clang::new().expect("Could not load libclang");
     let decls = parse_objc(&clang, source).unwrap();
@@ -1374,76 +1388,80 @@ mod tests {
         assert_eq!(parsed_decls, expected_decls);
     }
 
-    /*
-        #[test]
-        fn test_superclass() {
-            let clang = Clang::new().expect("Could not load libclang");
+    #[test]
+    fn test_superclass() {
+        let clang = Clang::new().expect("Could not load libclang");
 
-            let source = "
+        let source = "
                 @interface A
                 @end
                 @interface B: A
                 @end
             ";
 
-            let expected_decls = vec![
-                Decl::Interface(InterfaceDecl {
-                    name: "A".to_string(),
-                    superclass: None,
-                    adopted_protocols: vec![],
-                    template_params: vec![],
-                    methods: vec![],
-                }),
-                Decl::Interface(InterfaceDecl {
-                    name: "B".to_string(),
-                    superclass: Some("A".to_string()),
-                    adopted_protocols: vec![],
-                    template_params: vec![],
-                    methods: vec![],
-                }),
-            ];
+        let expected_decls = vec![
+            Decl::Interface(InterfaceDecl {
+                name: "A".to_string(),
+                superclass: None,
+                adopted_protocols: vec![],
+                template_params: vec![],
+                methods: vec![],
+            }),
+            Decl::Interface(InterfaceDecl {
+                name: "B".to_string(),
+                superclass: Some("A".to_string()),
+                adopted_protocols: vec![],
+                template_params: vec![],
+                methods: vec![],
+            }),
+        ];
 
-            let parsed_decls = parse_objc(&clang, source).unwrap();
-            assert_eq!(parsed_decls, expected_decls);
-        }
+        let parsed_decls = parse_objc(&clang, source).unwrap();
+        assert_eq!(parsed_decls, expected_decls);
+    }
 
-        #[test]
-        fn test_template_params() {
-            let clang = Clang::new().expect("Could not load libclang");
+    #[test]
+    fn test_template_params() {
+        let clang = Clang::new().expect("Could not load libclang");
 
-            let source = "
+        let source = "
                 @interface A
                 @end
                 @interface B<X, Y, Z>: A
-                - (X)x;
+                - (X _Nonnull)x;
                 @end
             ";
 
-            let expected_decls = vec![
-                Decl::Interface(InterfaceDecl {
-                    name: "A".to_string(),
-                    superclass: None,
-                    adopted_protocols: vec![],
-                    template_params: vec![],
-                    methods: vec![],
-                }),
-                Decl::Interface(InterfaceDecl {
-                    name: "B".to_string(),
-                    superclass: Some("A".to_string()),
-                    adopted_protocols: vec![],
-                    template_params: vec!["X".to_string(), "Y".to_string(), "Z".to_string()],
-                    methods: vec![ObjCMethod {
-                        name: "x".to_string(),
-                        kind: ObjCMethodKind::Instance,
-                        params: vec![],
-                        result: ObjCType::ObjCTypeParam("X".to_string()),
-                    }],
-                }),
-            ];
+        let expected_decls = vec![
+            Decl::Interface(InterfaceDecl {
+                name: "A".to_string(),
+                superclass: None,
+                adopted_protocols: vec![],
+                template_params: vec![],
+                methods: vec![],
+            }),
+            Decl::Interface(InterfaceDecl {
+                name: "B".to_string(),
+                superclass: Some("A".to_string()),
+                adopted_protocols: vec![],
+                template_params: vec!["X".to_string(), "Y".to_string(), "Z".to_string()],
+                methods: vec![ObjCMethod {
+                    name: "x".to_string(),
+                    kind: ObjCMethodKind::Instance,
+                    params: vec![],
+                    result: ObjCType::ObjPtr(ObjPtr {
+                        kind: ObjPtrKind::TypeParam("X".to_string()),
+                        nullability: Nullability::NonNull,
+                    }),
+                }],
+            }),
+        ];
 
-            let parsed_decls = parse_objc(&clang, source).unwrap();
-            assert_eq!(parsed_decls, expected_decls);
-        }
+        let parsed_decls = parse_objc(&clang, source).unwrap();
+        assert_eq!(parsed_decls, expected_decls);
+    }
+
+    /*
 
         #[test]
         fn test_protocol() {
