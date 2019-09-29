@@ -802,10 +802,9 @@ impl ObjCType {
                         |arg| match ObjCType::from(arg, &mut Vec::new().into_iter()) {
                             ObjCType::ObjPtr(ptr) => ObjCTypeArg::ObjPtr(ptr),
                             ObjCType::Typedef(typedef) => ObjCTypeArg::Typedef(typedef),
-                            unexpected => panic!(
-                                "Type arguments expected not expected to be {:?}",
-                                unexpected
-                            ),
+                            unexpected => {
+                                panic!("Type arguments not expected to be {:?}", unexpected)
+                            }
                         },
                     )
                     .collect();
@@ -1158,6 +1157,48 @@ impl TypedefDecl {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq)]
+enum RecordKind {
+    Union,
+    Struct,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct NamedRecordDecl {
+    name: String,
+    fields: Vec<Field>,
+    kind: RecordKind,
+}
+
+impl NamedRecordDecl {
+    fn from(decl: &clang::Entity) -> Self {
+        let kind = match decl.get_kind() {
+            EntityKind::StructDecl => RecordKind::Struct,
+            EntityKind::UnionDecl => RecordKind::Union,
+            unexpected => panic!("Record declaration is not expected to be {:?}", unexpected),
+        };
+
+        assert!(
+            decl.get_definition().is_some(),
+            "An record definition should have fields definition"
+        );
+        let fields = decl
+            .get_type()
+            .unwrap()
+            .get_fields()
+            .unwrap()
+            .iter()
+            .map(Field::from)
+            .collect();
+
+        NamedRecordDecl {
+            name: decl.get_name().unwrap(),
+            fields,
+            kind,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct FuncDecl {
     name: String,
@@ -1181,7 +1222,7 @@ enum Decl {
     Interface(InterfaceDecl),
     Category(CategoryDecl),
     Typedef(TypedefDecl),
-    // NamedRecord(NamedRecordDecl),
+    NamedRecord(NamedRecordDecl),
     // Enum(EnumDecl),
     Func(FuncDecl),
     // Var(VarDecl),
@@ -1251,6 +1292,13 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<Decl>, ParseError> {
             EntityKind::FunctionDecl => {
                 objc_decls.push(Decl::Func(FuncDecl::from(&entity)));
             }
+            EntityKind::StructDecl | EntityKind::UnionDecl => {
+                if let Some(def) = entity.get_definition() {
+                    if def == entity && def.get_name().is_some() {
+                        objc_decls.push(Decl::NamedRecord(NamedRecordDecl::from(&entity)));
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -1259,15 +1307,16 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<Decl>, ParseError> {
 
 fn main() {
     let source = "
-        @interface X
-        @end
-        @interface I<T>: X
-        - (T _Nonnull)foo;
-        @end
+        // @interface X
+        // @end
+        // @interface I<T>: X
+        // - (T _Nonnull)foo;
+        // @end
         // int foo();
         // #import <AVFoundation/AVFoundation.h>
         // #import <Cocoa/Cocoa.h>
         // struct ll { struct ll *next; };
+        typedef struct { int a; } foo;
         // @interface I
         // - (struct ll)foo;
         // - (enum { V1 = -10000000000, V2 })bar;
@@ -1653,127 +1702,127 @@ mod tests {
         assert_eq!(parsed_decls, expected_decls);
     }
 
-    // #[test]
-    // fn test_struct() {
-    //     let clang = Clang::new().expect("Could not load libclang");
+    #[test]
+    fn test_struct() {
+        let clang = Clang::new().expect("Could not load libclang");
 
-    //     let source = "
-    //             typedef struct S { int x; } T;
-    //             @interface A
-    //             - (struct S)standardStruct;
-    //             - (struct { float f; union { int i; double d; }; })inlineUnnamedStruct;
-    //             - (T *)pointerToStructTypedef;
-    //             - (struct Undeclared *)pointerToUndeclaredStruct;
-    //             - (struct DeclaredAfterwards *)pointerToStructDeclaredAfterwards;
-    //             @end
-    //             struct DeclaredAfterwards { char c; };
-    //         ";
+        let source = "
+                typedef struct S { int x; } T;
+                @interface A
+                - (struct S)standardStruct;
+                - (struct { float f; union { int i; double d; }; })inlineUnnamedStruct;
+                - (T *)pointerToStructTypedef;
+                - (struct Undeclared *)pointerToUndeclaredStruct;
+                - (struct DeclaredAfterwards *)pointerToStructDeclaredAfterwards;
+                @end
+                struct DeclaredAfterwards { char c; };
+            ";
 
-    //     let expected_decls = vec![Decl::Interface(InterfaceDecl {
-    //         name: "A".to_string(),
-    //         superclass: None,
-    //         adopted_protocols: vec![],
-    //         template_params: vec![],
-    //         methods: vec![
-    //             ObjCMethod {
-    //                 name: "standardStruct".to_string(),
-    //                 kind: ObjCMethodKind::Instance,
-    //                 params: vec![],
-    //                 result: ObjCType::Record(Record {
-    //                     name: Some("S".to_string()),
-    //                     kind: RecordKind::Struct,
-    //                     fields: Some(vec![Field {
-    //                         name: Some("x".to_string()),
-    //                         objc_type: ObjCType::Num(NumKind::Int),
-    //                     }]),
-    //                 }),
-    //             },
-    //             ObjCMethod {
-    //                 name: "inlineUnnamedStruct".to_string(),
-    //                 kind: ObjCMethodKind::Instance,
-    //                 params: vec![],
-    //                 result: ObjCType::Record(Record {
-    //                     name: None,
-    //                     kind: RecordKind::Struct,
-    //                     fields: Some(vec![
-    //                         Field {
-    //                             name: Some("f".to_string()),
-    //                             objc_type: ObjCType::Float,
-    //                         },
-    //                         Field {
-    //                             name: None,
-    //                             objc_type: ObjCType::Record(Record {
-    //                                 name: None,
-    //                                 kind: RecordKind::Union,
-    //                                 fields: Some(vec![
-    //                                     Field {
-    //                                         name: Some("i".to_string()),
-    //                                         objc_type: ObjCType::Num(NumKind::Int),
-    //                                     },
-    //                                     Field {
-    //                                         name: Some("d".to_string()),
-    //                                         objc_type: ObjCType::Double,
-    //                                     },
-    //                                 ]),
-    //                             }),
-    //                         },
-    //                     ]),
-    //                 }),
-    //             },
-    //             ObjCMethod {
-    //                 name: "pointerToStructTypedef".to_string(),
-    //                 kind: ObjCMethodKind::Instance,
-    //                 params: vec![],
-    //                 result: ObjCType::Pointer(Pointer {
-    //                     pointee: Box::new(ObjCType::Typedef(Typedef {
-    //                         name: "T".to_string(),
-    //                         underlying: Box::new(ObjCType::Record(Record {
-    //                             name: Some("S".to_string()),
-    //                             kind: RecordKind::Struct,
-    //                             fields: Some(vec![Field {
-    //                                 name: Some("x".to_string()),
-    //                                 objc_type: ObjCType::Num(NumKind::Int),
-    //                             }]),
-    //                         })),
-    //                     })),
-    //                     nullability: Nullability::Unspecified,
-    //                 }),
-    //             },
-    //             ObjCMethod {
-    //                 name: "pointerToUndeclaredStruct".to_string(),
-    //                 kind: ObjCMethodKind::Instance,
-    //                 params: vec![],
-    //                 result: ObjCType::Pointer(Pointer {
-    //                     pointee: Box::new(ObjCType::Record(Record {
-    //                         name: Some("Undeclared".to_string()),
-    //                         kind: RecordKind::Struct,
-    //                         fields: None,
-    //                     })),
-    //                     nullability: Nullability::Unspecified,
-    //                 }),
-    //             },
-    //             ObjCMethod {
-    //                 name: "pointerToStructDeclaredAfterwards".to_string(),
-    //                 kind: ObjCMethodKind::Instance,
-    //                 params: vec![],
-    //                 result: ObjCType::Pointer(Pointer {
-    //                     pointee: Box::new(ObjCType::Record(Record {
-    //                         name: Some("DeclaredAfterwards".to_string()),
-    //                         kind: RecordKind::Struct,
-    //                         fields: Some(vec![Field {
-    //                             name: Some("c".to_string()),
-    //                             objc_type: ObjCType::Num(NumKind::SChar),
-    //                         }]),
-    //                     })),
-    //                     nullability: Nullability::Unspecified,
-    //                 }),
-    //             },
-    //         ],
-    //     })];
+        let expected_decls = vec![
+            Decl::NamedRecord(NamedRecordDecl {
+                name: "S".to_string(),
+                fields: vec![Field {
+                    name: Some("x".to_string()),
+                    objc_type: ObjCType::Num(NumKind::Int),
+                }],
+                kind: RecordKind::Struct,
+            }),
+            Decl::Typedef(TypedefDecl {
+                name: "T".to_string(),
+                underlying: ObjCType::Record(Record::NamedStruct {
+                    name: "S".to_string(),
+                }),
+            }),
+            Decl::Interface(InterfaceDecl {
+                name: "A".to_string(),
+                superclass: None,
+                adopted_protocols: vec![],
+                template_params: vec![],
+                methods: vec![
+                    ObjCMethod {
+                        name: "standardStruct".to_string(),
+                        kind: ObjCMethodKind::Instance,
+                        params: vec![],
+                        result: ObjCType::Record(Record::NamedStruct {
+                            name: "S".to_string(),
+                        }),
+                    },
+                    ObjCMethod {
+                        name: "inlineUnnamedStruct".to_string(),
+                        kind: ObjCMethodKind::Instance,
+                        params: vec![],
+                        result: ObjCType::Record(Record::UnnamedStruct {
+                            fields: vec![
+                                Field {
+                                    name: Some("f".to_string()),
+                                    objc_type: ObjCType::Num(NumKind::Float),
+                                },
+                                Field {
+                                    name: None,
+                                    objc_type: ObjCType::Record(Record::UnnamedUnion {
+                                        fields: vec![
+                                            Field {
+                                                name: Some("i".to_string()),
+                                                objc_type: ObjCType::Num(NumKind::Int),
+                                            },
+                                            Field {
+                                                name: Some("d".to_string()),
+                                                objc_type: ObjCType::Num(NumKind::Double),
+                                            },
+                                        ],
+                                    }),
+                                },
+                            ],
+                        }),
+                    },
+                    ObjCMethod {
+                        name: "pointerToStructTypedef".to_string(),
+                        kind: ObjCMethodKind::Instance,
+                        params: vec![],
+                        result: ObjCType::Pointer(Pointer {
+                            pointee: Box::new(ObjCType::Typedef(Typedef {
+                                name: "T".to_string(),
+                            })),
+                            nullability: Nullability::Unspecified,
+                        }),
+                    },
+                    ObjCMethod {
+                        name: "pointerToUndeclaredStruct".to_string(),
+                        kind: ObjCMethodKind::Instance,
+                        params: vec![],
+                        result: ObjCType::Pointer(Pointer {
+                            pointee: Box::new(ObjCType::Record(Record::NamedStruct {
+                                name: "Undeclared".to_string(),
+                            })),
+                            nullability: Nullability::Unspecified,
+                        }),
+                    },
+                    ObjCMethod {
+                        name: "pointerToStructDeclaredAfterwards".to_string(),
+                        kind: ObjCMethodKind::Instance,
+                        params: vec![],
+                        result: ObjCType::Pointer(Pointer {
+                            pointee: Box::new(ObjCType::Record(Record::NamedStruct {
+                                name: "DeclaredAfterwards".to_string(),
+                            })),
+                            nullability: Nullability::Unspecified,
+                        }),
+                    },
+                ],
+            }),
+            Decl::NamedRecord(NamedRecordDecl {
+                name: "DeclaredAfterwards".to_string(),
+                fields: vec![Field {
+                    name: Some("c".to_string()),
+                    objc_type: ObjCType::Num(NumKind::SChar),
+                }],
+                kind: RecordKind::Struct,
+            }),
+        ];
 
-    //     let parsed_decls = parse_objc(&clang, source).unwrap();
-    //     assert_eq!(parsed_decls, expected_decls);
-    // }
+        let parsed_decls = parse_objc(&clang, source).unwrap();
+        assert_eq!(parsed_decls, expected_decls);
+    }
 
     // #[test]
     // fn test_function_pointers() {
@@ -1821,7 +1870,7 @@ mod tests {
     //                         result: Box::new(ObjCType::Num(NumKind::Int)),
     //                         params: Some(vec![Param {
     //                             name: None,
-    //                             objc_type: ObjCType::Float,
+    //                             objc_type: ObjCType::Num(NumKind::Float),
     //                         }]),
     //                         is_variadic: true,
     //                     })),
@@ -1874,7 +1923,7 @@ mod tests {
     //                                 result: Box::new(ObjCType::Num(NumKind::SChar)),
     //                                 params: Some(vec![Param {
     //                                     name: Some("outerParam".to_string()),
-    //                                     objc_type: ObjCType::Float,
+    //                                     objc_type: ObjCType::Num(NumKind::Float),
     //                                 }]),
     //                                 is_variadic: false,
     //                             })),
@@ -1882,7 +1931,7 @@ mod tests {
     //                         })),
     //                         params: Some(vec![Param {
     //                             name: Some("innerParam".to_string()),
-    //                             objc_type: ObjCType::Double,
+    //                             objc_type: ObjCType::Num(NumKind::Double),
     //                         }]),
     //                         is_variadic: false,
     //                     })),
@@ -1926,7 +1975,7 @@ mod tests {
     //                                 params: Some(vec![
     //                                     Param {
     //                                         name: Some("someFloat".to_string()),
-    //                                         objc_type: ObjCType::Float,
+    //                                         objc_type: ObjCType::Num(NumKind::Float),
     //                                     },
     //                                     Param {
     //                                         name: Some("functionPointerParam".to_string()),
