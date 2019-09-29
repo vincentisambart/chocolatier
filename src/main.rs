@@ -1442,11 +1442,11 @@ mod tests {
         let clang = Clang::new().expect("Could not load libclang");
 
         let source = "
-                @interface A
-                @end
-                @interface B: A
-                @end
-            ";
+            @interface A
+            @end
+            @interface B: A
+            @end
+        ";
 
         let expected_decls = vec![
             Decl::Interface(InterfaceDecl {
@@ -1474,12 +1474,12 @@ mod tests {
         let clang = Clang::new().expect("Could not load libclang");
 
         let source = "
-                @interface A
-                @end
-                @interface B<X, Y, Z>: A
-                - (X _Nonnull)x;
-                @end
-            ";
+            @interface A
+            @end
+            @interface B<X, Y, Z>: A
+            - (X _Nonnull)x;
+            @end
+        ";
 
         let expected_decls = vec![
             Decl::Interface(InterfaceDecl {
@@ -1515,16 +1515,16 @@ mod tests {
         let clang = Clang::new().expect("Could not load libclang");
 
         let source = "
-                @protocol B
-                @end
-                @protocol C, D;
-                @protocol A
-                - (void)x;
-                @optional
-                + (void)y;
-                - (int)z;
-                @end
-            ";
+            @protocol B
+            @end
+            @protocol C, D;
+            @protocol A
+            - (void)x;
+            @optional
+            + (void)y;
+            - (int)z;
+            @end
+        ";
 
         let expected_decls = vec![
             Decl::Protocol(ProtocolDecl {
@@ -1576,13 +1576,13 @@ mod tests {
         let clang = Clang::new().expect("Could not load libclang");
 
         let source = "
-                @protocol P;
-                @interface A
-                @end
-                @interface A (Categ) <P>
-                - (void)foo;
-                @end
-            ";
+            @protocol P;
+            @interface A
+            @end
+            @interface A (Categ) <P>
+            - (void)foo;
+            @end
+        ";
 
         let expected_decls = vec![
             Decl::Interface(InterfaceDecl {
@@ -1614,13 +1614,13 @@ mod tests {
         let clang = Clang::new().expect("Could not load libclang");
 
         let source = "
-                @protocol P;
-                @interface A
-                - (id)x;
-                - (id<P>)y;
-                - (id<P> _Nonnull)z;
-                @end
-            ";
+            @protocol P;
+            @interface A
+            - (id)x;
+            - (id<P>)y;
+            - (id<P> _Nonnull)z;
+            @end
+        ";
 
         let expected_decls = vec![Decl::Interface(InterfaceDecl {
             name: "A".to_string(),
@@ -1671,11 +1671,11 @@ mod tests {
         let clang = Clang::new().expect("Could not load libclang");
 
         let source = "
-                typedef int I;
-                @interface A
-                - (I)foo;
-                @end
-            ";
+            typedef int I;
+            @interface A
+            - (I)foo;
+            @end
+        ";
 
         let expected_decls = vec![
             Decl::Typedef(TypedefDecl {
@@ -1707,16 +1707,16 @@ mod tests {
         let clang = Clang::new().expect("Could not load libclang");
 
         let source = "
-                typedef struct S { int x; } T;
-                @interface A
-                - (struct S)standardStruct;
-                - (struct { float f; union { int i; double d; }; })inlineUnnamedStruct;
-                - (T *)pointerToStructTypedef;
-                - (struct Undeclared *)pointerToUndeclaredStruct;
-                - (struct DeclaredAfterwards *)pointerToStructDeclaredAfterwards;
-                @end
-                struct DeclaredAfterwards { char c; };
-            ";
+            typedef struct S { int x; } T;
+            @interface A
+            - (struct S)standardStruct;
+            - (struct { float f; union { int i; double d; }; })inlineUnnamedStruct;
+            - (T *)pointerToStructTypedef;
+            - (struct Undeclared *)pointerToUndeclaredStruct;
+            - (struct DeclaredAfterwards *)pointerToStructDeclaredAfterwards;
+            @end
+            struct DeclaredAfterwards { char c; };
+        ";
 
         let expected_decls = vec![
             Decl::NamedRecord(NamedRecordDecl {
@@ -2028,68 +2028,111 @@ mod tests {
     //     assert_eq!(parsed_decls, expected_decls);
     // }
 
-    // #[test]
-    // fn test_method_for_selector() {
-    //     let clang = Clang::new().expect("Could not load libclang");
+    #[test]
+    fn test_method_for_selector() {
+        let clang = Clang::new().expect("Could not load libclang");
 
-    //     // Taken from system headers
-    //     let source = "
-    //             typedef struct objc_class *Class;
-    //             struct objc_object {
-    //                 Class _Nonnull isa __attribute__((deprecated));
-    //             };
-    //             typedef struct objc_object *id;
-    //             typedef struct objc_selector *SEL;
-    //             typedef id _Nullable (*IMP)(id _Nonnull, SEL _Nonnull, ...);
+        // Taken from system headers
+        let source = "
+            typedef struct objc_class *Class;
+            struct objc_object {
+                Class _Nonnull isa __attribute__((deprecated));
+            };
+            typedef struct objc_object *id;
+            typedef struct objc_selector *SEL;
+            typedef id _Nullable (*IMP)(id _Nonnull, SEL _Nonnull, ...);
 
-    //             @protocol P
-    //             - (IMP)methodForSelector:(SEL)aSelector;
-    //             @end
-    //         ";
+            @protocol P
+            - (IMP)methodForSelector:(SEL)aSelector;
+            @end
+        ";
 
-    //     let expected_decls = vec![Decl::Protocol(ProtocolDecl {
-    //         name: "P".to_string(),
-    //         inherited_protocols: vec![],
-    //         methods: vec![ProtocolMethod {
-    //             method: ObjCMethod {
-    //                 name: "methodForSelector:".to_string(),
-    //                 kind: ObjCMethodKind::Instance,
-    //                 params: vec![ObjCParam {
-    //                     name: "aSelector".to_string(),
-    //                     objc_type: ObjCType::ObjCSel(Nullability::Unspecified),
-    //                 }],
-    //                 result: ObjCType::Typedef(Typedef {
-    //                     name: "IMP".to_string(),
-    //                     underlying: Box::new(ObjCType::Pointer(Pointer {
-    //                         pointee: Box::new(ObjCType::Function(CallableDesc {
-    //                             result: Box::new(ObjCType::ObjCId(ObjCId {
-    //                                 protocols: vec![],
-    //                                 nullability: Nullability::Nullable,
-    //                             })),
-    //                             params: Some(vec![
-    //                                 Param {
-    //                                     name: None,
-    //                                     objc_type: ObjCType::ObjCId(ObjCId {
-    //                                         protocols: vec![],
-    //                                         nullability: Nullability::NonNull,
-    //                                     }),
-    //                                 },
-    //                                 Param {
-    //                                     name: None,
-    //                                     objc_type: ObjCType::ObjCSel(Nullability::NonNull),
-    //                                 },
-    //                             ]),
-    //                             is_variadic: true,
-    //                         })),
-    //                         nullability: Nullability::Unspecified,
-    //                     })),
-    //                 }),
-    //             },
-    //             is_optional: false,
-    //         }],
-    //     })];
+        let expected_decls = vec![
+            Decl::Typedef(TypedefDecl {
+                name: "Class".to_string(),
+                underlying: ObjCType::Pointer(Pointer {
+                    pointee: Box::new(ObjCType::Record(Record::NamedStruct {
+                        name: "objc_class".to_string(),
+                    })),
+                    nullability: Nullability::Unspecified,
+                }),
+            }),
+            Decl::NamedRecord(NamedRecordDecl {
+                name: "objc_object".to_string(),
+                fields: vec![Field {
+                    name: Some("isa".to_string()),
+                    objc_type: ObjCType::ObjPtr(ObjPtr {
+                        kind: ObjPtrKind::Class,
+                        nullability: Nullability::NonNull,
+                    }),
+                }],
+                kind: RecordKind::Struct,
+            }),
+            Decl::Typedef(TypedefDecl {
+                name: "id".to_string(),
+                underlying: ObjCType::Pointer(Pointer {
+                    pointee: Box::new(ObjCType::Record(Record::NamedStruct {
+                        name: "objc_object".to_string(),
+                    })),
+                    nullability: Nullability::Unspecified,
+                }),
+            }),
+            Decl::Typedef(TypedefDecl {
+                name: "SEL".to_string(),
+                underlying: ObjCType::Pointer(Pointer {
+                    pointee: Box::new(ObjCType::Record(Record::NamedStruct {
+                        name: "objc_selector".to_string(),
+                    })),
+                    nullability: Nullability::Unspecified,
+                }),
+            }),
+            Decl::Typedef(TypedefDecl {
+                name: "IMP".to_string(),
+                underlying: ObjCType::Pointer(Pointer {
+                    pointee: Box::new(ObjCType::Function(CallableDesc {
+                        result: Box::new(ObjCType::ObjPtr(ObjPtr {
+                            kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
+                            nullability: Nullability::Nullable,
+                        })),
+                        params: Some(vec![
+                            Param {
+                                name: None,
+                                objc_type: ObjCType::ObjPtr(ObjPtr {
+                                    kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
+                                    nullability: Nullability::NonNull,
+                                }),
+                            },
+                            Param {
+                                name: None,
+                                objc_type: ObjCType::ObjCSel(Nullability::NonNull),
+                            },
+                        ]),
+                        is_variadic: true,
+                    })),
+                    nullability: Nullability::Unspecified,
+                }),
+            }),
+            Decl::Protocol(ProtocolDecl {
+                name: "P".to_string(),
+                inherited_protocols: vec![],
+                methods: vec![ProtocolMethod {
+                    method: ObjCMethod {
+                        name: "methodForSelector:".to_string(),
+                        kind: ObjCMethodKind::Instance,
+                        params: vec![ObjCParam {
+                            name: "aSelector".to_string(),
+                            objc_type: ObjCType::ObjCSel(Nullability::Unspecified),
+                        }],
+                        result: ObjCType::Typedef(Typedef {
+                            name: "IMP".to_string(),
+                        }),
+                    },
+                    is_optional: false,
+                }],
+            }),
+        ];
 
-    //     let parsed_decls = parse_objc(&clang, source).unwrap();
-    //     assert_eq!(parsed_decls, expected_decls);
-    // }
+        let parsed_decls = parse_objc(&clang, source).unwrap();
+        assert_eq!(parsed_decls, expected_decls);
+    }
 }
