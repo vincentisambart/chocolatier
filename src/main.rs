@@ -1824,209 +1824,206 @@ mod tests {
         assert_eq!(parsed_decls, expected_decls);
     }
 
-    // #[test]
-    // fn test_function_pointers() {
-    //     let clang = Clang::new().expect("Could not load libclang");
+    #[test]
+    fn test_function_pointers() {
+        let clang = Clang::new().expect("Could not load libclang");
 
-    //     let source = "
-    //             typedef void (*T)(int typedefParam);
-    //             @interface A
-    //             - (int(*)())returningFunctionPointerWithUndefinedParameters;
-    //             - (int(*)(float, ...))returningFunctionPointerVariadic;
-    //             - (int(*)(void))returningFunctionPointerWithNoParameters;
-    //             - (T)returningFunctionPointerTypedef;
-    //             - (char (*(*)(double innerParam))(float outerParam))returningFunctionPointerReturningFunctionPointer;
-    //             - (A *(*)(short returnedFunctionParameter))takingTypedef:(T)typedefParam andFunctionPointersTakingFunctionPointers:(A *(*)(float someFloat, int (*functionPointerParam)(char someChar)))complicatedParam;
-    //             @end
-    //         ";
+        let source = "
+            typedef void (*T)(int typedefParam);
+            @interface A
+            - (int(*)())returningFunctionPointerWithUndefinedParameters;
+            - (int(*)(float, ...))returningFunctionPointerVariadic;
+            - (int(*)(void))returningFunctionPointerWithNoParameters;
+            - (T)returningFunctionPointerTypedef;
+            - (char (*(*)(double innerParam))(float outerParam))returningFunctionPointerReturningFunctionPointer;
+            - (A *(*)(short returnedFunctionParameter))takingTypedef:(T)typedefParam andFunctionPointersTakingFunctionPointers:(A *(*)(float someFloat, int (*functionPointerParam)(char someChar)))complicatedParam;
+            @end
+        ";
 
-    //     let expected_decls = vec![Decl::Interface(InterfaceDecl {
-    //         name: "A".to_string(),
-    //         superclass: None,
-    //         adopted_protocols: vec![],
-    //         template_params: vec![],
-    //         methods: vec![
-    //             // - (int(*)())returningFunctionPointerWithUndefinedParameters;
-    //             ObjCMethod {
-    //                 name: "returningFunctionPointerWithUndefinedParameters".to_string(),
-    //                 kind: ObjCMethodKind::Instance,
-    //                 params: vec![],
-    //                 result: ObjCType::Pointer(Pointer {
-    //                     pointee: Box::new(ObjCType::Function(CallableDesc {
-    //                         result: Box::new(ObjCType::Num(NumKind::Int)),
-    //                         params: None,
-    //                         is_variadic: true,
-    //                     })),
-    //                     nullability: Nullability::Unspecified,
-    //                 }),
-    //             },
-    //             // - (int(*)(float, ...))returningFunctionPointerVariadic;
-    //             ObjCMethod {
-    //                 name: "returningFunctionPointerVariadic".to_string(),
-    //                 kind: ObjCMethodKind::Instance,
-    //                 params: vec![],
-    //                 result: ObjCType::Pointer(Pointer {
-    //                     pointee: Box::new(ObjCType::Function(CallableDesc {
-    //                         result: Box::new(ObjCType::Num(NumKind::Int)),
-    //                         params: Some(vec![Param {
-    //                             name: None,
-    //                             objc_type: ObjCType::Num(NumKind::Float),
-    //                         }]),
-    //                         is_variadic: true,
-    //                     })),
-    //                     nullability: Nullability::Unspecified,
-    //                 }),
-    //             },
-    //             // - (int(*)(void))returningFunctionPointerWithNoParameters;
-    //             ObjCMethod {
-    //                 name: "returningFunctionPointerWithNoParameters".to_string(),
-    //                 kind: ObjCMethodKind::Instance,
-    //                 params: vec![],
-    //                 result: ObjCType::Pointer(Pointer {
-    //                     pointee: Box::new(ObjCType::Function(CallableDesc {
-    //                         result: Box::new(ObjCType::Num(NumKind::Int)),
-    //                         params: Some(vec![]),
-    //                         is_variadic: false,
-    //                     })),
-    //                     nullability: Nullability::Unspecified,
-    //                 }),
-    //             },
-    //             // - (T)returningFunctionPointerTypedef;
-    //             ObjCMethod {
-    //                 name: "returningFunctionPointerTypedef".to_string(),
-    //                 kind: ObjCMethodKind::Instance,
-    //                 params: vec![],
-    //                 result: ObjCType::Typedef(Typedef {
-    //                     name: "T".to_string(),
-    //                     underlying: Box::new(ObjCType::Pointer(Pointer {
-    //                         pointee: Box::new(ObjCType::Function(CallableDesc {
-    //                             result: Box::new(ObjCType::Void),
-    //                             params: Some(vec![Param {
-    //                                 name: Some("typedefParam".to_string()),
-    //                                 objc_type: ObjCType::Num(NumKind::Int),
-    //                             }]),
-    //                             is_variadic: false,
-    //                         })),
-    //                         nullability: Nullability::Unspecified,
-    //                     })),
-    //                 }),
-    //             },
-    //             // - (char (*(*)(double innerParam))(float outerParam))returningFunctionPointerReturningFunctionPointer;
-    //             ObjCMethod {
-    //                 name: "returningFunctionPointerReturningFunctionPointer".to_string(),
-    //                 kind: ObjCMethodKind::Instance,
-    //                 params: vec![],
-    //                 result: ObjCType::Pointer(Pointer {
-    //                     pointee: Box::new(ObjCType::Function(CallableDesc {
-    //                         result: Box::new(ObjCType::Pointer(Pointer {
-    //                             pointee: Box::new(ObjCType::Function(CallableDesc {
-    //                                 result: Box::new(ObjCType::Num(NumKind::SChar)),
-    //                                 params: Some(vec![Param {
-    //                                     name: Some("outerParam".to_string()),
-    //                                     objc_type: ObjCType::Num(NumKind::Float),
-    //                                 }]),
-    //                                 is_variadic: false,
-    //                             })),
-    //                             nullability: Nullability::Unspecified,
-    //                         })),
-    //                         params: Some(vec![Param {
-    //                             name: Some("innerParam".to_string()),
-    //                             objc_type: ObjCType::Num(NumKind::Double),
-    //                         }]),
-    //                         is_variadic: false,
-    //                     })),
-    //                     nullability: Nullability::Unspecified,
-    //                 }),
-    //             },
-    //             // - (A *(*)(short returnedFunctionParameter))takingTypedef:(T)typedefParam andFunctionPointersTakingFunctionPointers:(A *(*)(float someFloat, int (*functionPointerParam)(char someChar)))complicatedParam;
-    //             ObjCMethod {
-    //                 name: "takingTypedef:andFunctionPointersTakingFunctionPointers:".to_string(),
-    //                 kind: ObjCMethodKind::Instance,
-    //                 params: vec![
-    //                     ObjCParam {
-    //                         name: "typedefParam".to_string(),
-    //                         objc_type: ObjCType::Typedef(Typedef {
-    //                             name: "T".to_string(),
-    //                             underlying: Box::new(ObjCType::Pointer(Pointer {
-    //                                 pointee: Box::new(ObjCType::Function(CallableDesc {
-    //                                     result: Box::new(ObjCType::Void),
-    //                                     params: Some(vec![Param {
-    //                                         name: Some("typedefParam".to_string()),
-    //                                         objc_type: ObjCType::Num(NumKind::Int),
-    //                                     }]),
-    //                                     is_variadic: false,
-    //                                 })),
-    //                                 nullability: Nullability::Unspecified,
-    //                             })),
-    //                         }),
-    //                     },
-    //                     ObjCParam {
-    //                         name: "complicatedParam".to_string(),
-    //                         objc_type: ObjCType::Pointer(Pointer {
-    //                             pointee: Box::new(ObjCType::Function(CallableDesc {
-    //                                 result: Box::new(ObjCType::ObjCObjectPointer(
-    //                                     ObjCObjectPointer {
-    //                                         interface: "A".to_string(),
-    //                                         protocols: vec![],
-    //                                         type_args: vec![],
-    //                                         nullability: Nullability::Unspecified,
-    //                                     },
-    //                                 )),
-    //                                 params: Some(vec![
-    //                                     Param {
-    //                                         name: Some("someFloat".to_string()),
-    //                                         objc_type: ObjCType::Num(NumKind::Float),
-    //                                     },
-    //                                     Param {
-    //                                         name: Some("functionPointerParam".to_string()),
-    //                                         objc_type: ObjCType::Pointer(Pointer {
-    //                                             pointee: Box::new(ObjCType::Function(
-    //                                                 CallableDesc {
-    //                                                     result: Box::new(ObjCType::Num(
-    //                                                         NumKind::Int,
-    //                                                     )),
-    //                                                     params: Some(vec![Param {
-    //                                                         name: Some("someChar".to_string()),
-    //                                                         objc_type: ObjCType::Num(
-    //                                                             NumKind::SChar,
-    //                                                         ),
-    //                                                     }]),
-    //                                                     is_variadic: false,
-    //                                                 },
-    //                                             )),
-    //                                             nullability: Nullability::Unspecified,
-    //                                         }),
-    //                                     },
-    //                                 ]),
-    //                                 is_variadic: false,
-    //                             })),
-    //                             nullability: Nullability::Unspecified,
-    //                         }),
-    //                     },
-    //                 ],
-    //                 result: ObjCType::Pointer(Pointer {
-    //                     pointee: Box::new(ObjCType::Function(CallableDesc {
-    //                         result: Box::new(ObjCType::ObjCObjectPointer(ObjCObjectPointer {
-    //                             interface: "A".to_string(),
-    //                             protocols: vec![],
-    //                             type_args: vec![],
-    //                             nullability: Nullability::Unspecified,
-    //                         })),
-    //                         params: Some(vec![Param {
-    //                             name: Some("returnedFunctionParameter".to_string()),
-    //                             objc_type: ObjCType::Num(NumKind::Short),
-    //                         }]),
-    //                         is_variadic: false,
-    //                     })),
-    //                     nullability: Nullability::Unspecified,
-    //                 }),
-    //             },
-    //         ],
-    //     })];
+        let expected_decls = vec![
+            Decl::Typedef(TypedefDecl {
+                name: "T".to_string(),
+                underlying: ObjCType::Pointer(Pointer {
+                    pointee: Box::new(ObjCType::Function(CallableDesc {
+                        result: Box::new(ObjCType::Void),
+                        params: Some(vec![Param {
+                            name: Some("typedefParam".to_string()),
+                            objc_type: ObjCType::Num(NumKind::Int),
+                        }]),
+                        is_variadic: false,
+                    })),
+                    nullability: Nullability::Unspecified,
+                }),
+            }),
+            Decl::Interface(InterfaceDecl {
+                name: "A".to_string(),
+                superclass: None,
+                adopted_protocols: vec![],
+                template_params: vec![],
+                methods: vec![
+                    // - (int(*)())returningFunctionPointerWithUndefinedParameters;
+                    ObjCMethod {
+                        name: "returningFunctionPointerWithUndefinedParameters".to_string(),
+                        kind: ObjCMethodKind::Instance,
+                        params: vec![],
+                        result: ObjCType::Pointer(Pointer {
+                            pointee: Box::new(ObjCType::Function(CallableDesc {
+                                result: Box::new(ObjCType::Num(NumKind::Int)),
+                                params: None,
+                                is_variadic: true,
+                            })),
+                            nullability: Nullability::Unspecified,
+                        }),
+                    },
+                    // - (int(*)(float, ...))returningFunctionPointerVariadic;
+                    ObjCMethod {
+                        name: "returningFunctionPointerVariadic".to_string(),
+                        kind: ObjCMethodKind::Instance,
+                        params: vec![],
+                        result: ObjCType::Pointer(Pointer {
+                            pointee: Box::new(ObjCType::Function(CallableDesc {
+                                result: Box::new(ObjCType::Num(NumKind::Int)),
+                                params: Some(vec![Param {
+                                    name: None,
+                                    objc_type: ObjCType::Num(NumKind::Float),
+                                }]),
+                                is_variadic: true,
+                            })),
+                            nullability: Nullability::Unspecified,
+                        }),
+                    },
+                    // - (int(*)(void))returningFunctionPointerWithNoParameters;
+                    ObjCMethod {
+                        name: "returningFunctionPointerWithNoParameters".to_string(),
+                        kind: ObjCMethodKind::Instance,
+                        params: vec![],
+                        result: ObjCType::Pointer(Pointer {
+                            pointee: Box::new(ObjCType::Function(CallableDesc {
+                                result: Box::new(ObjCType::Num(NumKind::Int)),
+                                params: Some(vec![]),
+                                is_variadic: false,
+                            })),
+                            nullability: Nullability::Unspecified,
+                        }),
+                    },
+                    // - (T)returningFunctionPointerTypedef;
+                    ObjCMethod {
+                        name: "returningFunctionPointerTypedef".to_string(),
+                        kind: ObjCMethodKind::Instance,
+                        params: vec![],
+                        result: ObjCType::Typedef(Typedef {
+                            name: "T".to_string(),
+                        }),
+                    },
+                    // - (char (*(*)(double innerParam))(float outerParam))returningFunctionPointerReturningFunctionPointer;
+                    ObjCMethod {
+                        name: "returningFunctionPointerReturningFunctionPointer".to_string(),
+                        kind: ObjCMethodKind::Instance,
+                        params: vec![],
+                        result: ObjCType::Pointer(Pointer {
+                            pointee: Box::new(ObjCType::Function(CallableDesc {
+                                result: Box::new(ObjCType::Pointer(Pointer {
+                                    pointee: Box::new(ObjCType::Function(CallableDesc {
+                                        result: Box::new(ObjCType::Num(NumKind::SChar)),
+                                        params: Some(vec![Param {
+                                            name: Some("outerParam".to_string()),
+                                            objc_type: ObjCType::Num(NumKind::Float),
+                                        }]),
+                                        is_variadic: false,
+                                    })),
+                                    nullability: Nullability::Unspecified,
+                                })),
+                                params: Some(vec![Param {
+                                    name: Some("innerParam".to_string()),
+                                    objc_type: ObjCType::Num(NumKind::Double),
+                                }]),
+                                is_variadic: false,
+                            })),
+                            nullability: Nullability::Unspecified,
+                        }),
+                    },
+                    // - (A *(*)(short returnedFunctionParameter))takingTypedef:(T)typedefParam andFunctionPointersTakingFunctionPointers:(A *(*)(float someFloat, int (*functionPointerParam)(char someChar)))complicatedParam;
+                    ObjCMethod {
+                        name: "takingTypedef:andFunctionPointersTakingFunctionPointers:"
+                            .to_string(),
+                        kind: ObjCMethodKind::Instance,
+                        params: vec![
+                            ObjCParam {
+                                name: "typedefParam".to_string(),
+                                objc_type: ObjCType::Typedef(Typedef {
+                                    name: "T".to_string(),
+                                }),
+                            },
+                            ObjCParam {
+                                name: "complicatedParam".to_string(),
+                                objc_type: ObjCType::Pointer(Pointer {
+                                    pointee: Box::new(ObjCType::Function(CallableDesc {
+                                        result: Box::new(ObjCType::ObjPtr(ObjPtr {
+                                            kind: ObjPtrKind::SomeInstance(SomeInstanceObjPtr {
+                                                interface: "A".to_string(),
+                                                protocols: vec![],
+                                                type_args: vec![],
+                                            }),
+                                            nullability: Nullability::Unspecified,
+                                        })),
+                                        params: Some(vec![
+                                            Param {
+                                                name: Some("someFloat".to_string()),
+                                                objc_type: ObjCType::Num(NumKind::Float),
+                                            },
+                                            Param {
+                                                name: Some("functionPointerParam".to_string()),
+                                                objc_type: ObjCType::Pointer(Pointer {
+                                                    pointee: Box::new(ObjCType::Function(
+                                                        CallableDesc {
+                                                            result: Box::new(ObjCType::Num(
+                                                                NumKind::Int,
+                                                            )),
+                                                            params: Some(vec![Param {
+                                                                name: Some("someChar".to_string()),
+                                                                objc_type: ObjCType::Num(
+                                                                    NumKind::SChar,
+                                                                ),
+                                                            }]),
+                                                            is_variadic: false,
+                                                        },
+                                                    )),
+                                                    nullability: Nullability::Unspecified,
+                                                }),
+                                            },
+                                        ]),
+                                        is_variadic: false,
+                                    })),
+                                    nullability: Nullability::Unspecified,
+                                }),
+                            },
+                        ],
+                        result: ObjCType::Pointer(Pointer {
+                            pointee: Box::new(ObjCType::Function(CallableDesc {
+                                result: Box::new(ObjCType::ObjPtr(ObjPtr {
+                                    kind: ObjPtrKind::SomeInstance(SomeInstanceObjPtr {
+                                        interface: "A".to_string(),
+                                        protocols: vec![],
+                                        type_args: vec![],
+                                    }),
+                                    nullability: Nullability::Unspecified,
+                                })),
+                                params: Some(vec![Param {
+                                    name: Some("returnedFunctionParameter".to_string()),
+                                    objc_type: ObjCType::Num(NumKind::Short),
+                                }]),
+                                is_variadic: false,
+                            })),
+                            nullability: Nullability::Unspecified,
+                        }),
+                    },
+                ],
+            }),
+        ];
 
-    //     let parsed_decls = parse_objc(&clang, source).unwrap();
-    //     assert_eq!(parsed_decls, expected_decls);
-    // }
+        let parsed_decls = parse_objc(&clang, source).unwrap();
+        assert_eq!(parsed_decls, expected_decls);
+    }
 
     #[test]
     fn test_method_for_selector() {
