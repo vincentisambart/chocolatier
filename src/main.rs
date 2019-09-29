@@ -17,6 +17,7 @@ use clang::{Clang, EntityKind, TypeKind};
 // - add test for parsing "extern void NSLog(NSString *format, ...);""
 // - module name
 // - bit fields
+// - try getting the best definition of a function (unfortunately libclang's "canonical" seems to just be the first one)
 
 #[derive(Debug, PartialEq)]
 enum Origin {
@@ -230,9 +231,9 @@ fn show_tree(entity: &clang::Entity, indent_level: usize) {
         println!("{}objc optional: {:?}", indent, entity.is_objc_optional());
     }
 
-    // if let Some(location) = entity.get_location() {
-    //     println!("{}location: {:?}", indent, location);
-    // }
+    if let Some(location) = entity.get_location() {
+        println!("{}location: {:?}", indent, location);
+    }
 
     // if let Some(range) = entity.get_range() {
     //     println!("{}range: {:?}", indent, range);
@@ -258,7 +259,7 @@ fn show_tree(entity: &clang::Entity, indent_level: usize) {
 
     let canonical_entity = entity.get_canonical_entity();
     if &canonical_entity != entity {
-        println!("{}canonical_entity: {:?}", indent, canonical_entity);
+        println!("{}canonical entity: {:?}", indent, canonical_entity);
     }
 
     if let Some(definition) = entity.get_definition() {
@@ -1202,16 +1203,17 @@ impl NamedRecordDecl {
 #[derive(Clone, Debug, PartialEq)]
 struct FuncDecl {
     name: String,
-    objc_type: ObjCType,
+    desc: CallableDesc,
 }
 
 impl FuncDecl {
     fn from(decl: &clang::Entity) -> Self {
         assert_eq!(decl.get_kind(), EntityKind::FunctionDecl);
+        let clang_type = decl.get_type().unwrap();
 
         FuncDecl {
             name: decl.get_name().unwrap(),
-            objc_type: ObjCType::from(&decl.get_type().unwrap(), &mut parm_decl_children(&decl)),
+            desc: CallableDesc::from(&clang_type, &mut parm_decl_children(&decl)),
         }
     }
 }
@@ -1287,10 +1289,18 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<Decl>, ParseError> {
                 objc_decls.push(Decl::Category(CategoryDecl::from(&entity)));
             }
             EntityKind::TypedefDecl => {
-                objc_decls.push(Decl::Typedef(TypedefDecl::from(&entity)));
+                let canonical = entity.get_canonical_entity();
+                if canonical == entity {
+                    objc_decls.push(Decl::Typedef(TypedefDecl::from(&entity)));
+                }
             }
             EntityKind::FunctionDecl => {
-                objc_decls.push(Decl::Func(FuncDecl::from(&entity)));
+                let canonical = entity.get_canonical_entity();
+                if canonical == entity {
+                    // We only want to keep one declaration of a function.
+                    // Unfortunately, libclang's "canonical entity" seems to just be the first definition of a function, not the more complete one.
+                    objc_decls.push(Decl::Func(FuncDecl::from(&entity)));
+                }
             }
             EntityKind::StructDecl | EntityKind::UnionDecl => {
                 if let Some(def) = entity.get_definition() {
@@ -1316,7 +1326,7 @@ fn main() {
         // #import <AVFoundation/AVFoundation.h>
         // #import <Cocoa/Cocoa.h>
         // struct ll { struct ll *next; };
-        typedef struct { int a; } foo;
+        // typedef struct { int a; } foo;
         // @interface I
         // - (struct ll)foo;
         // - (enum { V1 = -10000000000, V2 })bar;
@@ -1324,6 +1334,10 @@ fn main() {
         // struct vm_statistics64 {
         //     int a;
         // } __attribute__((aligned(8)));
+        // void foo();
+        // void foo(void);
+        typedef int i;
+        typedef int i;
     ";
     let clang = Clang::new().expect("Could not load libclang");
     let decls = parse_objc(&clang, source).unwrap();
