@@ -388,7 +388,7 @@ enum Nullability {
     Unspecified,
 }
 
-impl Nullability {
+impl From<clang::Nullability> for Nullability {
     fn from(nul: clang::Nullability) -> Self {
         match nul {
             clang::Nullability::NonNull => Nullability::NonNull,
@@ -448,11 +448,14 @@ struct Field {
 }
 
 impl Field {
-    fn from(entity: &clang::Entity) -> Self {
+    fn from_entity(entity: &clang::Entity) -> Self {
         assert_eq!(entity.get_kind(), EntityKind::FieldDecl);
         Field {
             name: entity.get_name(),
-            objc_type: ObjCType::from(&entity.get_type().unwrap(), &mut parm_decl_children(entity)),
+            objc_type: ObjCType::from_type(
+                &entity.get_type().unwrap(),
+                &mut parm_decl_children(entity),
+            ),
         }
     }
 }
@@ -466,7 +469,7 @@ enum Record {
 }
 
 impl Record {
-    fn from(clang_type: &clang::Type) -> Self {
+    fn from_type(clang_type: &clang::Type) -> Self {
         let decl = clang_type.get_declaration().unwrap();
         let name = decl.get_name();
         if let Some(name) = name {
@@ -487,7 +490,7 @@ impl Record {
                 .get_fields()
                 .unwrap()
                 .iter()
-                .map(Field::from)
+                .map(Field::from_entity)
                 .collect();
             match decl.get_kind() {
                 EntityKind::StructDecl => Record::UnnamedStruct { fields },
@@ -515,12 +518,12 @@ struct CallableDesc {
 }
 
 impl CallableDesc {
-    fn from<'a>(
+    fn from_type<'a>(
         clang_type: &clang::Type,
         base_parm_decls: &mut impl Iterator<Item = clang::Entity<'a>>,
     ) -> Self {
         // result must be processed before parameters due to the order the entities are in base_parm_decls.
-        let result = Box::new(ObjCType::from(
+        let result = Box::new(ObjCType::from_type(
             &clang_type.get_result_type().unwrap(),
             base_parm_decls,
         ));
@@ -534,13 +537,13 @@ impl CallableDesc {
                     let parm_decl = base_parm_decls.next().unwrap();
 
                     // assert_eq!(
-                    //     ObjCType::from(&arg_type, &mut parm_decl_children(&parm_decl)),
-                    //     ObjCType::from(
+                    //     ObjCType::from_type(&arg_type, &mut parm_decl_children(&parm_decl)),
+                    //     ObjCType::from_type(
                     //         &parm_decl.get_type().unwrap(),
                     //         &mut parm_decl_children(&parm_decl)
                     //     )
                     // );
-                    let objc_type = ObjCType::from(
+                    let objc_type = ObjCType::from_type(
                         &parm_decl.get_type().unwrap(),
                         &mut parm_decl_children(&parm_decl),
                     );
@@ -571,7 +574,7 @@ struct Typedef {
 }
 
 impl Typedef {
-    fn from(clang_type: &clang::Type) -> Self {
+    fn from_type(clang_type: &clang::Type) -> Self {
         assert_eq!(clang_type.get_kind(), TypeKind::Typedef);
         Typedef {
             name: clang_type.get_display_name(),
@@ -650,11 +653,14 @@ fn type_signedness(clang_type: &clang::Type) -> Option<Signedness> {
 }
 
 impl Enum {
-    fn from(clang_type: &clang::Type) -> Self {
+    fn from_type(clang_type: &clang::Type) -> Self {
         let decl = clang_type.get_declaration().unwrap();
 
         let underlying = decl.get_enum_underlying_type().map(|underlying| {
-            Box::new(ObjCType::from(&underlying, &mut parm_decl_children(&decl)))
+            Box::new(ObjCType::from_type(
+                &underlying,
+                &mut parm_decl_children(&decl),
+            ))
         });
 
         let values = if decl.get_definition().is_some() {
@@ -742,31 +748,31 @@ enum ObjCType {
 }
 
 impl ObjCType {
-    fn from<'a>(
+    fn from_type<'a>(
         clang_type: &clang::Type,
         base_parm_decls: &mut impl Iterator<Item = clang::Entity<'a>>,
     ) -> Self {
         match clang_type.get_kind() {
-            TypeKind::Void => ObjCType::Void,
+            TypeKind::Void => Self::Void,
             // SChar is "signed char", CharS is "char" when it is signed by default.
-            TypeKind::SChar | TypeKind::CharS => ObjCType::Num(NumKind::SChar),
+            TypeKind::SChar | TypeKind::CharS => Self::Num(NumKind::SChar),
             // UChar is "unsigned char", CharU is "char" when it is unsigned by default.
-            TypeKind::UChar | TypeKind::CharU => ObjCType::Num(NumKind::UChar),
-            TypeKind::Short => ObjCType::Num(NumKind::Short),
-            TypeKind::UShort => ObjCType::Num(NumKind::UShort),
-            TypeKind::Int => ObjCType::Num(NumKind::Int),
-            TypeKind::UInt => ObjCType::Num(NumKind::UInt),
-            TypeKind::Long => ObjCType::Num(NumKind::Long),
-            TypeKind::ULong => ObjCType::Num(NumKind::ULong),
-            TypeKind::LongLong => ObjCType::Num(NumKind::LongLong),
-            TypeKind::ULongLong => ObjCType::Num(NumKind::ULongLong),
-            TypeKind::Float => ObjCType::Num(NumKind::Float),
-            TypeKind::Double => ObjCType::Num(NumKind::Double),
-            TypeKind::LongDouble => ObjCType::Num(NumKind::LongDouble),
+            TypeKind::UChar | TypeKind::CharU => Self::Num(NumKind::UChar),
+            TypeKind::Short => Self::Num(NumKind::Short),
+            TypeKind::UShort => Self::Num(NumKind::UShort),
+            TypeKind::Int => Self::Num(NumKind::Int),
+            TypeKind::UInt => Self::Num(NumKind::UInt),
+            TypeKind::Long => Self::Num(NumKind::Long),
+            TypeKind::ULong => Self::Num(NumKind::ULong),
+            TypeKind::LongLong => Self::Num(NumKind::LongLong),
+            TypeKind::ULongLong => Self::Num(NumKind::ULongLong),
+            TypeKind::Float => Self::Num(NumKind::Float),
+            TypeKind::Double => Self::Num(NumKind::Double),
+            TypeKind::LongDouble => Self::Num(NumKind::LongDouble),
             TypeKind::Pointer => {
                 let pointee_type = clang_type.get_pointee_type().unwrap();
-                ObjCType::Pointer(Pointer {
-                    pointee: Box::new(ObjCType::from(&pointee_type, base_parm_decls)),
+                Self::Pointer(Pointer {
+                    pointee: Box::new(Self::from_type(&pointee_type, base_parm_decls)),
                     nullability: Nullability::Unspecified,
                 })
             }
@@ -800,9 +806,9 @@ impl ObjCType {
                     .get_objc_type_arguments()
                     .iter()
                     .map(
-                        |arg| match ObjCType::from(arg, &mut Vec::new().into_iter()) {
-                            ObjCType::ObjPtr(ptr) => ObjCTypeArg::ObjPtr(ptr),
-                            ObjCType::Typedef(typedef) => ObjCTypeArg::Typedef(typedef),
+                        |arg| match Self::from_type(arg, &mut Vec::new().into_iter()) {
+                            Self::ObjPtr(ptr) => ObjCTypeArg::ObjPtr(ptr),
+                            Self::Typedef(typedef) => ObjCTypeArg::Typedef(typedef),
                             unexpected => {
                                 panic!("Type arguments not expected to be {:?}", unexpected)
                             }
@@ -815,12 +821,12 @@ impl ObjCType {
                 if base_type.get_kind() == TypeKind::ObjCId {
                     assert!(type_args.is_empty());
                     assert_eq!(base_type.get_display_name(), "id");
-                    return ObjCType::ObjPtr(ObjPtr {
+                    Self::ObjPtr(ObjPtr {
                         kind: ObjPtrKind::Id(IdObjPtr { protocols }),
                         nullability: Nullability::Unspecified,
-                    });
+                    })
                 } else {
-                    ObjCType::ObjPtr(ObjPtr {
+                    Self::ObjPtr(ObjPtr {
                         kind: ObjPtrKind::SomeInstance(SomeInstanceObjPtr {
                             interface: base_type.get_display_name(),
                             protocols,
@@ -832,81 +838,77 @@ impl ObjCType {
             }
             TypeKind::Attributed => {
                 let modified =
-                    ObjCType::from(&clang_type.get_modified_type().unwrap(), base_parm_decls);
+                    Self::from_type(&clang_type.get_modified_type().unwrap(), base_parm_decls);
                 if let Some(nullability) = clang_type.get_nullability() {
-                    let nullability = Nullability::from(nullability);
+                    let nullability = nullability.into();
                     match modified {
-                        ObjCType::Pointer(ptr) => {
-                            ObjCType::Pointer(ptr.with_nullability(nullability))
-                        }
-                        ObjCType::ObjPtr(ptr) => {
-                            ObjCType::ObjPtr(ptr.with_nullability(nullability))
-                        }
-                        ObjCType::ObjCSel(_) => ObjCType::ObjCSel(nullability),
+                        Self::Pointer(ptr) => Self::Pointer(ptr.with_nullability(nullability)),
+                        Self::ObjPtr(ptr) => Self::ObjPtr(ptr.with_nullability(nullability)),
+                        Self::ObjCSel(_) => Self::ObjCSel(nullability),
                         _ => modified,
                     }
                 } else {
                     modified
                 }
             }
-            TypeKind::ObjCTypeParam => ObjCType::ObjPtr(ObjPtr {
+            TypeKind::ObjCTypeParam => Self::ObjPtr(ObjPtr {
                 kind: ObjPtrKind::TypeParam(clang_type.get_display_name()),
                 nullability: Nullability::Unspecified,
             }),
-            TypeKind::ObjCId => ObjCType::ObjPtr(ObjPtr {
+            TypeKind::ObjCId => Self::ObjPtr(ObjPtr {
                 kind: ObjPtrKind::Id(IdObjPtr {
                     protocols: Vec::new(),
                 }),
                 nullability: Nullability::Unspecified,
             }),
-            TypeKind::ObjCSel => ObjCType::ObjCSel(Nullability::Unspecified),
-            TypeKind::ObjCClass => ObjCType::ObjPtr(ObjPtr {
+            TypeKind::ObjCSel => Self::ObjCSel(Nullability::Unspecified),
+            TypeKind::ObjCClass => Self::ObjPtr(ObjPtr {
                 kind: ObjPtrKind::Class,
                 nullability: Nullability::Unspecified,
             }),
             TypeKind::Typedef => {
                 let decl = clang_type.get_declaration().unwrap();
                 if decl.get_kind() == EntityKind::TemplateTypeParameter {
-                    ObjCType::ObjPtr(ObjPtr {
+                    Self::ObjPtr(ObjPtr {
                         kind: ObjPtrKind::TypeParam(clang_type.get_display_name()),
                         nullability: Nullability::Unspecified,
                     })
                 } else {
-                    ObjCType::Typedef(Typedef::from(&clang_type))
+                    Self::Typedef(Typedef::from_type(&clang_type))
                 }
             }
             TypeKind::Elaborated => {
-                Self::from(&clang_type.get_elaborated_type().unwrap(), base_parm_decls)
+                Self::from_type(&clang_type.get_elaborated_type().unwrap(), base_parm_decls)
             }
-            TypeKind::Record => ObjCType::Record(Record::from(&clang_type)),
+            TypeKind::Record => Self::Record(Record::from_type(&clang_type)),
             TypeKind::FunctionNoPrototype | TypeKind::FunctionPrototype => {
-                ObjCType::Function(CallableDesc::from(&clang_type, base_parm_decls))
+                Self::Function(CallableDesc::from_type(&clang_type, base_parm_decls))
             }
-            TypeKind::ConstantArray => ObjCType::Array(Array {
+            TypeKind::ConstantArray => Self::Array(Array {
                 size: Some(clang_type.get_size().unwrap()),
-                element: Box::new(ObjCType::from(
+                element: Box::new(Self::from_type(
                     &clang_type.get_element_type().unwrap(),
                     base_parm_decls,
                 )),
             }),
-            TypeKind::IncompleteArray => ObjCType::Array(Array {
+            TypeKind::IncompleteArray => Self::Array(Array {
                 size: None,
-                element: Box::new(ObjCType::from(
+                element: Box::new(Self::from_type(
                     &clang_type.get_element_type().unwrap(),
                     base_parm_decls,
                 )),
             }),
-            TypeKind::BlockPointer => ObjCType::ObjPtr(ObjPtr {
-                kind: ObjPtrKind::Block(CallableDesc::from(
+            TypeKind::BlockPointer => Self::ObjPtr(ObjPtr {
+                kind: ObjPtrKind::Block(CallableDesc::from_type(
                     &clang_type.get_pointee_type().unwrap(),
                     base_parm_decls,
                 )),
                 nullability: Nullability::Unspecified,
             }),
-            TypeKind::Enum => ObjCType::Enum(Enum::from(&clang_type)),
-            TypeKind::Bool => ObjCType::Bool,
-            TypeKind::Vector => ObjCType::Unsupported(Unsupported::Vector),
-            TypeKind::Unexposed => ObjCType::Unsupported(Unsupported::Unexposed),
+            TypeKind::Enum => Self::Enum(Enum::from_type(&clang_type)),
+            TypeKind::Bool => Self::Bool,
+            TypeKind::Vector => Self::Unsupported(Unsupported::Vector),
+            TypeKind::Unexposed => Self::Unsupported(Unsupported::Unexposed),
             unknown_kind => panic!("Unhandled type kind {:?}: {:?}", unknown_kind, clang_type),
         }
     }
@@ -919,11 +921,14 @@ struct ObjCParam {
 }
 
 impl ObjCParam {
-    fn from(entity: &clang::Entity) -> Self {
+    fn from_entity(entity: &clang::Entity) -> Self {
         assert_eq!(entity.get_kind(), EntityKind::ParmDecl);
         ObjCParam {
             name: entity.get_name().unwrap(),
-            objc_type: ObjCType::from(&entity.get_type().unwrap(), &mut parm_decl_children(entity)),
+            objc_type: ObjCType::from_type(
+                &entity.get_type().unwrap(),
+                &mut parm_decl_children(entity),
+            ),
         }
     }
 }
@@ -943,7 +948,7 @@ struct ObjCMethod {
 }
 
 impl ObjCMethod {
-    fn from(entity: &clang::Entity) -> Self {
+    fn from_entity(entity: &clang::Entity) -> Self {
         let kind = match entity.get_kind() {
             EntityKind::ObjCClassMethodDecl => ObjCMethodKind::Class,
             EntityKind::ObjCInstanceMethodDecl => ObjCMethodKind::Instance,
@@ -954,10 +959,10 @@ impl ObjCMethod {
             .get_arguments()
             .unwrap()
             .iter()
-            .map(ObjCParam::from)
+            .map(ObjCParam::from_entity)
             .collect();
 
-        let result = ObjCType::from(
+        let result = ObjCType::from_type(
             &entity.get_result_type().unwrap(),
             &mut parm_decl_children(entity),
         );
@@ -992,7 +997,7 @@ fn is_generated_from_property(method_entity: &clang::Entity) -> bool {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct InterfaceDecl {
+struct InterfaceDesc {
     name: String,
     superclass: Option<String>,
     adopted_protocols: Vec<String>,
@@ -1000,8 +1005,8 @@ struct InterfaceDecl {
     methods: Vec<ObjCMethod>,
 }
 
-impl InterfaceDecl {
-    fn from(entity: &clang::Entity) -> Self {
+impl InterfaceDesc {
+    fn from_entity(entity: &clang::Entity) -> Self {
         assert_eq!(entity.get_kind(), EntityKind::ObjCInterfaceDecl);
         let children = entity.get_children();
 
@@ -1031,9 +1036,9 @@ impl InterfaceDecl {
             // Methods generated from property don't have children with the type info we want
             // so for the time being just ignore them.
             .filter(|child| !is_generated_from_property(child))
-            .map(ObjCMethod::from)
+            .map(ObjCMethod::from_entity)
             .collect();
-        InterfaceDecl {
+        InterfaceDesc {
             name: entity.get_name().unwrap(),
             superclass,
             adopted_protocols,
@@ -1044,15 +1049,15 @@ impl InterfaceDecl {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct CategoryDecl {
+struct CategoryDesc {
     name: Option<String>,
     class: String,
     adopted_protocols: Vec<String>,
     methods: Vec<ObjCMethod>,
 }
 
-impl CategoryDecl {
-    fn from(entity: &clang::Entity) -> Self {
+impl CategoryDesc {
+    fn from_entity(entity: &clang::Entity) -> Self {
         assert_eq!(entity.get_kind(), EntityKind::ObjCCategoryDecl);
         let children = entity.get_children();
 
@@ -1080,9 +1085,9 @@ impl CategoryDecl {
             // Methods generated from property don't have children with the type info we want
             // so for the time being just ignore them.
             .filter(|child| !is_generated_from_property(child))
-            .map(ObjCMethod::from)
+            .map(ObjCMethod::from_entity)
             .collect();
-        CategoryDecl {
+        CategoryDesc {
             name: entity.get_name(),
             class,
             adopted_protocols,
@@ -1098,14 +1103,14 @@ struct ProtocolMethod {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct ProtocolDecl {
+struct ProtocolDesc {
     name: String,
     inherited_protocols: Vec<String>,
     methods: Vec<ProtocolMethod>,
 }
 
-impl ProtocolDecl {
-    fn from(entity: &clang::Entity) -> Self {
+impl ProtocolDesc {
+    fn from_entity(entity: &clang::Entity) -> Self {
         assert_eq!(entity.get_kind(), EntityKind::ObjCProtocolDecl);
         let children = entity.get_children();
 
@@ -1125,12 +1130,12 @@ impl ProtocolDecl {
                 .contains(&child.get_kind())
             })
             .map(|child| ProtocolMethod {
-                method: ObjCMethod::from(child),
+                method: ObjCMethod::from_entity(child),
                 is_optional: child.is_objc_optional(),
             })
             .collect();
 
-        ProtocolDecl {
+        ProtocolDesc {
             name: entity.get_name().unwrap(),
             inherited_protocols,
             methods,
@@ -1139,18 +1144,18 @@ impl ProtocolDecl {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct TypedefDecl {
+struct TypedefDesc {
     name: String,
     underlying: ObjCType,
 }
 
-impl TypedefDecl {
-    fn from(decl: &clang::Entity) -> Self {
+impl TypedefDesc {
+    fn from_entity(decl: &clang::Entity) -> Self {
         assert_eq!(decl.get_kind(), EntityKind::TypedefDecl);
 
-        TypedefDecl {
+        TypedefDesc {
             name: decl.get_name().unwrap(),
-            underlying: ObjCType::from(
+            underlying: ObjCType::from_type(
                 &decl.get_typedef_underlying_type().unwrap(),
                 &mut parm_decl_children(&decl),
             ),
@@ -1165,14 +1170,14 @@ enum RecordKind {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct NamedRecordDecl {
+struct NamedRecordDesc {
     name: String,
     fields: Vec<Field>,
     kind: RecordKind,
 }
 
-impl NamedRecordDecl {
-    fn from(decl: &clang::Entity) -> Self {
+impl NamedRecordDesc {
+    fn from_entity(decl: &clang::Entity) -> Self {
         let kind = match decl.get_kind() {
             EntityKind::StructDecl => RecordKind::Struct,
             EntityKind::UnionDecl => RecordKind::Union,
@@ -1189,10 +1194,10 @@ impl NamedRecordDecl {
             .get_fields()
             .unwrap()
             .iter()
-            .map(Field::from)
+            .map(Field::from_entity)
             .collect();
 
-        NamedRecordDecl {
+        NamedRecordDesc {
             name: decl.get_name().unwrap(),
             fields,
             kind,
@@ -1201,33 +1206,33 @@ impl NamedRecordDecl {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct FuncDecl {
+struct FuncDesc {
     name: String,
     desc: CallableDesc,
 }
 
-impl FuncDecl {
-    fn from(decl: &clang::Entity) -> Self {
+impl FuncDesc {
+    fn from_entity(decl: &clang::Entity) -> Self {
         assert_eq!(decl.get_kind(), EntityKind::FunctionDecl);
         let clang_type = decl.get_type().unwrap();
 
-        FuncDecl {
+        FuncDesc {
             name: decl.get_name().unwrap(),
-            desc: CallableDesc::from(&clang_type, &mut parm_decl_children(&decl)),
+            desc: CallableDesc::from_type(&clang_type, &mut parm_decl_children(&decl)),
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
-enum Decl {
-    Protocol(ProtocolDecl),
-    Interface(InterfaceDecl),
-    Category(CategoryDecl),
-    Typedef(TypedefDecl),
-    NamedRecord(NamedRecordDecl),
-    // Enum(EnumDecl),
-    Func(FuncDecl),
-    // Var(VarDecl),
+enum TopLevelConstruct {
+    Protocol(ProtocolDesc),
+    Interface(InterfaceDesc),
+    Category(CategoryDesc),
+    Typedef(TypedefDesc),
+    NamedRecord(NamedRecordDesc),
+    // Enum(EnumDesc),
+    Func(FuncDesc),
+    // Var(VarDesc),
 }
 
 #[derive(Debug)]
@@ -1242,7 +1247,7 @@ impl From<clang::SourceError> for ParseError {
     }
 }
 
-fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<Decl>, ParseError> {
+fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<TopLevelConstruct>, ParseError> {
     use clang::diagnostic::Severity;
 
     // The documentation says that files specified as unsaved must exist so create a dummy temporary empty file
@@ -1276,43 +1281,47 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<Decl>, ParseError> {
     show_tree(&tu.get_entity(), 0);
     println!("--------------------------------");
 
-    let mut objc_decls: Vec<Decl> = Vec::new();
+    let mut constructs: Vec<TopLevelConstruct> = Vec::new();
     for entity in tu.get_entity().get_children() {
         match entity.get_kind() {
             EntityKind::ObjCInterfaceDecl => {
-                objc_decls.push(Decl::Interface(InterfaceDecl::from(&entity)));
+                constructs.push(TopLevelConstruct::Interface(InterfaceDesc::from_entity(
+                    &entity,
+                )));
             }
             EntityKind::ObjCProtocolDecl => {
-                objc_decls.push(Decl::Protocol(ProtocolDecl::from(&entity)));
+                constructs.push(TopLevelConstruct::Protocol(ProtocolDesc::from_entity(
+                    &entity,
+                )));
             }
             EntityKind::ObjCCategoryDecl => {
-                objc_decls.push(Decl::Category(CategoryDecl::from(&entity)));
+                constructs.push(TopLevelConstruct::Category(CategoryDesc::from_entity(
+                    &entity,
+                )));
             }
             EntityKind::TypedefDecl => {
-                let canonical = entity.get_canonical_entity();
-                if canonical == entity {
-                    objc_decls.push(Decl::Typedef(TypedefDecl::from(&entity)));
-                }
+                constructs.push(TopLevelConstruct::Typedef(TypedefDesc::from_entity(
+                    &entity,
+                )));
             }
             EntityKind::FunctionDecl => {
-                let canonical = entity.get_canonical_entity();
-                if canonical == entity {
-                    // We only want to keep one declaration of a function.
-                    // Unfortunately, libclang's "canonical entity" seems to just be the first definition of a function, not the more complete one.
-                    objc_decls.push(Decl::Func(FuncDecl::from(&entity)));
-                }
+                constructs.push(TopLevelConstruct::Func(FuncDesc::from_entity(&entity)));
             }
             EntityKind::StructDecl | EntityKind::UnionDecl => {
+                // We only care about definition of structs or unions, not their declaration, and only of named ones.
+                // (details of unnamed ones are included directly in the types that include them)
                 if let Some(def) = entity.get_definition() {
                     if def == entity && def.get_name().is_some() {
-                        objc_decls.push(Decl::NamedRecord(NamedRecordDecl::from(&entity)));
+                        constructs.push(TopLevelConstruct::NamedRecord(
+                            NamedRecordDesc::from_entity(&entity),
+                        ));
                     }
                 }
             }
             _ => {}
         }
     }
-    Ok(objc_decls)
+    Ok(constructs)
 }
 
 fn main() {
@@ -1338,10 +1347,11 @@ fn main() {
         // void foo(void);
         typedef int i;
         typedef int i;
+        void foo(void) {}
     ";
     let clang = Clang::new().expect("Could not load libclang");
-    let decls = parse_objc(&clang, source).unwrap();
-    println!("{:#?}", decls);
+    let constructs = parse_objc(&clang, source).unwrap();
+    println!("{:#?}", constructs);
 }
 
 #[cfg(test)]
@@ -1387,7 +1397,7 @@ mod tests {
             @end
         ";
 
-        let expected_decls = vec![Decl::Interface(InterfaceDecl {
+        let expected_decls = vec![TopLevelConstruct::Interface(InterfaceDesc {
             name: "A".to_string(),
             superclass: None,
             adopted_protocols: vec![],
@@ -1463,14 +1473,14 @@ mod tests {
         ";
 
         let expected_decls = vec![
-            Decl::Interface(InterfaceDecl {
+            TopLevelConstruct::Interface(InterfaceDesc {
                 name: "A".to_string(),
                 superclass: None,
                 adopted_protocols: vec![],
                 template_params: vec![],
                 methods: vec![],
             }),
-            Decl::Interface(InterfaceDecl {
+            TopLevelConstruct::Interface(InterfaceDesc {
                 name: "B".to_string(),
                 superclass: Some("A".to_string()),
                 adopted_protocols: vec![],
@@ -1496,14 +1506,14 @@ mod tests {
         ";
 
         let expected_decls = vec![
-            Decl::Interface(InterfaceDecl {
+            TopLevelConstruct::Interface(InterfaceDesc {
                 name: "A".to_string(),
                 superclass: None,
                 adopted_protocols: vec![],
                 template_params: vec![],
                 methods: vec![],
             }),
-            Decl::Interface(InterfaceDecl {
+            TopLevelConstruct::Interface(InterfaceDesc {
                 name: "B".to_string(),
                 superclass: Some("A".to_string()),
                 adopted_protocols: vec![],
@@ -1541,12 +1551,12 @@ mod tests {
         ";
 
         let expected_decls = vec![
-            Decl::Protocol(ProtocolDecl {
+            TopLevelConstruct::Protocol(ProtocolDesc {
                 name: "B".to_string(),
                 inherited_protocols: vec![],
                 methods: vec![],
             }),
-            Decl::Protocol(ProtocolDecl {
+            TopLevelConstruct::Protocol(ProtocolDesc {
                 name: "A".to_string(),
                 inherited_protocols: vec![],
                 methods: vec![
@@ -1599,14 +1609,14 @@ mod tests {
         ";
 
         let expected_decls = vec![
-            Decl::Interface(InterfaceDecl {
+            TopLevelConstruct::Interface(InterfaceDesc {
                 name: "A".to_string(),
                 superclass: None,
                 adopted_protocols: vec![],
                 template_params: vec![],
                 methods: vec![],
             }),
-            Decl::Category(CategoryDecl {
+            TopLevelConstruct::Category(CategoryDesc {
                 name: Some("Categ".to_string()),
                 class: "A".to_string(),
                 adopted_protocols: vec!["P".to_string()],
@@ -1636,7 +1646,7 @@ mod tests {
             @end
         ";
 
-        let expected_decls = vec![Decl::Interface(InterfaceDecl {
+        let expected_decls = vec![TopLevelConstruct::Interface(InterfaceDesc {
             name: "A".to_string(),
             superclass: None,
             adopted_protocols: vec![],
@@ -1692,11 +1702,11 @@ mod tests {
         ";
 
         let expected_decls = vec![
-            Decl::Typedef(TypedefDecl {
+            TopLevelConstruct::Typedef(TypedefDesc {
                 name: "I".to_string(),
                 underlying: ObjCType::Num(NumKind::Int),
             }),
-            Decl::Interface(InterfaceDecl {
+            TopLevelConstruct::Interface(InterfaceDesc {
                 name: "A".to_string(),
                 superclass: None,
                 adopted_protocols: vec![],
@@ -1733,7 +1743,7 @@ mod tests {
         ";
 
         let expected_decls = vec![
-            Decl::NamedRecord(NamedRecordDecl {
+            TopLevelConstruct::NamedRecord(NamedRecordDesc {
                 name: "S".to_string(),
                 fields: vec![Field {
                     name: Some("x".to_string()),
@@ -1741,13 +1751,13 @@ mod tests {
                 }],
                 kind: RecordKind::Struct,
             }),
-            Decl::Typedef(TypedefDecl {
+            TopLevelConstruct::Typedef(TypedefDesc {
                 name: "T".to_string(),
                 underlying: ObjCType::Record(Record::NamedStruct {
                     name: "S".to_string(),
                 }),
             }),
-            Decl::Interface(InterfaceDecl {
+            TopLevelConstruct::Interface(InterfaceDesc {
                 name: "A".to_string(),
                 superclass: None,
                 adopted_protocols: vec![],
@@ -1824,7 +1834,7 @@ mod tests {
                     },
                 ],
             }),
-            Decl::NamedRecord(NamedRecordDecl {
+            TopLevelConstruct::NamedRecord(NamedRecordDesc {
                 name: "DeclaredAfterwards".to_string(),
                 fields: vec![Field {
                     name: Some("c".to_string()),
@@ -1855,7 +1865,7 @@ mod tests {
         ";
 
         let expected_decls = vec![
-            Decl::Typedef(TypedefDecl {
+            TopLevelConstruct::Typedef(TypedefDesc {
                 name: "T".to_string(),
                 underlying: ObjCType::Pointer(Pointer {
                     pointee: Box::new(ObjCType::Function(CallableDesc {
@@ -1869,7 +1879,7 @@ mod tests {
                     nullability: Nullability::Unspecified,
                 }),
             }),
-            Decl::Interface(InterfaceDecl {
+            TopLevelConstruct::Interface(InterfaceDesc {
                 name: "A".to_string(),
                 superclass: None,
                 adopted_protocols: vec![],
@@ -2059,7 +2069,7 @@ mod tests {
         ";
 
         let expected_decls = vec![
-            Decl::Typedef(TypedefDecl {
+            TopLevelConstruct::Typedef(TypedefDesc {
                 name: "Class".to_string(),
                 underlying: ObjCType::Pointer(Pointer {
                     pointee: Box::new(ObjCType::Record(Record::NamedStruct {
@@ -2068,7 +2078,7 @@ mod tests {
                     nullability: Nullability::Unspecified,
                 }),
             }),
-            Decl::NamedRecord(NamedRecordDecl {
+            TopLevelConstruct::NamedRecord(NamedRecordDesc {
                 name: "objc_object".to_string(),
                 fields: vec![Field {
                     name: Some("isa".to_string()),
@@ -2079,7 +2089,7 @@ mod tests {
                 }],
                 kind: RecordKind::Struct,
             }),
-            Decl::Typedef(TypedefDecl {
+            TopLevelConstruct::Typedef(TypedefDesc {
                 name: "id".to_string(),
                 underlying: ObjCType::Pointer(Pointer {
                     pointee: Box::new(ObjCType::Record(Record::NamedStruct {
@@ -2088,7 +2098,7 @@ mod tests {
                     nullability: Nullability::Unspecified,
                 }),
             }),
-            Decl::Typedef(TypedefDecl {
+            TopLevelConstruct::Typedef(TypedefDesc {
                 name: "SEL".to_string(),
                 underlying: ObjCType::Pointer(Pointer {
                     pointee: Box::new(ObjCType::Record(Record::NamedStruct {
@@ -2097,7 +2107,7 @@ mod tests {
                     nullability: Nullability::Unspecified,
                 }),
             }),
-            Decl::Typedef(TypedefDecl {
+            TopLevelConstruct::Typedef(TypedefDesc {
                 name: "IMP".to_string(),
                 underlying: ObjCType::Pointer(Pointer {
                     pointee: Box::new(ObjCType::Function(CallableDesc {
@@ -2123,7 +2133,7 @@ mod tests {
                     nullability: Nullability::Unspecified,
                 }),
             }),
-            Decl::Protocol(ProtocolDecl {
+            TopLevelConstruct::Protocol(ProtocolDesc {
                 name: "P".to_string(),
                 inherited_protocols: vec![],
                 methods: vec![ProtocolMethod {
