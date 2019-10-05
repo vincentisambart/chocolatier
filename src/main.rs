@@ -12,7 +12,6 @@ use clang::{Clang, EntityKind, TypeKind};
 // - alignment, packing (and make sure the size and offset of each item is the same for clang and Rust as bindgen does)
 // - instancetype
 // - namespacing of ObjC exported from Swift (though that might be fine as we're calling from generated ObjC)
-// - add test for empty category names
 // - const
 // - module name
 // - bit fields
@@ -1601,6 +1600,12 @@ mod tests {
             @interface A (Categ) <P>
             - (void)foo;
             @end
+            @interface A ()
+            - (void)firstUnnamedCategoryMethod;
+            @end
+            @interface A ()
+            - (void)secondUnnamedCategoryMethod;
+            @end
         ";
 
         let expected_decls = vec![
@@ -1617,6 +1622,28 @@ mod tests {
                 adopted_protocols: vec!["P".to_string()],
                 methods: vec![ObjCMethod {
                     name: "foo".to_string(),
+                    kind: ObjCMethodKind::Instance,
+                    params: vec![],
+                    result: ObjCType::Void,
+                }],
+            }),
+            TopLevelConstruct::Category(CategoryDesc {
+                name: None,
+                class: "A".to_string(),
+                adopted_protocols: vec![],
+                methods: vec![ObjCMethod {
+                    name: "firstUnnamedCategoryMethod".to_string(),
+                    kind: ObjCMethodKind::Instance,
+                    params: vec![],
+                    result: ObjCType::Void,
+                }],
+            }),
+            TopLevelConstruct::Category(CategoryDesc {
+                name: None,
+                class: "A".to_string(),
+                adopted_protocols: vec![],
+                methods: vec![ObjCMethod {
+                    name: "secondUnnamedCategoryMethod".to_string(),
                     kind: ObjCMethodKind::Instance,
                     params: vec![],
                     result: ObjCType::Void,
