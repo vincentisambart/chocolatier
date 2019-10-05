@@ -654,6 +654,7 @@ fn type_signedness(clang_type: &clang::Type) -> Option<Signedness> {
 
 impl Enum {
     fn from_type(clang_type: &clang::Type) -> Self {
+        assert_eq!(clang_type.get_kind(), TypeKind::Enum);
         let decl = clang_type.get_declaration().unwrap();
 
         let underlying = decl.get_enum_underlying_type().map(|underlying| {
@@ -1416,13 +1417,57 @@ impl FuncDesc {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+struct EnumDesc {
+    name: Option<String>,
+    underlying: ObjCType,
+    values: Vec<EnumValue>,
+}
+
+impl EnumDesc {
+    fn from_entity(decl: &clang::Entity) -> Self {
+        assert_eq!(decl.get_kind(), EntityKind::EnumDecl);
+
+        let underlying = ObjCType::from_type(
+            &decl.get_enum_underlying_type().unwrap(),
+            &mut parm_decl_children(&decl),
+        );
+
+        assert!(decl.get_definition().is_some());
+        let signedness = type_signedness(&decl.get_enum_underlying_type().unwrap())
+            .expect("The underlying type of an enum should have a signedness");
+        let values = decl
+            .get_children()
+            .into_iter()
+            .filter(|child| child.get_kind() == EntityKind::EnumConstantDecl)
+            .map(|decl| {
+                let values = decl.get_enum_constant_value().unwrap();
+
+                EnumValue {
+                    name: decl.get_name().unwrap(),
+                    value: match signedness {
+                        Signedness::Signed => SignedOrNotInt::Signed(values.0),
+                        Signedness::Unsigned => SignedOrNotInt::Unsigned(values.1),
+                    },
+                }
+            })
+            .collect();
+
+        EnumDesc {
+            name: decl.get_name(),
+            underlying,
+            values,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 enum TopLevelConstruct {
     Protocol(ProtocolDesc),
     Interface(InterfaceDesc),
     Category(CategoryDesc),
     Typedef(TypedefDesc),
     NamedRecord(NamedRecordDesc),
-    // Enum(EnumDesc),
+    Enum(EnumDesc),
     Func(FuncDesc),
     // Var(VarDesc),
 }
@@ -1511,6 +1556,15 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<TopLevelConstruct>, Par
                     }
                 }
             }
+            EntityKind::EnumDecl => {
+                // We only care about definition of enums, not their declaration.
+                // But contrarily to struct and enums, we do care about unnamed ones as they are used to declare constants.
+                if let Some(def) = entity.get_definition() {
+                    if def == entity {
+                        constructs.push(TopLevelConstruct::Enum(EnumDesc::from_entity(&entity)));
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -1521,19 +1575,20 @@ fn main() {
     let source = "
         // #import <AVFoundation/AVFoundation.h>
         // #import <Cocoa/Cocoa.h>
-        // @class C;
-        @protocol P
-        @optional
-        @property (readonly) int readOnlyProperty;
-        @end
-        // @interface X
-        // @property (readonly) int readOnlyProperty;
-        // - (int)readOnlyProperty;
-        // @property (readonly, getter=someGetter) int readOnlyPropertyWithExplicitGetter;
-        // @property (readwrite, setter=abcd:) int explicitReadWriteProperty;
-        // @property int implicitReadWriteProperty;
-        // @property (class, nonatomic, copy) C *classProperty;
-        // @end
+        typedef enum { A = 1 } foo;
+        // enum E { B = 1000 };
+        // typedef signed long CFIndex;
+        // typedef enum __attribute__((enum_extensibility(open))) CFStreamStatus : CFIndex CFStreamStatus; enum CFStreamStatus : CFIndex {
+        //     kCFStreamStatusNotOpen = 0,
+        //     kCFStreamStatusOpening,
+        //     kCFStreamStatusOpen,
+        //     kCFStreamStatusReading,
+        //     kCFStreamStatusWriting,
+        //     kCFStreamStatusAtEnd,
+        //     kCFStreamStatusClosed,
+        //     kCFStreamStatusError
+        // };
+
   ";
     let clang = Clang::new().expect("Could not load libclang");
     let constructs = parse_objc(&clang, source).unwrap();
