@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#![allow(clippy::cognitive_complexity)]
 
 use clang::{Clang, EntityKind, TypeKind};
 
@@ -6,16 +7,17 @@ use clang::{Clang, EntityKind, TypeKind};
 // - class and method OS version annotations
 // - annotations for Swift
 // - consume/retained/not retained
-// - properties
+// - enum_extensibility(open)
 // - exception throwing info (maybe from annotations from Swift)
 // - support parsing code for different platforms (iOS, macOS, ...)
-// - alignment, packing (and make sure the size and offset of each item is the same for clang and Rust as bindgen does)
+// - alignment, packing, sizes (and make sure the size and offset of each item is the same for clang and Rust as bindgen does)
 // - instancetype
 // - namespacing of ObjC exported from Swift (though that might be fine as we're calling from generated ObjC)
 // - const
 // - module name
 // - bit fields
 // - try getting the best definition of a function (unfortunately libclang's "canonical" seems to just be the first one)
+// - struct or type declaration inside interface declaration
 
 #[derive(Debug, PartialEq)]
 enum Origin {
@@ -233,9 +235,9 @@ fn show_tree(entity: &clang::Entity, indent_level: usize) {
         println!("{}location: {:?}", indent, location);
     }
 
-    // if let Some(range) = entity.get_range() {
-    //     println!("{}range: {:?}", indent, range);
-    // }
+    if let Some(range) = entity.get_range() {
+        println!("{}range: {:?}", indent, range);
+    }
 
     if let Some(usr) = entity.get_usr() {
         println!("{}usr: {}", indent, usr.0);
@@ -520,6 +522,10 @@ impl CallableDesc {
         clang_type: &clang::Type,
         base_parm_decls: &mut impl Iterator<Item = clang::Entity<'a>>,
     ) -> Self {
+        if clang_type.get_kind() == TypeKind::Attributed {
+            return Self::from_type(&clang_type.get_modified_type().unwrap(), base_parm_decls);
+        }
+
         // result must be processed before parameters due to the order the entities are in base_parm_decls.
         let result = Box::new(ObjCType::from_type(
             &clang_type.get_result_type().unwrap(),
@@ -990,6 +996,159 @@ fn is_generated_from_property(method_entity: &clang::Entity) -> bool {
         .any(|sibling| sibling.get_location().unwrap() == method_location)
 }
 
+#[derive(Copy, Clone, Debug, PartialEq)]
+enum PropOwnership {
+    Strong,
+    Weak,
+    Copy,
+    Assign,
+    Retain,
+    UnsafeUnretained,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct Property {
+    name: String,
+    value: ObjCType,
+    is_atomic: bool,
+    is_writable: bool,
+    is_class: bool,
+    ownership: PropOwnership,
+    getter: Option<String>,
+    setter: Option<String>,
+}
+
+impl Property {
+    fn from_entity(entity: &clang::Entity) -> Self {
+        assert_eq!(entity.get_kind(), EntityKind::ObjCPropertyDecl);
+
+        let name = entity.get_name().unwrap();
+        let value = ObjCType::from_type(
+            &entity.get_type().unwrap(),
+            &mut parm_decl_children(&entity),
+        );
+        let attributes = entity
+            .get_objc_attributes()
+            .unwrap_or_else(|| clang::ObjCAttributes {
+                readonly: false,
+                getter: false,
+                assign: false,
+                readwrite: false,
+                retain: false,
+                copy: false,
+                nonatomic: false,
+                setter: false,
+                atomic: false,
+                weak: false,
+                strong: false,
+                unsafe_retained: false,
+                class: false,
+            });
+        let is_atomic = {
+            if attributes.atomic {
+                assert!(!attributes.nonatomic);
+                true
+            } else {
+                !attributes.nonatomic
+            }
+        };
+        let is_writable = attributes.readwrite;
+        if is_writable {
+            assert!(!attributes.readonly);
+        }
+        let is_class = attributes.class;
+        let ownership = {
+            if attributes.strong {
+                assert!(!attributes.weak);
+                assert!(!attributes.copy);
+                assert!(!attributes.assign);
+                assert!(!attributes.retain);
+                assert!(!attributes.unsafe_retained);
+                PropOwnership::Strong
+            } else if attributes.weak {
+                assert!(!attributes.copy);
+                assert!(!attributes.assign);
+                assert!(!attributes.retain);
+                assert!(!attributes.unsafe_retained);
+                PropOwnership::Weak
+            } else if attributes.copy {
+                assert!(!attributes.assign);
+                assert!(!attributes.retain);
+                assert!(!attributes.unsafe_retained);
+                PropOwnership::Copy
+            } else if attributes.assign {
+                assert!(!attributes.retain);
+                assert!(!attributes.unsafe_retained);
+                PropOwnership::Assign
+            } else if attributes.retain {
+                assert!(!attributes.unsafe_retained);
+                PropOwnership::Retain
+            } else if attributes.unsafe_retained {
+                // TODO: The name in the clang crate has to be fixed (it's unsafe_unretained, not unsafe_retained)
+                PropOwnership::UnsafeUnretained
+            } else {
+                PropOwnership::Strong
+            }
+        };
+        let getter;
+        let setter;
+        if attributes.getter || attributes.setter {
+            let parent = entity.get_semantic_parent().unwrap();
+            let property_location = entity.get_location().unwrap();
+            let methods_at_same_location: Vec<clang::Entity> = parent
+                .get_children()
+                .into_iter()
+                .filter(|sibling| {
+                    [
+                        EntityKind::ObjCInstanceMethodDecl,
+                        EntityKind::ObjCClassMethodDecl,
+                    ]
+                    .contains(&sibling.get_kind())
+                        && sibling.get_location().unwrap() == property_location
+                })
+                .collect();
+            if attributes.getter {
+                getter = Some(
+                    methods_at_same_location
+                        .iter()
+                        .find(|method| method.get_arguments().unwrap().is_empty())
+                        .unwrap()
+                        .get_name()
+                        .unwrap(),
+                );
+            } else {
+                getter = None;
+            }
+            if attributes.setter {
+                setter = Some(
+                    methods_at_same_location
+                        .iter()
+                        .find(|method| !method.get_arguments().unwrap().is_empty())
+                        .unwrap()
+                        .get_name()
+                        .unwrap(),
+                );
+            } else {
+                setter = None;
+            }
+        } else {
+            getter = None;
+            setter = None;
+        };
+
+        Property {
+            name,
+            value,
+            is_atomic,
+            is_writable,
+            is_class,
+            ownership,
+            getter,
+            setter,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct InterfaceDesc {
     name: String,
@@ -997,11 +1156,13 @@ struct InterfaceDesc {
     adopted_protocols: Vec<String>,
     template_params: Vec<String>,
     methods: Vec<ObjCMethod>,
+    properties: Vec<Property>,
 }
 
 impl InterfaceDesc {
     fn from_entity(entity: &clang::Entity) -> Self {
         assert_eq!(entity.get_kind(), EntityKind::ObjCInterfaceDecl);
+        let name = entity.get_name().unwrap();
         let children = entity.get_children();
 
         let superclass = children
@@ -1032,12 +1193,19 @@ impl InterfaceDesc {
             .filter(|child| !is_generated_from_property(child))
             .map(ObjCMethod::from_entity)
             .collect();
+        let properties = children
+            .iter()
+            .filter(|child| child.get_kind() == EntityKind::ObjCPropertyDecl)
+            .map(Property::from_entity)
+            .collect();
+
         InterfaceDesc {
-            name: entity.get_name().unwrap(),
+            name,
             superclass,
             adopted_protocols,
             template_params,
             methods,
+            properties,
         }
     }
 }
@@ -1048,6 +1216,7 @@ struct CategoryDesc {
     class: String,
     adopted_protocols: Vec<String>,
     methods: Vec<ObjCMethod>,
+    properties: Vec<Property>,
 }
 
 impl CategoryDesc {
@@ -1067,6 +1236,7 @@ impl CategoryDesc {
             .filter(|child| child.get_kind() == EntityKind::ObjCProtocolRef)
             .map(|child| child.get_name().unwrap())
             .collect();
+
         let methods = children
             .iter()
             .filter(|child| {
@@ -1081,11 +1251,19 @@ impl CategoryDesc {
             .filter(|child| !is_generated_from_property(child))
             .map(ObjCMethod::from_entity)
             .collect();
+
+        let properties = children
+            .iter()
+            .filter(|child| child.get_kind() == EntityKind::ObjCPropertyDecl)
+            .map(Property::from_entity)
+            .collect();
+
         CategoryDesc {
             name: entity.get_name(),
             class,
             adopted_protocols,
             methods,
+            properties,
         }
     }
 }
@@ -1097,10 +1275,17 @@ struct ProtocolMethod {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+struct ProtocolProperty {
+    property: Property,
+    is_optional: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 struct ProtocolDesc {
     name: String,
     inherited_protocols: Vec<String>,
     methods: Vec<ProtocolMethod>,
+    properties: Vec<ProtocolProperty>,
 }
 
 impl ProtocolDesc {
@@ -1123,8 +1308,20 @@ impl ProtocolDesc {
                 ]
                 .contains(&child.get_kind())
             })
+            // Methods generated from property don't have children with the type info we want
+            // so for the time being just ignore them.
+            .filter(|child| !is_generated_from_property(child))
             .map(|child| ProtocolMethod {
                 method: ObjCMethod::from_entity(child),
+                is_optional: child.is_objc_optional(),
+            })
+            .collect();
+
+        let properties = children
+            .iter()
+            .filter(|child| child.get_kind() == EntityKind::ObjCPropertyDecl)
+            .map(|child| ProtocolProperty {
+                property: Property::from_entity(child),
                 is_optional: child.is_objc_optional(),
             })
             .collect();
@@ -1133,6 +1330,7 @@ impl ProtocolDesc {
             name: entity.get_name().unwrap(),
             inherited_protocols,
             methods,
+            properties,
         }
     }
 }
@@ -1252,6 +1450,7 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<TopLevelConstruct>, Par
     parser.arguments(&[
         "-x",
         "objective-c", // The file doesn't have an Objective-C extension so set the language explicitely
+        "-fobjc-arc",
         "-isysroot",
         &sdk_path(AppleSdk::MacOs),
     ]);
@@ -1320,29 +1519,22 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<TopLevelConstruct>, Par
 
 fn main() {
     let source = "
-        // @interface X
-        // @end
-        // @interface I<T>: X
-        // - (T _Nonnull)foo;
-        // @end
-        // int foo();
         // #import <AVFoundation/AVFoundation.h>
         // #import <Cocoa/Cocoa.h>
-        // struct ll { struct ll *next; };
-        // typedef struct { int a; } foo;
-        // @interface I
-        // - (struct ll)foo;
-        // - (enum { V1 = -10000000000, V2 })bar;
+        // @class C;
+        @protocol P
+        @optional
+        @property (readonly) int readOnlyProperty;
+        @end
+        // @interface X
+        // @property (readonly) int readOnlyProperty;
+        // - (int)readOnlyProperty;
+        // @property (readonly, getter=someGetter) int readOnlyPropertyWithExplicitGetter;
+        // @property (readwrite, setter=abcd:) int explicitReadWriteProperty;
+        // @property int implicitReadWriteProperty;
+        // @property (class, nonatomic, copy) C *classProperty;
         // @end
-        // struct vm_statistics64 {
-        //     int a;
-        // } __attribute__((aligned(8)));
-        // void foo();
-        // void foo(void);
-        typedef int i;
-        typedef int i;
-        void foo(void) {}
-    ";
+  ";
     let clang = Clang::new().expect("Could not load libclang");
     let constructs = parse_objc(&clang, source).unwrap();
     println!("{:#?}", constructs);
@@ -1449,6 +1641,7 @@ mod tests {
                     }),
                 },
             ],
+            properties: vec![],
         })];
 
         let parsed_decls = parse_objc(&clang, source).unwrap();
@@ -1473,6 +1666,7 @@ mod tests {
                 adopted_protocols: vec![],
                 template_params: vec![],
                 methods: vec![],
+                properties: vec![],
             }),
             TopLevelConstruct::Interface(InterfaceDesc {
                 name: "B".to_string(),
@@ -1480,6 +1674,7 @@ mod tests {
                 adopted_protocols: vec![],
                 template_params: vec![],
                 methods: vec![],
+                properties: vec![],
             }),
         ];
 
@@ -1506,6 +1701,7 @@ mod tests {
                 adopted_protocols: vec![],
                 template_params: vec![],
                 methods: vec![],
+                properties: vec![],
             }),
             TopLevelConstruct::Interface(InterfaceDesc {
                 name: "B".to_string(),
@@ -1521,6 +1717,7 @@ mod tests {
                         nullability: Nullability::NonNull,
                     }),
                 }],
+                properties: vec![],
             }),
         ];
 
@@ -1549,6 +1746,7 @@ mod tests {
                 name: "B".to_string(),
                 inherited_protocols: vec![],
                 methods: vec![],
+                properties: vec![],
             }),
             TopLevelConstruct::Protocol(ProtocolDesc {
                 name: "A".to_string(),
@@ -1582,6 +1780,7 @@ mod tests {
                         is_optional: true,
                     },
                 ],
+                properties: vec![],
             }),
         ];
 
@@ -1605,6 +1804,7 @@ mod tests {
             @end
             @interface A ()
             - (void)secondUnnamedCategoryMethod;
+            @property int propertyOnUnnamedCategory;
             @end
         ";
 
@@ -1615,6 +1815,7 @@ mod tests {
                 adopted_protocols: vec![],
                 template_params: vec![],
                 methods: vec![],
+                properties: vec![],
             }),
             TopLevelConstruct::Category(CategoryDesc {
                 name: Some("Categ".to_string()),
@@ -1626,6 +1827,7 @@ mod tests {
                     params: vec![],
                     result: ObjCType::Void,
                 }],
+                properties: vec![],
             }),
             TopLevelConstruct::Category(CategoryDesc {
                 name: None,
@@ -1637,6 +1839,7 @@ mod tests {
                     params: vec![],
                     result: ObjCType::Void,
                 }],
+                properties: vec![],
             }),
             TopLevelConstruct::Category(CategoryDesc {
                 name: None,
@@ -1647,6 +1850,16 @@ mod tests {
                     kind: ObjCMethodKind::Instance,
                     params: vec![],
                     result: ObjCType::Void,
+                }],
+                properties: vec![Property {
+                    name: "propertyOnUnnamedCategory".to_string(),
+                    value: ObjCType::Num(NumKind::Int),
+                    is_atomic: true,
+                    is_writable: false,
+                    is_class: false,
+                    ownership: PropOwnership::Strong,
+                    getter: None,
+                    setter: None,
                 }],
             }),
         ];
@@ -1706,6 +1919,7 @@ mod tests {
                     }),
                 },
             ],
+            properties: vec![],
         })];
 
         let parsed_decls = parse_objc(&clang, source).unwrap();
@@ -1741,6 +1955,7 @@ mod tests {
                         name: "I".to_string(),
                     }),
                 }],
+                properties: vec![],
             }),
         ];
 
@@ -1855,6 +2070,7 @@ mod tests {
                         }),
                     },
                 ],
+                properties: vec![],
             }),
             TopLevelConstruct::NamedRecord(NamedRecordDesc {
                 name: "DeclaredAfterwards".to_string(),
@@ -2064,6 +2280,7 @@ mod tests {
                         }),
                     },
                 ],
+                properties: vec![],
             }),
         ];
 
@@ -2172,6 +2389,7 @@ mod tests {
                     },
                     is_optional: false,
                 }],
+                properties: vec![],
             }),
         ];
 
