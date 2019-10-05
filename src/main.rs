@@ -14,7 +14,6 @@ use clang::{Clang, EntityKind, TypeKind};
 // - namespacing of ObjC exported from Swift (though that might be fine as we're calling from generated ObjC)
 // - add test for empty category names
 // - const
-// - add test for parsing "extern void NSLog(NSString *format, ...);""
 // - module name
 // - bit fields
 // - try getting the best definition of a function (unfortunately libclang's "canonical" seems to just be the first one)
@@ -531,28 +530,24 @@ impl CallableDesc {
         let params = match clang_type.get_kind() {
             TypeKind::FunctionNoPrototype => None,
             TypeKind::FunctionPrototype => Some({
-                let argument_types = clang_type.get_argument_types().unwrap();
-                let mut params = Vec::with_capacity(argument_types.len());
-                for arg_type in argument_types {
-                    let parm_decl = base_parm_decls.next().unwrap();
-
-                    // assert_eq!(
-                    //     ObjCType::from_type(&arg_type, &mut parm_decl_children(&parm_decl)),
-                    //     ObjCType::from_type(
-                    //         &parm_decl.get_type().unwrap(),
-                    //         &mut parm_decl_children(&parm_decl)
-                    //     )
-                    // );
-                    let objc_type = ObjCType::from_type(
-                        &parm_decl.get_type().unwrap(),
-                        &mut parm_decl_children(&parm_decl),
-                    );
-                    params.push(Param {
-                        name: parm_decl.get_name(),
-                        objc_type,
-                    });
-                }
-                params
+                clang_type
+                    .get_argument_types()
+                    .unwrap()
+                    .iter()
+                    .map(|_| {
+                        // Not using the value of argument types, only their count.
+                        // The param decl taken from the entity seems to always have better information.
+                        let parm_decl = base_parm_decls.next().unwrap();
+                        let objc_type = ObjCType::from_type(
+                            &parm_decl.get_type().unwrap(),
+                            &mut parm_decl_children(&parm_decl),
+                        );
+                        Param {
+                            name: parm_decl.get_name(),
+                            objc_type,
+                        }
+                    })
+                    .collect()
             }),
             unexpected_kind => panic!(
                 "Unexpected kind for function declaration {:?}: {:?}",
@@ -2152,6 +2147,39 @@ mod tests {
                 }],
             }),
         ];
+
+        let parsed_decls = parse_objc(&clang, source).unwrap();
+        assert_eq!(parsed_decls, expected_decls);
+    }
+
+    #[test]
+    fn test_nslog() {
+        let clang = Clang::new().expect("Could not load libclang");
+
+        // NSLog seems to be already known by the compiler so handled a bit differently by it.
+        let source = "
+            @class NSString;
+            extern void NSLog(NSString *format, ...);
+        ";
+
+        let expected_decls = vec![TopLevelConstruct::Func(FuncDesc {
+            name: "NSLog".to_string(),
+            desc: CallableDesc {
+                result: Box::new(ObjCType::Void),
+                params: Some(vec![Param {
+                    name: Some("format".to_string()),
+                    objc_type: ObjCType::ObjPtr(ObjPtr {
+                        kind: ObjPtrKind::SomeInstance(SomeInstanceObjPtr {
+                            interface: "NSString".to_string(),
+                            protocols: vec![],
+                            type_args: vec![],
+                        }),
+                        nullability: Nullability::Unspecified,
+                    }),
+                }]),
+                is_variadic: true,
+            },
+        })];
 
         let parsed_decls = parse_objc(&clang, source).unwrap();
         assert_eq!(parsed_decls, expected_decls);
