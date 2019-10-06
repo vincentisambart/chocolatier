@@ -2,6 +2,7 @@
 #![allow(clippy::cognitive_complexity)]
 
 use clang::{Clang, EntityKind, TypeKind};
+use std::collections::{HashMap, HashSet};
 
 // TODO: Try to get:
 // - class and method OS version annotations
@@ -237,6 +238,10 @@ fn show_tree(entity: &clang::Entity, indent_level: usize) {
 
     if let Some(range) = entity.get_range() {
         println!("{}range: {:?}", indent, range);
+
+        if entity.get_kind() == EntityKind::UnexposedAttr {
+            println!("{}tokens: {:?}", indent, range.tokenize());
+        }
     }
 
     if let Some(usr) = entity.get_usr() {
@@ -448,59 +453,76 @@ struct Field {
 }
 
 impl Field {
-    fn from_entity(entity: &clang::Entity) -> Self {
+    fn from_entity(entity: &clang::Entity, unnamed_tag_ids: &TagIdMap) -> Self {
         assert_eq!(entity.get_kind(), EntityKind::FieldDecl);
         Field {
             name: entity.get_name(),
             objc_type: ObjCType::from_type(
                 &entity.get_type().unwrap(),
                 &mut parm_decl_children(entity),
+                unnamed_tag_ids,
             ),
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
-enum Record {
-    NamedStruct { name: String },
-    UnnamedStruct { fields: Vec<Field> },
-    NamedUnion { name: String },
-    UnnamedUnion { fields: Vec<Field> },
+enum TagId {
+    Named(String),
+    Unnamed(u32),
 }
 
-impl Record {
-    fn from_type(clang_type: &clang::Type) -> Self {
-        let decl = clang_type.get_declaration().unwrap();
-        let name = decl.get_name();
-        if let Some(name) = name {
-            match decl.get_kind() {
-                EntityKind::StructDecl => Record::NamedStruct { name },
-                EntityKind::UnionDecl => Record::NamedUnion { name },
-                unexpected_kind => panic!(
-                    "Unexpected kind for record declaration {:?}: {:?}",
-                    unexpected_kind, clang_type
-                ),
-            }
+impl TagId {
+    fn from_entity(decl: &clang::Entity, unnamed_tag_ids: &TagIdMap) -> Self {
+        assert!([
+            EntityKind::StructDecl,
+            EntityKind::UnionDecl,
+            EntityKind::EnumDecl,
+        ]
+        .contains(&decl.get_kind()));
+
+        if let Some(name) = decl.get_name() {
+            TagId::Named(name)
         } else {
-            assert!(
-                decl.get_definition().is_some(),
-                "An unnamed record should have fields definition"
-            );
-            let fields = clang_type
-                .get_fields()
-                .unwrap()
-                .iter()
-                .map(Field::from_entity)
-                .collect();
-            match decl.get_kind() {
-                EntityKind::StructDecl => Record::UnnamedStruct { fields },
-                EntityKind::UnionDecl => Record::UnnamedUnion { fields },
-                unexpected_kind => panic!(
-                    "Unexpected kind for record declaration {:?}: {:?}",
-                    unexpected_kind, clang_type
-                ),
-            }
+            TagId::Unnamed(
+                *unnamed_tag_ids
+                    .get(&decl.get_usr().unwrap())
+                    .expect("all unnamed tag should have an id assigned"),
+            )
         }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+enum TagKind {
+    Union,
+    Struct,
+    Enum,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct TagRef {
+    id: TagId,
+    kind: TagKind,
+}
+
+impl TagRef {
+    fn from_type(clang_type: &clang::Type, unnamed_tag_ids: &TagIdMap) -> Self {
+        let decl = clang_type.get_declaration().unwrap();
+
+        let kind = match decl.get_kind() {
+            EntityKind::StructDecl => TagKind::Struct,
+            EntityKind::UnionDecl => TagKind::Union,
+            EntityKind::EnumDecl => TagKind::Enum,
+            unexpected_kind => panic!(
+                "Unexpected kind for tag declaration {:?}: {:?}",
+                unexpected_kind, clang_type
+            ),
+        };
+
+        let id = TagId::from_entity(&decl, unnamed_tag_ids);
+
+        TagRef { id, kind }
     }
 }
 
@@ -521,15 +543,21 @@ impl CallableDesc {
     fn from_type<'a>(
         clang_type: &clang::Type,
         base_parm_decls: &mut impl Iterator<Item = clang::Entity<'a>>,
+        unnamed_tag_ids: &TagIdMap,
     ) -> Self {
         if clang_type.get_kind() == TypeKind::Attributed {
-            return Self::from_type(&clang_type.get_modified_type().unwrap(), base_parm_decls);
+            return Self::from_type(
+                &clang_type.get_modified_type().unwrap(),
+                base_parm_decls,
+                unnamed_tag_ids,
+            );
         }
 
         // result must be processed before parameters due to the order the entities are in base_parm_decls.
         let result = Box::new(ObjCType::from_type(
             &clang_type.get_result_type().unwrap(),
             base_parm_decls,
+            unnamed_tag_ids,
         ));
 
         let params = match clang_type.get_kind() {
@@ -546,6 +574,7 @@ impl CallableDesc {
                         let objc_type = ObjCType::from_type(
                             &parm_decl.get_type().unwrap(),
                             &mut parm_decl_children(&parm_decl),
+                            unnamed_tag_ids,
                         );
                         Param {
                             name: parm_decl.get_name(),
@@ -569,16 +598,15 @@ impl CallableDesc {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct Typedef {
+struct TypedefRef {
     name: String,
 }
 
-impl Typedef {
+impl TypedefRef {
     fn from_type(clang_type: &clang::Type) -> Self {
         assert_eq!(clang_type.get_kind(), TypeKind::Typedef);
-        Typedef {
-            name: clang_type.get_display_name(),
-        }
+        let name = clang_type.get_display_name();
+        TypedefRef { name }
     }
 }
 
@@ -615,13 +643,6 @@ struct EnumValue {
     value: SignedOrNotInt,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-struct Enum {
-    name: Option<String>,
-    underlying: Option<Box<ObjCType>>,
-    values: Option<Vec<EnumValue>>,
-}
-
 fn type_signedness(clang_type: &clang::Type) -> Option<Signedness> {
     match clang_type.get_kind() {
         TypeKind::SChar
@@ -652,54 +673,10 @@ fn type_signedness(clang_type: &clang::Type) -> Option<Signedness> {
     }
 }
 
-impl Enum {
-    fn from_type(clang_type: &clang::Type) -> Self {
-        assert_eq!(clang_type.get_kind(), TypeKind::Enum);
-        let decl = clang_type.get_declaration().unwrap();
-
-        let underlying = decl.get_enum_underlying_type().map(|underlying| {
-            Box::new(ObjCType::from_type(
-                &underlying,
-                &mut parm_decl_children(&decl),
-            ))
-        });
-
-        let values = if decl.get_definition().is_some() {
-            let signedness = type_signedness(&decl.get_enum_underlying_type().unwrap())
-                .expect("The underlying type of an enum should have a signedness");
-            Some(
-                decl.get_children()
-                    .into_iter()
-                    .filter(|child| child.get_kind() == EntityKind::EnumConstantDecl)
-                    .map(|decl| {
-                        let values = decl.get_enum_constant_value().unwrap();
-
-                        EnumValue {
-                            name: decl.get_name().unwrap(),
-                            value: match signedness {
-                                Signedness::Signed => SignedOrNotInt::Signed(values.0),
-                                Signedness::Unsigned => SignedOrNotInt::Unsigned(values.1),
-                            },
-                        }
-                    })
-                    .collect(),
-            )
-        } else {
-            None
-        };
-
-        Enum {
-            name: decl.get_name(),
-            underlying,
-            values,
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 enum ObjCTypeArg {
     ObjPtr(ObjPtr),
-    Typedef(Typedef),
+    Typedef(TypedefRef),
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -736,15 +713,14 @@ enum ObjCType {
     Void,
     Bool,
     Num(NumKind),
-    Typedef(Typedef),
+    Tag(TagRef),
+    Typedef(TypedefRef),
     Pointer(Pointer),
-    Record(Record),
     Function(CallableDesc),
     ObjPtr(ObjPtr),
     /// `SEL` in Objective-C. A special type of (non-object) pointer.
     ObjCSel(Nullability),
     Array(Array),
-    Enum(Enum),
     Unsupported(Unsupported),
 }
 
@@ -752,6 +728,7 @@ impl ObjCType {
     fn from_type<'a>(
         clang_type: &clang::Type,
         base_parm_decls: &mut impl Iterator<Item = clang::Entity<'a>>,
+        unnamed_tag_ids: &TagIdMap,
     ) -> Self {
         match clang_type.get_kind() {
             TypeKind::Void => Self::Void,
@@ -773,7 +750,11 @@ impl ObjCType {
             TypeKind::Pointer => {
                 let pointee_type = clang_type.get_pointee_type().unwrap();
                 Self::Pointer(Pointer {
-                    pointee: Box::new(Self::from_type(&pointee_type, base_parm_decls)),
+                    pointee: Box::new(Self::from_type(
+                        &pointee_type,
+                        base_parm_decls,
+                        unnamed_tag_ids,
+                    )),
                     nullability: Nullability::Unspecified,
                 })
             }
@@ -806,15 +787,15 @@ impl ObjCType {
                 let type_args: Vec<ObjCTypeArg> = pointee_type
                     .get_objc_type_arguments()
                     .iter()
-                    .map(
-                        |arg| match Self::from_type(arg, &mut Vec::new().into_iter()) {
+                    .map(|arg| {
+                        match Self::from_type(arg, &mut Vec::new().into_iter(), unnamed_tag_ids) {
                             Self::ObjPtr(ptr) => ObjCTypeArg::ObjPtr(ptr),
                             Self::Typedef(typedef) => ObjCTypeArg::Typedef(typedef),
                             unexpected => {
                                 panic!("Type arguments not expected to be {:?}", unexpected)
                             }
-                        },
-                    )
+                        }
+                    })
                     .collect();
 
                 let base_type = pointee_type.get_objc_object_base_type().unwrap();
@@ -838,8 +819,11 @@ impl ObjCType {
                 }
             }
             TypeKind::Attributed => {
-                let modified =
-                    Self::from_type(&clang_type.get_modified_type().unwrap(), base_parm_decls);
+                let modified = Self::from_type(
+                    &clang_type.get_modified_type().unwrap(),
+                    base_parm_decls,
+                    unnamed_tag_ids,
+                );
                 if let Some(nullability) = clang_type.get_nullability() {
                     let nullability = nullability.into();
                     match modified {
@@ -875,21 +859,26 @@ impl ObjCType {
                         nullability: Nullability::Unspecified,
                     })
                 } else {
-                    Self::Typedef(Typedef::from_type(&clang_type))
+                    Self::Typedef(TypedefRef::from_type(&clang_type))
                 }
             }
-            TypeKind::Elaborated => {
-                Self::from_type(&clang_type.get_elaborated_type().unwrap(), base_parm_decls)
+            TypeKind::Elaborated => Self::from_type(
+                &clang_type.get_elaborated_type().unwrap(),
+                base_parm_decls,
+                unnamed_tag_ids,
+            ),
+            TypeKind::Record | TypeKind::Enum => {
+                Self::Tag(TagRef::from_type(&clang_type, unnamed_tag_ids))
             }
-            TypeKind::Record => Self::Record(Record::from_type(&clang_type)),
-            TypeKind::FunctionNoPrototype | TypeKind::FunctionPrototype => {
-                Self::Function(CallableDesc::from_type(&clang_type, base_parm_decls))
-            }
+            TypeKind::FunctionNoPrototype | TypeKind::FunctionPrototype => Self::Function(
+                CallableDesc::from_type(&clang_type, base_parm_decls, unnamed_tag_ids),
+            ),
             TypeKind::ConstantArray => Self::Array(Array {
                 size: Some(clang_type.get_size().unwrap()),
                 element: Box::new(Self::from_type(
                     &clang_type.get_element_type().unwrap(),
                     base_parm_decls,
+                    unnamed_tag_ids,
                 )),
             }),
             TypeKind::IncompleteArray => Self::Array(Array {
@@ -897,20 +886,72 @@ impl ObjCType {
                 element: Box::new(Self::from_type(
                     &clang_type.get_element_type().unwrap(),
                     base_parm_decls,
+                    unnamed_tag_ids,
                 )),
             }),
             TypeKind::BlockPointer => Self::ObjPtr(ObjPtr {
                 kind: ObjPtrKind::Block(CallableDesc::from_type(
                     &clang_type.get_pointee_type().unwrap(),
                     base_parm_decls,
+                    unnamed_tag_ids,
                 )),
                 nullability: Nullability::Unspecified,
             }),
-            TypeKind::Enum => Self::Enum(Enum::from_type(&clang_type)),
             TypeKind::Bool => Self::Bool,
             TypeKind::Vector => Self::Unsupported(Unsupported::Vector),
             TypeKind::Unexposed => Self::Unsupported(Unsupported::Unexposed),
             unknown_kind => panic!("Unhandled type kind {:?}: {:?}", unknown_kind, clang_type),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum FileKind {
+    None,
+    Main,
+    Some(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct Location {
+    file_kind: FileKind,
+    line: u32,
+    column: u32,
+}
+
+impl Location {
+    fn from_entity(entity: &clang::Entity) -> Self {
+        let source_location = entity.get_location().unwrap();
+        // let location = source_location.get_file_location();
+        let location = source_location.get_spelling_location();
+
+        let file_kind = if let Some(file) = location.file {
+            // For some reason, source_location.is_in_main_file() doesn't seem to work properly so do it ourselves.
+            let tu_file = entity
+                .get_translation_unit()
+                .get_entity()
+                .get_range()
+                .unwrap()
+                .get_start()
+                .get_file_location()
+                .file
+                .unwrap();
+            if tu_file == file {
+                FileKind::Main
+            } else {
+                FileKind::Some(file.get_path().to_str().unwrap().to_string())
+            }
+        } else {
+            FileKind::None
+        };
+
+        let line = location.line;
+        let column = location.column;
+
+        Location {
+            file_kind,
+            line,
+            column,
         }
     }
 }
@@ -922,13 +963,14 @@ struct ObjCParam {
 }
 
 impl ObjCParam {
-    fn from_entity(entity: &clang::Entity) -> Self {
+    fn from_entity(entity: &clang::Entity, unnamed_tag_ids: &TagIdMap) -> Self {
         assert_eq!(entity.get_kind(), EntityKind::ParmDecl);
         ObjCParam {
             name: entity.get_name().unwrap(),
             objc_type: ObjCType::from_type(
                 &entity.get_type().unwrap(),
                 &mut parm_decl_children(entity),
+                unnamed_tag_ids,
             ),
         }
     }
@@ -949,7 +991,7 @@ struct ObjCMethod {
 }
 
 impl ObjCMethod {
-    fn from_entity(entity: &clang::Entity) -> Self {
+    fn from_entity(entity: &clang::Entity, unnamed_tag_ids: &TagIdMap) -> Self {
         let kind = match entity.get_kind() {
             EntityKind::ObjCClassMethodDecl => ObjCMethodKind::Class,
             EntityKind::ObjCInstanceMethodDecl => ObjCMethodKind::Instance,
@@ -960,12 +1002,13 @@ impl ObjCMethod {
             .get_arguments()
             .unwrap()
             .iter()
-            .map(ObjCParam::from_entity)
+            .map(|arg| ObjCParam::from_entity(arg, unnamed_tag_ids))
             .collect();
 
         let result = ObjCType::from_type(
             &entity.get_result_type().unwrap(),
             &mut parm_decl_children(entity),
+            unnamed_tag_ids,
         );
         ObjCMethod {
             name: entity.get_name().unwrap(),
@@ -1020,13 +1063,14 @@ struct Property {
 }
 
 impl Property {
-    fn from_entity(entity: &clang::Entity) -> Self {
+    fn from_entity(entity: &clang::Entity, unnamed_tag_ids: &TagIdMap) -> Self {
         assert_eq!(entity.get_kind(), EntityKind::ObjCPropertyDecl);
 
         let name = entity.get_name().unwrap();
         let value = ObjCType::from_type(
             &entity.get_type().unwrap(),
             &mut parm_decl_children(&entity),
+            unnamed_tag_ids,
         );
         let attributes = entity
             .get_objc_attributes()
@@ -1151,7 +1195,7 @@ impl Property {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct InterfaceDesc {
+struct InterfaceDef {
     name: String,
     superclass: Option<String>,
     adopted_protocols: Vec<String>,
@@ -1160,8 +1204,8 @@ struct InterfaceDesc {
     properties: Vec<Property>,
 }
 
-impl InterfaceDesc {
-    fn from_entity(entity: &clang::Entity) -> Self {
+impl InterfaceDef {
+    fn from_entity(entity: &clang::Entity, unnamed_tag_ids: &TagIdMap) -> Self {
         assert_eq!(entity.get_kind(), EntityKind::ObjCInterfaceDecl);
         let name = entity.get_name().unwrap();
         let children = entity.get_children();
@@ -1191,16 +1235,16 @@ impl InterfaceDesc {
             })
             // Methods generated from property don't have children with the type info we want
             // so for the time being just ignore them.
-            .filter(|child| !is_generated_from_property(child))
-            .map(ObjCMethod::from_entity)
+            .filter(|method| !is_generated_from_property(method))
+            .map(|method| ObjCMethod::from_entity(method, unnamed_tag_ids))
             .collect();
         let properties = children
             .iter()
             .filter(|child| child.get_kind() == EntityKind::ObjCPropertyDecl)
-            .map(Property::from_entity)
+            .map(|prop| Property::from_entity(prop, unnamed_tag_ids))
             .collect();
 
-        InterfaceDesc {
+        InterfaceDef {
             name,
             superclass,
             adopted_protocols,
@@ -1212,7 +1256,7 @@ impl InterfaceDesc {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct CategoryDesc {
+struct CategoryDef {
     name: Option<String>,
     class: String,
     adopted_protocols: Vec<String>,
@@ -1220,10 +1264,12 @@ struct CategoryDesc {
     properties: Vec<Property>,
 }
 
-impl CategoryDesc {
-    fn from_entity(entity: &clang::Entity) -> Self {
+impl CategoryDef {
+    fn from_entity(entity: &clang::Entity, unnamed_tag_ids: &TagIdMap) -> Self {
         assert_eq!(entity.get_kind(), EntityKind::ObjCCategoryDecl);
         let children = entity.get_children();
+
+        let name = entity.get_name();
 
         let class = children
             .iter()
@@ -1249,18 +1295,18 @@ impl CategoryDesc {
             })
             // Methods generated from property don't have children with the type info we want
             // so for the time being just ignore them.
-            .filter(|child| !is_generated_from_property(child))
-            .map(ObjCMethod::from_entity)
+            .filter(|method| !is_generated_from_property(method))
+            .map(|method| ObjCMethod::from_entity(method, unnamed_tag_ids))
             .collect();
 
         let properties = children
             .iter()
             .filter(|child| child.get_kind() == EntityKind::ObjCPropertyDecl)
-            .map(Property::from_entity)
+            .map(|prop| Property::from_entity(prop, unnamed_tag_ids))
             .collect();
 
-        CategoryDesc {
-            name: entity.get_name(),
+        CategoryDef {
+            name,
             class,
             adopted_protocols,
             methods,
@@ -1282,15 +1328,15 @@ struct ProtocolProperty {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct ProtocolDesc {
+struct ProtocolDef {
     name: String,
     inherited_protocols: Vec<String>,
     methods: Vec<ProtocolMethod>,
     properties: Vec<ProtocolProperty>,
 }
 
-impl ProtocolDesc {
-    fn from_entity(entity: &clang::Entity) -> Self {
+impl ProtocolDef {
+    fn from_entity(entity: &clang::Entity, unnamed_tag_ids: &TagIdMap) -> Self {
         assert_eq!(entity.get_kind(), EntityKind::ObjCProtocolDecl);
         let children = entity.get_children();
 
@@ -1313,7 +1359,7 @@ impl ProtocolDesc {
             // so for the time being just ignore them.
             .filter(|child| !is_generated_from_property(child))
             .map(|child| ProtocolMethod {
-                method: ObjCMethod::from_entity(child),
+                method: ObjCMethod::from_entity(child, unnamed_tag_ids),
                 is_optional: child.is_objc_optional(),
             })
             .collect();
@@ -1322,12 +1368,12 @@ impl ProtocolDesc {
             .iter()
             .filter(|child| child.get_kind() == EntityKind::ObjCPropertyDecl)
             .map(|child| ProtocolProperty {
-                property: Property::from_entity(child),
+                property: Property::from_entity(child, unnamed_tag_ids),
                 is_optional: child.is_objc_optional(),
             })
             .collect();
 
-        ProtocolDesc {
+        ProtocolDef {
             name: entity.get_name().unwrap(),
             inherited_protocols,
             methods,
@@ -1337,20 +1383,21 @@ impl ProtocolDesc {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct TypedefDesc {
+struct TypedefDecl {
     name: String,
     underlying: ObjCType,
 }
 
-impl TypedefDesc {
-    fn from_entity(decl: &clang::Entity) -> Self {
+impl TypedefDecl {
+    fn from_entity(decl: &clang::Entity, unnamed_tag_ids: &TagIdMap) -> Self {
         assert_eq!(decl.get_kind(), EntityKind::TypedefDecl);
 
-        TypedefDesc {
+        TypedefDecl {
             name: decl.get_name().unwrap(),
             underlying: ObjCType::from_type(
                 &decl.get_typedef_underlying_type().unwrap(),
                 &mut parm_decl_children(&decl),
+                unnamed_tag_ids,
             ),
         }
     }
@@ -1363,14 +1410,17 @@ enum RecordKind {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct NamedRecordDesc {
-    name: String,
-    fields: Vec<Field>,
+struct RecordDef {
+    id: TagId,
     kind: RecordKind,
+    fields: Vec<Field>,
+    // location: Location,
 }
 
-impl NamedRecordDesc {
-    fn from_entity(decl: &clang::Entity) -> Self {
+impl RecordDef {
+    fn from_entity(decl: &clang::Entity, unnamed_tag_ids: &TagIdMap) -> Self {
+        let id = TagId::from_entity(decl, unnamed_tag_ids);
+
         let kind = match decl.get_kind() {
             EntityKind::StructDecl => RecordKind::Struct,
             EntityKind::UnionDecl => RecordKind::Union,
@@ -1387,49 +1437,59 @@ impl NamedRecordDesc {
             .get_fields()
             .unwrap()
             .iter()
-            .map(Field::from_entity)
+            .map(|field| Field::from_entity(field, unnamed_tag_ids))
             .collect();
 
-        NamedRecordDesc {
-            name: decl.get_name().unwrap(),
-            fields,
+        // let location = Location::from_entity(decl);
+
+        RecordDef {
+            id,
             kind,
+            fields,
+            // location,
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct FuncDesc {
+struct FuncDecl {
     name: String,
     desc: CallableDesc,
 }
 
-impl FuncDesc {
-    fn from_entity(decl: &clang::Entity) -> Self {
+impl FuncDecl {
+    fn from_entity(decl: &clang::Entity, unnamed_tag_ids: &TagIdMap) -> Self {
         assert_eq!(decl.get_kind(), EntityKind::FunctionDecl);
         let clang_type = decl.get_type().unwrap();
 
-        FuncDesc {
+        FuncDecl {
             name: decl.get_name().unwrap(),
-            desc: CallableDesc::from_type(&clang_type, &mut parm_decl_children(&decl)),
+            desc: CallableDesc::from_type(
+                &clang_type,
+                &mut parm_decl_children(&decl),
+                unnamed_tag_ids,
+            ),
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct EnumDesc {
-    name: Option<String>,
+struct EnumDef {
+    id: TagId,
     underlying: ObjCType,
     values: Vec<EnumValue>,
 }
 
-impl EnumDesc {
-    fn from_entity(decl: &clang::Entity) -> Self {
+impl EnumDef {
+    fn from_entity(decl: &clang::Entity, unnamed_tag_ids: &TagIdMap) -> Self {
         assert_eq!(decl.get_kind(), EntityKind::EnumDecl);
+
+        let id = TagId::from_entity(decl, unnamed_tag_ids);
 
         let underlying = ObjCType::from_type(
             &decl.get_enum_underlying_type().unwrap(),
             &mut parm_decl_children(&decl),
+            unnamed_tag_ids,
         );
 
         assert!(decl.get_definition().is_some());
@@ -1452,8 +1512,8 @@ impl EnumDesc {
             })
             .collect();
 
-        EnumDesc {
-            name: decl.get_name(),
+        EnumDef {
+            id,
             underlying,
             values,
         }
@@ -1462,14 +1522,14 @@ impl EnumDesc {
 
 #[derive(Clone, Debug, PartialEq)]
 enum TopLevelConstruct {
-    Protocol(ProtocolDesc),
-    Interface(InterfaceDesc),
-    Category(CategoryDesc),
-    Typedef(TypedefDesc),
-    NamedRecord(NamedRecordDesc),
-    Enum(EnumDesc),
-    Func(FuncDesc),
-    // Var(VarDesc),
+    ProtocolDef(ProtocolDef),
+    InterfaceDef(InterfaceDef),
+    CategoryDef(CategoryDef),
+    RecordDef(RecordDef),
+    EnumDef(EnumDef),
+    TypedefDecl(TypedefDecl),
+    FuncDecl(FuncDecl),
+    // VarDecl(VarDecl),
 }
 
 #[derive(Debug)]
@@ -1483,6 +1543,8 @@ impl From<clang::SourceError> for ParseError {
         ParseError::SourceError(err)
     }
 }
+
+type TagIdMap = HashMap<clang::Usr, u32>;
 
 fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<TopLevelConstruct>, ParseError> {
     use clang::diagnostic::Severity;
@@ -1515,45 +1577,81 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<TopLevelConstruct>, Par
         return Err(ParseError::CompilationError(error.get_text()));
     }
 
-    println!("--------------------------------");
-    show_tree(&tu.get_entity(), 0);
-    println!("--------------------------------");
+    // println!("--------------------------------");
+    // show_tree(&tu.get_entity(), 0);
+    // println!("--------------------------------");
 
     let mut constructs: Vec<TopLevelConstruct> = Vec::new();
-    for entity in tu.get_entity().get_children() {
+
+    let tu_entity = tu.get_entity();
+
+    let mut next_unique_id: u32 = 1;
+    let mut unnamed_tag_ids = TagIdMap::new();
+    // Make unique identifiers for tags (struct/union/enum) that have no name.
+    // Not using USRs as I'm not sure they are supposed to be stable between different clang versions.
+    // Also not using locations as due to the the processor their might not be unique.
+    tu_entity.visit_children(|entity, _| {
         match entity.get_kind() {
-            EntityKind::ObjCInterfaceDecl => {
-                constructs.push(TopLevelConstruct::Interface(InterfaceDesc::from_entity(
-                    &entity,
-                )));
+            EntityKind::StructDecl | EntityKind::UnionDecl | EntityKind::EnumDecl
+                if entity.get_name().is_none() => {}
+            _ => return clang::EntityVisitResult::Recurse,
+        }
+
+        if entity.get_definition().unwrap() != entity {
+            return clang::EntityVisitResult::Recurse;
+        }
+
+        let usr = entity.get_usr().unwrap();
+        if unnamed_tag_ids.contains_key(&usr) {
+            return clang::EntityVisitResult::Recurse;
+        }
+        unnamed_tag_ids.insert(usr, next_unique_id);
+
+        next_unique_id += 1;
+
+        clang::EntityVisitResult::Recurse
+    });
+    let unnamed_tag_ids = unnamed_tag_ids;
+
+    let mut visited: HashSet<clang::Usr> = HashSet::new();
+    tu_entity.visit_children(|entity, _| {
+        let usr = entity.get_usr();
+        if let Some(usr) = entity.get_usr() {
+            if visited.contains(&usr) {
+                return clang::EntityVisitResult::Recurse;
             }
-            EntityKind::ObjCProtocolDecl => {
-                constructs.push(TopLevelConstruct::Protocol(ProtocolDesc::from_entity(
-                    &entity,
-                )));
-            }
-            EntityKind::ObjCCategoryDecl => {
-                constructs.push(TopLevelConstruct::Category(CategoryDesc::from_entity(
-                    &entity,
-                )));
-            }
-            EntityKind::TypedefDecl => {
-                constructs.push(TopLevelConstruct::Typedef(TypedefDesc::from_entity(
-                    &entity,
-                )));
-            }
-            EntityKind::FunctionDecl => {
-                constructs.push(TopLevelConstruct::Func(FuncDesc::from_entity(&entity)));
-            }
+        }
+        let construct = match entity.get_kind() {
+            EntityKind::ObjCInterfaceDecl => Some(TopLevelConstruct::InterfaceDef(
+                InterfaceDef::from_entity(&entity, &unnamed_tag_ids),
+            )),
+            EntityKind::ObjCProtocolDecl => Some(TopLevelConstruct::ProtocolDef(
+                ProtocolDef::from_entity(&entity, &unnamed_tag_ids),
+            )),
+            EntityKind::ObjCCategoryDecl => Some(TopLevelConstruct::CategoryDef(
+                CategoryDef::from_entity(&entity, &unnamed_tag_ids),
+            )),
+            EntityKind::TypedefDecl => Some(TopLevelConstruct::TypedefDecl(
+                TypedefDecl::from_entity(&entity, &unnamed_tag_ids),
+            )),
+            EntityKind::FunctionDecl => Some(TopLevelConstruct::FuncDecl(FuncDecl::from_entity(
+                &entity,
+                &unnamed_tag_ids,
+            ))),
             EntityKind::StructDecl | EntityKind::UnionDecl => {
-                // We only care about definition of structs or unions, not their declaration, and only of named ones.
+                // We only care about definition of structs or unions, not their declaration.
                 // (details of unnamed ones are included directly in the types that include them)
                 if let Some(def) = entity.get_definition() {
-                    if def == entity && def.get_name().is_some() {
-                        constructs.push(TopLevelConstruct::NamedRecord(
-                            NamedRecordDesc::from_entity(&entity),
-                        ));
+                    if def == entity {
+                        Some(TopLevelConstruct::RecordDef(RecordDef::from_entity(
+                            &entity,
+                            &unnamed_tag_ids,
+                        )))
+                    } else {
+                        None
                     }
+                } else {
+                    None
                 }
             }
             EntityKind::EnumDecl => {
@@ -1561,13 +1659,27 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<TopLevelConstruct>, Par
                 // But contrarily to struct and enums, we do care about unnamed ones as they are used to declare constants.
                 if let Some(def) = entity.get_definition() {
                     if def == entity {
-                        constructs.push(TopLevelConstruct::Enum(EnumDesc::from_entity(&entity)));
+                        Some(TopLevelConstruct::EnumDef(EnumDef::from_entity(
+                            &entity,
+                            &unnamed_tag_ids,
+                        )))
+                    } else {
+                        None
                     }
+                } else {
+                    None
                 }
             }
-            _ => {}
+            _ => None,
+        };
+
+        if let Some(construct) = construct {
+            constructs.push(construct);
+            visited.insert(usr.unwrap());
         }
-    }
+
+        clang::EntityVisitResult::Recurse
+    });
     Ok(constructs)
 }
 
@@ -1575,7 +1687,7 @@ fn main() {
     let source = "
         // #import <AVFoundation/AVFoundation.h>
         // #import <Cocoa/Cocoa.h>
-        typedef enum { A = 1 } foo;
+        // typedef enum { A = 1 } foo;
         // enum E { B = 1000 };
         // typedef signed long CFIndex;
         // typedef enum __attribute__((enum_extensibility(open))) CFStreamStatus : CFIndex CFStreamStatus; enum CFStreamStatus : CFIndex {
@@ -1588,7 +1700,8 @@ fn main() {
         //     kCFStreamStatusClosed,
         //     kCFStreamStatusError
         // };
-
+        struct ll { struct ll *nextl; };
+        struct { float f; union { int i; double d; }; } a;
   ";
     let clang = Clang::new().expect("Could not load libclang");
     let constructs = parse_objc(&clang, source).unwrap();
@@ -1638,7 +1751,7 @@ mod tests {
             @end
         ";
 
-        let expected_decls = vec![TopLevelConstruct::Interface(InterfaceDesc {
+        let expected_decls = vec![TopLevelConstruct::InterfaceDef(InterfaceDef {
             name: "A".to_string(),
             superclass: None,
             adopted_protocols: vec![],
@@ -1715,7 +1828,7 @@ mod tests {
         ";
 
         let expected_decls = vec![
-            TopLevelConstruct::Interface(InterfaceDesc {
+            TopLevelConstruct::InterfaceDef(InterfaceDef {
                 name: "A".to_string(),
                 superclass: None,
                 adopted_protocols: vec![],
@@ -1723,7 +1836,7 @@ mod tests {
                 methods: vec![],
                 properties: vec![],
             }),
-            TopLevelConstruct::Interface(InterfaceDesc {
+            TopLevelConstruct::InterfaceDef(InterfaceDef {
                 name: "B".to_string(),
                 superclass: Some("A".to_string()),
                 adopted_protocols: vec![],
@@ -1750,7 +1863,7 @@ mod tests {
         ";
 
         let expected_decls = vec![
-            TopLevelConstruct::Interface(InterfaceDesc {
+            TopLevelConstruct::InterfaceDef(InterfaceDef {
                 name: "A".to_string(),
                 superclass: None,
                 adopted_protocols: vec![],
@@ -1758,7 +1871,7 @@ mod tests {
                 methods: vec![],
                 properties: vec![],
             }),
-            TopLevelConstruct::Interface(InterfaceDesc {
+            TopLevelConstruct::InterfaceDef(InterfaceDef {
                 name: "B".to_string(),
                 superclass: Some("A".to_string()),
                 adopted_protocols: vec![],
@@ -1797,13 +1910,13 @@ mod tests {
         ";
 
         let expected_decls = vec![
-            TopLevelConstruct::Protocol(ProtocolDesc {
+            TopLevelConstruct::ProtocolDef(ProtocolDef {
                 name: "B".to_string(),
                 inherited_protocols: vec![],
                 methods: vec![],
                 properties: vec![],
             }),
-            TopLevelConstruct::Protocol(ProtocolDesc {
+            TopLevelConstruct::ProtocolDef(ProtocolDef {
                 name: "A".to_string(),
                 inherited_protocols: vec![],
                 methods: vec![
@@ -1864,7 +1977,7 @@ mod tests {
         ";
 
         let expected_decls = vec![
-            TopLevelConstruct::Interface(InterfaceDesc {
+            TopLevelConstruct::InterfaceDef(InterfaceDef {
                 name: "A".to_string(),
                 superclass: None,
                 adopted_protocols: vec![],
@@ -1872,7 +1985,7 @@ mod tests {
                 methods: vec![],
                 properties: vec![],
             }),
-            TopLevelConstruct::Category(CategoryDesc {
+            TopLevelConstruct::CategoryDef(CategoryDef {
                 name: Some("Categ".to_string()),
                 class: "A".to_string(),
                 adopted_protocols: vec!["P".to_string()],
@@ -1884,7 +1997,7 @@ mod tests {
                 }],
                 properties: vec![],
             }),
-            TopLevelConstruct::Category(CategoryDesc {
+            TopLevelConstruct::CategoryDef(CategoryDef {
                 name: None,
                 class: "A".to_string(),
                 adopted_protocols: vec![],
@@ -1896,7 +2009,7 @@ mod tests {
                 }],
                 properties: vec![],
             }),
-            TopLevelConstruct::Category(CategoryDesc {
+            TopLevelConstruct::CategoryDef(CategoryDef {
                 name: None,
                 class: "A".to_string(),
                 adopted_protocols: vec![],
@@ -1936,7 +2049,7 @@ mod tests {
             @end
         ";
 
-        let expected_decls = vec![TopLevelConstruct::Interface(InterfaceDesc {
+        let expected_decls = vec![TopLevelConstruct::InterfaceDef(InterfaceDef {
             name: "A".to_string(),
             superclass: None,
             adopted_protocols: vec![],
@@ -1993,11 +2106,11 @@ mod tests {
         ";
 
         let expected_decls = vec![
-            TopLevelConstruct::Typedef(TypedefDesc {
+            TopLevelConstruct::TypedefDecl(TypedefDecl {
                 name: "I".to_string(),
                 underlying: ObjCType::Num(NumKind::Int),
             }),
-            TopLevelConstruct::Interface(InterfaceDesc {
+            TopLevelConstruct::InterfaceDef(InterfaceDef {
                 name: "A".to_string(),
                 superclass: None,
                 adopted_protocols: vec![],
@@ -2006,7 +2119,7 @@ mod tests {
                     name: "foo".to_string(),
                     kind: ObjCMethodKind::Instance,
                     params: vec![],
-                    result: ObjCType::Typedef(Typedef {
+                    result: ObjCType::Typedef(TypedefRef {
                         name: "I".to_string(),
                     }),
                 }],
@@ -2035,21 +2148,22 @@ mod tests {
         ";
 
         let expected_decls = vec![
-            TopLevelConstruct::NamedRecord(NamedRecordDesc {
-                name: "S".to_string(),
+            TopLevelConstruct::RecordDef(RecordDef {
+                id: TagId::Named("S".to_string()),
                 fields: vec![Field {
                     name: Some("x".to_string()),
                     objc_type: ObjCType::Num(NumKind::Int),
                 }],
                 kind: RecordKind::Struct,
             }),
-            TopLevelConstruct::Typedef(TypedefDesc {
+            TopLevelConstruct::TypedefDecl(TypedefDecl {
                 name: "T".to_string(),
-                underlying: ObjCType::Record(Record::NamedStruct {
-                    name: "S".to_string(),
+                underlying: ObjCType::Tag(TagRef {
+                    id: TagId::Named("S".to_string()),
+                    kind: TagKind::Struct,
                 }),
             }),
-            TopLevelConstruct::Interface(InterfaceDesc {
+            TopLevelConstruct::InterfaceDef(InterfaceDef {
                 name: "A".to_string(),
                 superclass: None,
                 adopted_protocols: vec![],
@@ -2059,36 +2173,18 @@ mod tests {
                         name: "standardStruct".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
-                        result: ObjCType::Record(Record::NamedStruct {
-                            name: "S".to_string(),
+                        result: ObjCType::Tag(TagRef {
+                            id: TagId::Named("S".to_string()),
+                            kind: TagKind::Struct,
                         }),
                     },
                     ObjCMethod {
                         name: "inlineUnnamedStruct".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
-                        result: ObjCType::Record(Record::UnnamedStruct {
-                            fields: vec![
-                                Field {
-                                    name: Some("f".to_string()),
-                                    objc_type: ObjCType::Num(NumKind::Float),
-                                },
-                                Field {
-                                    name: None,
-                                    objc_type: ObjCType::Record(Record::UnnamedUnion {
-                                        fields: vec![
-                                            Field {
-                                                name: Some("i".to_string()),
-                                                objc_type: ObjCType::Num(NumKind::Int),
-                                            },
-                                            Field {
-                                                name: Some("d".to_string()),
-                                                objc_type: ObjCType::Num(NumKind::Double),
-                                            },
-                                        ],
-                                    }),
-                                },
-                            ],
+                        result: ObjCType::Tag(TagRef {
+                            id: TagId::Unnamed(1),
+                            kind: TagKind::Struct,
                         }),
                     },
                     ObjCMethod {
@@ -2096,7 +2192,7 @@ mod tests {
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
                         result: ObjCType::Pointer(Pointer {
-                            pointee: Box::new(ObjCType::Typedef(Typedef {
+                            pointee: Box::new(ObjCType::Typedef(TypedefRef {
                                 name: "T".to_string(),
                             })),
                             nullability: Nullability::Unspecified,
@@ -2107,8 +2203,9 @@ mod tests {
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
                         result: ObjCType::Pointer(Pointer {
-                            pointee: Box::new(ObjCType::Record(Record::NamedStruct {
-                                name: "Undeclared".to_string(),
+                            pointee: Box::new(ObjCType::Tag(TagRef {
+                                id: TagId::Named("Undeclared".to_string()),
+                                kind: TagKind::Struct,
                             })),
                             nullability: Nullability::Unspecified,
                         }),
@@ -2118,8 +2215,9 @@ mod tests {
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
                         result: ObjCType::Pointer(Pointer {
-                            pointee: Box::new(ObjCType::Record(Record::NamedStruct {
-                                name: "DeclaredAfterwards".to_string(),
+                            pointee: Box::new(ObjCType::Tag(TagRef {
+                                id: TagId::Named("DeclaredAfterwards".to_string()),
+                                kind: TagKind::Struct,
                             })),
                             nullability: Nullability::Unspecified,
                         }),
@@ -2127,8 +2225,39 @@ mod tests {
                 ],
                 properties: vec![],
             }),
-            TopLevelConstruct::NamedRecord(NamedRecordDesc {
-                name: "DeclaredAfterwards".to_string(),
+            TopLevelConstruct::RecordDef(RecordDef {
+                id: TagId::Unnamed(1),
+                kind: RecordKind::Struct,
+                fields: vec![
+                    Field {
+                        name: Some("f".to_string()),
+                        objc_type: ObjCType::Num(NumKind::Float),
+                    },
+                    Field {
+                        name: None,
+                        objc_type: ObjCType::Tag(TagRef {
+                            id: TagId::Unnamed(2),
+                            kind: TagKind::Union,
+                        }),
+                    },
+                ],
+            }),
+            TopLevelConstruct::RecordDef(RecordDef {
+                id: TagId::Unnamed(2),
+                kind: RecordKind::Union,
+                fields: vec![
+                    Field {
+                        name: Some("i".to_string()),
+                        objc_type: ObjCType::Num(NumKind::Int),
+                    },
+                    Field {
+                        name: Some("d".to_string()),
+                        objc_type: ObjCType::Num(NumKind::Double),
+                    },
+                ],
+            }),
+            TopLevelConstruct::RecordDef(RecordDef {
+                id: TagId::Named("DeclaredAfterwards".to_string()),
                 fields: vec![Field {
                     name: Some("c".to_string()),
                     objc_type: ObjCType::Num(NumKind::SChar),
@@ -2158,7 +2287,7 @@ mod tests {
         ";
 
         let expected_decls = vec![
-            TopLevelConstruct::Typedef(TypedefDesc {
+            TopLevelConstruct::TypedefDecl(TypedefDecl {
                 name: "T".to_string(),
                 underlying: ObjCType::Pointer(Pointer {
                     pointee: Box::new(ObjCType::Function(CallableDesc {
@@ -2172,7 +2301,7 @@ mod tests {
                     nullability: Nullability::Unspecified,
                 }),
             }),
-            TopLevelConstruct::Interface(InterfaceDesc {
+            TopLevelConstruct::InterfaceDef(InterfaceDef {
                 name: "A".to_string(),
                 superclass: None,
                 adopted_protocols: vec![],
@@ -2228,7 +2357,7 @@ mod tests {
                         name: "returningFunctionPointerTypedef".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
-                        result: ObjCType::Typedef(Typedef {
+                        result: ObjCType::Typedef(TypedefRef {
                             name: "T".to_string(),
                         }),
                     },
@@ -2267,7 +2396,7 @@ mod tests {
                         params: vec![
                             ObjCParam {
                                 name: "typedefParam".to_string(),
-                                objc_type: ObjCType::Typedef(Typedef {
+                                objc_type: ObjCType::Typedef(TypedefRef {
                                     name: "T".to_string(),
                                 }),
                             },
@@ -2363,17 +2492,18 @@ mod tests {
         ";
 
         let expected_decls = vec![
-            TopLevelConstruct::Typedef(TypedefDesc {
+            TopLevelConstruct::TypedefDecl(TypedefDecl {
                 name: "Class".to_string(),
                 underlying: ObjCType::Pointer(Pointer {
-                    pointee: Box::new(ObjCType::Record(Record::NamedStruct {
-                        name: "objc_class".to_string(),
+                    pointee: Box::new(ObjCType::Tag(TagRef {
+                        id: TagId::Named("objc_class".to_string()),
+                        kind: TagKind::Struct,
                     })),
                     nullability: Nullability::Unspecified,
                 }),
             }),
-            TopLevelConstruct::NamedRecord(NamedRecordDesc {
-                name: "objc_object".to_string(),
+            TopLevelConstruct::RecordDef(RecordDef {
+                id: TagId::Named("objc_object".to_string()),
                 fields: vec![Field {
                     name: Some("isa".to_string()),
                     objc_type: ObjCType::ObjPtr(ObjPtr {
@@ -2383,25 +2513,27 @@ mod tests {
                 }],
                 kind: RecordKind::Struct,
             }),
-            TopLevelConstruct::Typedef(TypedefDesc {
+            TopLevelConstruct::TypedefDecl(TypedefDecl {
                 name: "id".to_string(),
                 underlying: ObjCType::Pointer(Pointer {
-                    pointee: Box::new(ObjCType::Record(Record::NamedStruct {
-                        name: "objc_object".to_string(),
+                    pointee: Box::new(ObjCType::Tag(TagRef {
+                        id: TagId::Named("objc_object".to_string()),
+                        kind: TagKind::Struct,
                     })),
                     nullability: Nullability::Unspecified,
                 }),
             }),
-            TopLevelConstruct::Typedef(TypedefDesc {
+            TopLevelConstruct::TypedefDecl(TypedefDecl {
                 name: "SEL".to_string(),
                 underlying: ObjCType::Pointer(Pointer {
-                    pointee: Box::new(ObjCType::Record(Record::NamedStruct {
-                        name: "objc_selector".to_string(),
+                    pointee: Box::new(ObjCType::Tag(TagRef {
+                        id: TagId::Named("objc_selector".to_string()),
+                        kind: TagKind::Struct,
                     })),
                     nullability: Nullability::Unspecified,
                 }),
             }),
-            TopLevelConstruct::Typedef(TypedefDesc {
+            TopLevelConstruct::TypedefDecl(TypedefDecl {
                 name: "IMP".to_string(),
                 underlying: ObjCType::Pointer(Pointer {
                     pointee: Box::new(ObjCType::Function(CallableDesc {
@@ -2427,7 +2559,7 @@ mod tests {
                     nullability: Nullability::Unspecified,
                 }),
             }),
-            TopLevelConstruct::Protocol(ProtocolDesc {
+            TopLevelConstruct::ProtocolDef(ProtocolDef {
                 name: "P".to_string(),
                 inherited_protocols: vec![],
                 methods: vec![ProtocolMethod {
@@ -2438,7 +2570,7 @@ mod tests {
                             name: "aSelector".to_string(),
                             objc_type: ObjCType::ObjCSel(Nullability::Unspecified),
                         }],
-                        result: ObjCType::Typedef(Typedef {
+                        result: ObjCType::Typedef(TypedefRef {
                             name: "IMP".to_string(),
                         }),
                     },
@@ -2462,7 +2594,7 @@ mod tests {
             extern void NSLog(NSString *format, ...);
         ";
 
-        let expected_decls = vec![TopLevelConstruct::Func(FuncDesc {
+        let expected_decls = vec![TopLevelConstruct::FuncDecl(FuncDecl {
             name: "NSLog".to_string(),
             desc: CallableDesc {
                 result: Box::new(ObjCType::Void),
