@@ -1521,7 +1521,7 @@ impl EnumDef {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-enum TopLevelConstruct {
+enum Decl {
     ProtocolDef(ProtocolDef),
     InterfaceDef(InterfaceDef),
     CategoryDef(CategoryDef),
@@ -1546,7 +1546,7 @@ impl From<clang::SourceError> for ParseError {
 
 type TagIdMap = HashMap<clang::Usr, u32>;
 
-fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<TopLevelConstruct>, ParseError> {
+fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<Decl>, ParseError> {
     use clang::diagnostic::Severity;
 
     // The documentation says that files specified as unsaved must exist so create a dummy temporary empty file
@@ -1581,7 +1581,7 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<TopLevelConstruct>, Par
     // show_tree(&tu.get_entity(), 0);
     // println!("--------------------------------");
 
-    let mut constructs: Vec<TopLevelConstruct> = Vec::new();
+    let mut decls: Vec<Decl> = Vec::new();
 
     let tu_entity = tu.get_entity();
 
@@ -1621,20 +1621,24 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<TopLevelConstruct>, Par
                 return clang::EntityVisitResult::Recurse;
             }
         }
-        let construct = match entity.get_kind() {
-            EntityKind::ObjCInterfaceDecl => Some(TopLevelConstruct::InterfaceDef(
-                InterfaceDef::from_entity(&entity, &unnamed_tag_ids),
-            )),
-            EntityKind::ObjCProtocolDecl => Some(TopLevelConstruct::ProtocolDef(
-                ProtocolDef::from_entity(&entity, &unnamed_tag_ids),
-            )),
-            EntityKind::ObjCCategoryDecl => Some(TopLevelConstruct::CategoryDef(
-                CategoryDef::from_entity(&entity, &unnamed_tag_ids),
-            )),
-            EntityKind::TypedefDecl => Some(TopLevelConstruct::TypedefDecl(
-                TypedefDecl::from_entity(&entity, &unnamed_tag_ids),
-            )),
-            EntityKind::FunctionDecl => Some(TopLevelConstruct::FuncDecl(FuncDecl::from_entity(
+        let decl = match entity.get_kind() {
+            EntityKind::ObjCInterfaceDecl => Some(Decl::InterfaceDef(InterfaceDef::from_entity(
+                &entity,
+                &unnamed_tag_ids,
+            ))),
+            EntityKind::ObjCProtocolDecl => Some(Decl::ProtocolDef(ProtocolDef::from_entity(
+                &entity,
+                &unnamed_tag_ids,
+            ))),
+            EntityKind::ObjCCategoryDecl => Some(Decl::CategoryDef(CategoryDef::from_entity(
+                &entity,
+                &unnamed_tag_ids,
+            ))),
+            EntityKind::TypedefDecl => Some(Decl::TypedefDecl(TypedefDecl::from_entity(
+                &entity,
+                &unnamed_tag_ids,
+            ))),
+            EntityKind::FunctionDecl => Some(Decl::FuncDecl(FuncDecl::from_entity(
                 &entity,
                 &unnamed_tag_ids,
             ))),
@@ -1643,7 +1647,7 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<TopLevelConstruct>, Par
                 // (details of unnamed ones are included directly in the types that include them)
                 if let Some(def) = entity.get_definition() {
                     if def == entity {
-                        Some(TopLevelConstruct::RecordDef(RecordDef::from_entity(
+                        Some(Decl::RecordDef(RecordDef::from_entity(
                             &entity,
                             &unnamed_tag_ids,
                         )))
@@ -1659,7 +1663,7 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<TopLevelConstruct>, Par
                 // But contrarily to struct and enums, we do care about unnamed ones as they are used to declare constants.
                 if let Some(def) = entity.get_definition() {
                     if def == entity {
-                        Some(TopLevelConstruct::EnumDef(EnumDef::from_entity(
+                        Some(Decl::EnumDef(EnumDef::from_entity(
                             &entity,
                             &unnamed_tag_ids,
                         )))
@@ -1673,20 +1677,20 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<TopLevelConstruct>, Par
             _ => None,
         };
 
-        if let Some(construct) = construct {
-            constructs.push(construct);
+        if let Some(decl) = decl {
+            decls.push(decl);
             visited.insert(usr.unwrap());
         }
 
         clang::EntityVisitResult::Recurse
     });
-    Ok(constructs)
+    Ok(decls)
 }
 
 fn main() {
     let source = "
-        // #import <AVFoundation/AVFoundation.h>
-        // #import <Cocoa/Cocoa.h>
+        #import <AVFoundation/AVFoundation.h>
+        #import <Cocoa/Cocoa.h>
         // typedef enum { A = 1 } foo;
         // enum E { B = 1000 };
         // typedef signed long CFIndex;
@@ -1700,12 +1704,12 @@ fn main() {
         //     kCFStreamStatusClosed,
         //     kCFStreamStatusError
         // };
-        struct ll { struct ll *nextl; };
-        struct { float f; union { int i; double d; }; } a;
+        // struct ll { struct ll *nextl; };
+        // struct { float f; union { int i; double d; }; } a;
   ";
     let clang = Clang::new().expect("Could not load libclang");
-    let constructs = parse_objc(&clang, source).unwrap();
-    println!("{:#?}", constructs);
+    let decls = parse_objc(&clang, source).unwrap();
+    println!("{:#?}", decls);
 }
 
 #[cfg(test)]
@@ -1751,7 +1755,7 @@ mod tests {
             @end
         ";
 
-        let expected_decls = vec![TopLevelConstruct::InterfaceDef(InterfaceDef {
+        let expected_decls = vec![Decl::InterfaceDef(InterfaceDef {
             name: "A".to_string(),
             superclass: None,
             adopted_protocols: vec![],
@@ -1828,7 +1832,7 @@ mod tests {
         ";
 
         let expected_decls = vec![
-            TopLevelConstruct::InterfaceDef(InterfaceDef {
+            Decl::InterfaceDef(InterfaceDef {
                 name: "A".to_string(),
                 superclass: None,
                 adopted_protocols: vec![],
@@ -1836,7 +1840,7 @@ mod tests {
                 methods: vec![],
                 properties: vec![],
             }),
-            TopLevelConstruct::InterfaceDef(InterfaceDef {
+            Decl::InterfaceDef(InterfaceDef {
                 name: "B".to_string(),
                 superclass: Some("A".to_string()),
                 adopted_protocols: vec![],
@@ -1863,7 +1867,7 @@ mod tests {
         ";
 
         let expected_decls = vec![
-            TopLevelConstruct::InterfaceDef(InterfaceDef {
+            Decl::InterfaceDef(InterfaceDef {
                 name: "A".to_string(),
                 superclass: None,
                 adopted_protocols: vec![],
@@ -1871,7 +1875,7 @@ mod tests {
                 methods: vec![],
                 properties: vec![],
             }),
-            TopLevelConstruct::InterfaceDef(InterfaceDef {
+            Decl::InterfaceDef(InterfaceDef {
                 name: "B".to_string(),
                 superclass: Some("A".to_string()),
                 adopted_protocols: vec![],
@@ -1910,13 +1914,13 @@ mod tests {
         ";
 
         let expected_decls = vec![
-            TopLevelConstruct::ProtocolDef(ProtocolDef {
+            Decl::ProtocolDef(ProtocolDef {
                 name: "B".to_string(),
                 inherited_protocols: vec![],
                 methods: vec![],
                 properties: vec![],
             }),
-            TopLevelConstruct::ProtocolDef(ProtocolDef {
+            Decl::ProtocolDef(ProtocolDef {
                 name: "A".to_string(),
                 inherited_protocols: vec![],
                 methods: vec![
@@ -1977,7 +1981,7 @@ mod tests {
         ";
 
         let expected_decls = vec![
-            TopLevelConstruct::InterfaceDef(InterfaceDef {
+            Decl::InterfaceDef(InterfaceDef {
                 name: "A".to_string(),
                 superclass: None,
                 adopted_protocols: vec![],
@@ -1985,7 +1989,7 @@ mod tests {
                 methods: vec![],
                 properties: vec![],
             }),
-            TopLevelConstruct::CategoryDef(CategoryDef {
+            Decl::CategoryDef(CategoryDef {
                 name: Some("Categ".to_string()),
                 class: "A".to_string(),
                 adopted_protocols: vec!["P".to_string()],
@@ -1997,7 +2001,7 @@ mod tests {
                 }],
                 properties: vec![],
             }),
-            TopLevelConstruct::CategoryDef(CategoryDef {
+            Decl::CategoryDef(CategoryDef {
                 name: None,
                 class: "A".to_string(),
                 adopted_protocols: vec![],
@@ -2009,7 +2013,7 @@ mod tests {
                 }],
                 properties: vec![],
             }),
-            TopLevelConstruct::CategoryDef(CategoryDef {
+            Decl::CategoryDef(CategoryDef {
                 name: None,
                 class: "A".to_string(),
                 adopted_protocols: vec![],
@@ -2049,7 +2053,7 @@ mod tests {
             @end
         ";
 
-        let expected_decls = vec![TopLevelConstruct::InterfaceDef(InterfaceDef {
+        let expected_decls = vec![Decl::InterfaceDef(InterfaceDef {
             name: "A".to_string(),
             superclass: None,
             adopted_protocols: vec![],
@@ -2106,11 +2110,11 @@ mod tests {
         ";
 
         let expected_decls = vec![
-            TopLevelConstruct::TypedefDecl(TypedefDecl {
+            Decl::TypedefDecl(TypedefDecl {
                 name: "I".to_string(),
                 underlying: ObjCType::Num(NumKind::Int),
             }),
-            TopLevelConstruct::InterfaceDef(InterfaceDef {
+            Decl::InterfaceDef(InterfaceDef {
                 name: "A".to_string(),
                 superclass: None,
                 adopted_protocols: vec![],
@@ -2148,7 +2152,7 @@ mod tests {
         ";
 
         let expected_decls = vec![
-            TopLevelConstruct::RecordDef(RecordDef {
+            Decl::RecordDef(RecordDef {
                 id: TagId::Named("S".to_string()),
                 fields: vec![Field {
                     name: Some("x".to_string()),
@@ -2156,14 +2160,14 @@ mod tests {
                 }],
                 kind: RecordKind::Struct,
             }),
-            TopLevelConstruct::TypedefDecl(TypedefDecl {
+            Decl::TypedefDecl(TypedefDecl {
                 name: "T".to_string(),
                 underlying: ObjCType::Tag(TagRef {
                     id: TagId::Named("S".to_string()),
                     kind: TagKind::Struct,
                 }),
             }),
-            TopLevelConstruct::InterfaceDef(InterfaceDef {
+            Decl::InterfaceDef(InterfaceDef {
                 name: "A".to_string(),
                 superclass: None,
                 adopted_protocols: vec![],
@@ -2225,7 +2229,7 @@ mod tests {
                 ],
                 properties: vec![],
             }),
-            TopLevelConstruct::RecordDef(RecordDef {
+            Decl::RecordDef(RecordDef {
                 id: TagId::Unnamed(1),
                 kind: RecordKind::Struct,
                 fields: vec![
@@ -2242,7 +2246,7 @@ mod tests {
                     },
                 ],
             }),
-            TopLevelConstruct::RecordDef(RecordDef {
+            Decl::RecordDef(RecordDef {
                 id: TagId::Unnamed(2),
                 kind: RecordKind::Union,
                 fields: vec![
@@ -2256,7 +2260,7 @@ mod tests {
                     },
                 ],
             }),
-            TopLevelConstruct::RecordDef(RecordDef {
+            Decl::RecordDef(RecordDef {
                 id: TagId::Named("DeclaredAfterwards".to_string()),
                 fields: vec![Field {
                     name: Some("c".to_string()),
@@ -2287,7 +2291,7 @@ mod tests {
         ";
 
         let expected_decls = vec![
-            TopLevelConstruct::TypedefDecl(TypedefDecl {
+            Decl::TypedefDecl(TypedefDecl {
                 name: "T".to_string(),
                 underlying: ObjCType::Pointer(Pointer {
                     pointee: Box::new(ObjCType::Function(CallableDesc {
@@ -2301,7 +2305,7 @@ mod tests {
                     nullability: Nullability::Unspecified,
                 }),
             }),
-            TopLevelConstruct::InterfaceDef(InterfaceDef {
+            Decl::InterfaceDef(InterfaceDef {
                 name: "A".to_string(),
                 superclass: None,
                 adopted_protocols: vec![],
@@ -2492,7 +2496,7 @@ mod tests {
         ";
 
         let expected_decls = vec![
-            TopLevelConstruct::TypedefDecl(TypedefDecl {
+            Decl::TypedefDecl(TypedefDecl {
                 name: "Class".to_string(),
                 underlying: ObjCType::Pointer(Pointer {
                     pointee: Box::new(ObjCType::Tag(TagRef {
@@ -2502,7 +2506,7 @@ mod tests {
                     nullability: Nullability::Unspecified,
                 }),
             }),
-            TopLevelConstruct::RecordDef(RecordDef {
+            Decl::RecordDef(RecordDef {
                 id: TagId::Named("objc_object".to_string()),
                 fields: vec![Field {
                     name: Some("isa".to_string()),
@@ -2513,7 +2517,7 @@ mod tests {
                 }],
                 kind: RecordKind::Struct,
             }),
-            TopLevelConstruct::TypedefDecl(TypedefDecl {
+            Decl::TypedefDecl(TypedefDecl {
                 name: "id".to_string(),
                 underlying: ObjCType::Pointer(Pointer {
                     pointee: Box::new(ObjCType::Tag(TagRef {
@@ -2523,7 +2527,7 @@ mod tests {
                     nullability: Nullability::Unspecified,
                 }),
             }),
-            TopLevelConstruct::TypedefDecl(TypedefDecl {
+            Decl::TypedefDecl(TypedefDecl {
                 name: "SEL".to_string(),
                 underlying: ObjCType::Pointer(Pointer {
                     pointee: Box::new(ObjCType::Tag(TagRef {
@@ -2533,7 +2537,7 @@ mod tests {
                     nullability: Nullability::Unspecified,
                 }),
             }),
-            TopLevelConstruct::TypedefDecl(TypedefDecl {
+            Decl::TypedefDecl(TypedefDecl {
                 name: "IMP".to_string(),
                 underlying: ObjCType::Pointer(Pointer {
                     pointee: Box::new(ObjCType::Function(CallableDesc {
@@ -2559,7 +2563,7 @@ mod tests {
                     nullability: Nullability::Unspecified,
                 }),
             }),
-            TopLevelConstruct::ProtocolDef(ProtocolDef {
+            Decl::ProtocolDef(ProtocolDef {
                 name: "P".to_string(),
                 inherited_protocols: vec![],
                 methods: vec![ProtocolMethod {
@@ -2594,7 +2598,7 @@ mod tests {
             extern void NSLog(NSString *format, ...);
         ";
 
-        let expected_decls = vec![TopLevelConstruct::FuncDecl(FuncDecl {
+        let expected_decls = vec![Decl::FuncDecl(FuncDecl {
             name: "NSLog".to_string(),
             desc: CallableDesc {
                 result: Box::new(ObjCType::Void),
