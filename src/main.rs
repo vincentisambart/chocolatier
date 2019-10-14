@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 #![allow(clippy::cognitive_complexity)]
 
+use bitflags::bitflags;
 use clang::{Clang, EntityKind, TypeKind};
 use std::collections::{HashMap, HashSet};
 
@@ -526,10 +527,31 @@ impl TagRef {
     }
 }
 
+bitflags! {
+    struct ParamAttrs: u8 {
+        const CONSUMED = 0x000001;
+    }
+}
+
+impl ParamAttrs {
+    fn from_decl(decl: &clang::Entity) -> Self {
+        assert_eq!(decl.get_kind(), EntityKind::ParmDecl);
+        let mut attrs = Self::empty();
+        for child in decl.get_children() {
+            match child.get_kind() {
+                EntityKind::NSConsumed => attrs.insert(ParamAttrs::CONSUMED),
+                _ => (),
+            }
+        }
+        attrs
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct Param {
     name: Option<String>,
     objc_type: ObjCType,
+    attrs: ParamAttrs,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -545,13 +567,13 @@ impl CallableDesc {
         base_parm_decls: &mut impl Iterator<Item = clang::Entity<'a>>,
         unnamed_tag_ids: &TagIdMap,
     ) -> Self {
-        if clang_type.get_kind() == TypeKind::Attributed {
-            return Self::from_type(
-                &clang_type.get_modified_type().unwrap(),
-                base_parm_decls,
-                unnamed_tag_ids,
-            );
-        }
+        // if clang_type.get_kind() == TypeKind::Attributed {
+        //     return Self::from_type(
+        //         &clang_type.get_modified_type().unwrap(),
+        //         base_parm_decls,
+        //         unnamed_tag_ids,
+        //     );
+        // }
 
         // result must be processed before parameters due to the order the entities are in base_parm_decls.
         let result = Box::new(ObjCType::from_type(
@@ -576,9 +598,11 @@ impl CallableDesc {
                             &mut parm_decl_children(&parm_decl),
                             unnamed_tag_ids,
                         );
+                        let attrs = ParamAttrs::from_decl(&parm_decl);
                         Param {
                             name: parm_decl.get_name(),
                             objc_type,
+                            attrs,
                         }
                     })
                     .collect()
@@ -960,18 +984,20 @@ impl Location {
 struct ObjCParam {
     name: String,
     objc_type: ObjCType,
+    attrs: ParamAttrs,
 }
 
 impl ObjCParam {
-    fn from_entity(entity: &clang::Entity, unnamed_tag_ids: &TagIdMap) -> Self {
-        assert_eq!(entity.get_kind(), EntityKind::ParmDecl);
+    fn from_entity(decl: &clang::Entity, unnamed_tag_ids: &TagIdMap) -> Self {
+        assert_eq!(decl.get_kind(), EntityKind::ParmDecl);
         ObjCParam {
-            name: entity.get_name().unwrap(),
+            name: decl.get_name().unwrap(),
             objc_type: ObjCType::from_type(
-                &entity.get_type().unwrap(),
-                &mut parm_decl_children(entity),
+                &decl.get_type().unwrap(),
+                &mut parm_decl_children(decl),
                 unnamed_tag_ids,
             ),
+            attrs: ParamAttrs::from_decl(&decl),
         }
     }
 }
@@ -1577,9 +1603,9 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<Decl>, ParseError> {
         return Err(ParseError::CompilationError(error.get_text()));
     }
 
-    // println!("--------------------------------");
-    // show_tree(&tu.get_entity(), 0);
-    // println!("--------------------------------");
+    println!("--------------------------------");
+    show_tree(&tu.get_entity(), 0);
+    println!("--------------------------------");
 
     let mut decls: Vec<Decl> = Vec::new();
 
@@ -1688,9 +1714,17 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<Decl>, ParseError> {
 }
 
 fn main() {
-    let source = "
-        #import <AVFoundation/AVFoundation.h>
-        #import <Cocoa/Cocoa.h>
+    let source = r#"
+        // extern __attribute__((visibility("default"))) __attribute__((__malloc__)) __attribute__((__ns_returns_retained__)) __attribute__((__warn_unused_result__))
+        // __attribute__((__nothrow__))
+        // C *foo(void);
+        @interface I
+        - (void) foo: (id) __attribute((ns_consumed)) x;
+        @end
+        void foo(__attribute((ns_consumed)) id x);
+
+        // #import <AVFoundation/AVFoundation.h>
+        // #import <Cocoa/Cocoa.h>
         // typedef enum { A = 1 } foo;
         // enum E { B = 1000 };
         // typedef signed long CFIndex;
@@ -1706,7 +1740,7 @@ fn main() {
         // };
         // struct ll { struct ll *nextl; };
         // struct { float f; union { int i; double d; }; } a;
-  ";
+  "#;
     let clang = Clang::new().expect("Could not load libclang");
     let decls = parse_objc(&clang, source).unwrap();
     println!("{:#?}", decls);
@@ -1772,6 +1806,7 @@ mod tests {
                             }),
                             nullability: Nullability::Unspecified,
                         }),
+                        attrs: ParamAttrs::empty(),
                     }],
                     result: ObjCType::Void,
                 },
@@ -1788,6 +1823,7 @@ mod tests {
                             }),
                             nullability: Nullability::NonNull,
                         }),
+                        attrs: ParamAttrs::empty(),
                     }],
                     result: ObjCType::Void,
                 },
@@ -1804,6 +1840,7 @@ mod tests {
                             }),
                             nullability: Nullability::Unspecified,
                         }),
+                        attrs: ParamAttrs::empty(),
                     }],
                     result: ObjCType::ObjPtr(ObjPtr {
                         kind: ObjPtrKind::Id(IdObjPtr {
@@ -2299,6 +2336,7 @@ mod tests {
                         params: Some(vec![Param {
                             name: Some("typedefParam".to_string()),
                             objc_type: ObjCType::Num(NumKind::Int),
+                            attrs: ParamAttrs::empty(),
                         }]),
                         is_variadic: false,
                     })),
@@ -2336,6 +2374,7 @@ mod tests {
                                 params: Some(vec![Param {
                                     name: None,
                                     objc_type: ObjCType::Num(NumKind::Float),
+                                    attrs: ParamAttrs::empty(),
                                 }]),
                                 is_variadic: true,
                             })),
@@ -2378,6 +2417,7 @@ mod tests {
                                         params: Some(vec![Param {
                                             name: Some("outerParam".to_string()),
                                             objc_type: ObjCType::Num(NumKind::Float),
+                                            attrs: ParamAttrs::empty(),
                                         }]),
                                         is_variadic: false,
                                     })),
@@ -2386,6 +2426,7 @@ mod tests {
                                 params: Some(vec![Param {
                                     name: Some("innerParam".to_string()),
                                     objc_type: ObjCType::Num(NumKind::Double),
+                                    attrs: ParamAttrs::empty(),
                                 }]),
                                 is_variadic: false,
                             })),
@@ -2403,6 +2444,7 @@ mod tests {
                                 objc_type: ObjCType::Typedef(TypedefRef {
                                     name: "T".to_string(),
                                 }),
+                                attrs: ParamAttrs::empty(),
                             },
                             ObjCParam {
                                 name: "complicatedParam".to_string(),
@@ -2420,6 +2462,7 @@ mod tests {
                                             Param {
                                                 name: Some("someFloat".to_string()),
                                                 objc_type: ObjCType::Num(NumKind::Float),
+                                                attrs: ParamAttrs::empty(),
                                             },
                                             Param {
                                                 name: Some("functionPointerParam".to_string()),
@@ -2434,18 +2477,21 @@ mod tests {
                                                                 objc_type: ObjCType::Num(
                                                                     NumKind::SChar,
                                                                 ),
+                                                                attrs: ParamAttrs::empty(),
                                                             }]),
                                                             is_variadic: false,
                                                         },
                                                     )),
                                                     nullability: Nullability::Unspecified,
                                                 }),
+                                                attrs: ParamAttrs::empty(),
                                             },
                                         ]),
                                         is_variadic: false,
                                     })),
                                     nullability: Nullability::Unspecified,
                                 }),
+                                attrs: ParamAttrs::empty(),
                             },
                         ],
                         result: ObjCType::Pointer(Pointer {
@@ -2461,6 +2507,7 @@ mod tests {
                                 params: Some(vec![Param {
                                     name: Some("returnedFunctionParameter".to_string()),
                                     objc_type: ObjCType::Num(NumKind::Short),
+                                    attrs: ParamAttrs::empty(),
                                 }]),
                                 is_variadic: false,
                             })),
@@ -2552,10 +2599,12 @@ mod tests {
                                     kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
                                     nullability: Nullability::NonNull,
                                 }),
+                                attrs: ParamAttrs::empty(),
                             },
                             Param {
                                 name: None,
                                 objc_type: ObjCType::ObjCSel(Nullability::NonNull),
+                                attrs: ParamAttrs::empty(),
                             },
                         ]),
                         is_variadic: true,
@@ -2573,6 +2622,7 @@ mod tests {
                         params: vec![ObjCParam {
                             name: "aSelector".to_string(),
                             objc_type: ObjCType::ObjCSel(Nullability::Unspecified),
+                            attrs: ParamAttrs::empty(),
                         }],
                         result: ObjCType::Typedef(TypedefRef {
                             name: "IMP".to_string(),
@@ -2612,10 +2662,65 @@ mod tests {
                         }),
                         nullability: Nullability::Unspecified,
                     }),
+                    attrs: ParamAttrs::empty(),
                 }]),
                 is_variadic: true,
             },
         })];
+
+        let parsed_decls = parse_objc(&clang, source).unwrap();
+        assert_eq!(parsed_decls, expected_decls);
+    }
+
+    #[test]
+    fn test_attributes() {
+        let clang = Clang::new().expect("Could not load libclang");
+
+        // NSLog seems to be already known by the compiler so handled a bit differently by it.
+        let source = "
+            @interface I
+            - (void) methodWithConsumedParam: (id) __attribute((ns_consumed)) consumedParam;
+            @end
+            void function_with_consumed_param(__attribute((ns_consumed)) id consumedParam);
+        ";
+
+        let expected_decls = vec![
+            Decl::InterfaceDef(InterfaceDef {
+                name: "I".to_string(),
+                superclass: None,
+                adopted_protocols: vec![],
+                template_params: vec![],
+                methods: vec![ObjCMethod {
+                    name: "methodWithConsumedParam:".to_string(),
+                    kind: ObjCMethodKind::Instance,
+                    params: vec![ObjCParam {
+                        name: "consumedParam".to_string(),
+                        objc_type: ObjCType::ObjPtr(ObjPtr {
+                            kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
+                            nullability: Nullability::Unspecified,
+                        }),
+                        attrs: ParamAttrs::CONSUMED,
+                    }],
+                    result: ObjCType::Void,
+                }],
+                properties: vec![],
+            }),
+            Decl::FuncDecl(FuncDecl {
+                name: "function_with_consumed_param".to_string(),
+                desc: CallableDesc {
+                    result: Box::new(ObjCType::Void),
+                    params: Some(vec![Param {
+                        name: Some("consumedParam".to_string()),
+                        objc_type: ObjCType::ObjPtr(ObjPtr {
+                            kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
+                            nullability: Nullability::Unspecified,
+                        }),
+                        attrs: ParamAttrs::CONSUMED,
+                    }]),
+                    is_variadic: false,
+                },
+            }),
+        ];
 
         let parsed_decls = parse_objc(&clang, source).unwrap();
         assert_eq!(parsed_decls, expected_decls);
