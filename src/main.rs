@@ -539,7 +539,7 @@ impl ParamAttrs {
         let mut attrs = Self::empty();
         for child in decl.get_children() {
             match child.get_kind() {
-                EntityKind::NSConsumed => attrs.insert(ParamAttrs::CONSUMED),
+                EntityKind::NSConsumed => attrs.insert(Self::CONSUMED),
                 _ => (),
             }
         }
@@ -554,11 +554,31 @@ struct Param {
     attrs: ParamAttrs,
 }
 
+bitflags! {
+    struct CallableAttrs: u8 {
+        const RETURNS_RETAINED = 0x000001;
+    }
+}
+
+impl CallableAttrs {
+    fn from_decl(decl: &clang::Entity) -> Self {
+        let mut attrs = Self::empty();
+        for child in decl.get_children() {
+            match child.get_kind() {
+                EntityKind::NSReturnsRetained => attrs.insert(Self::RETURNS_RETAINED),
+                _ => (),
+            }
+        }
+        attrs
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct CallableDesc {
     result: Box<ObjCType>,
     params: Option<Vec<Param>>,
     is_variadic: bool,
+    attrs: CallableAttrs,
 }
 
 impl CallableDesc {
@@ -567,13 +587,24 @@ impl CallableDesc {
         base_parm_decls: &mut impl Iterator<Item = clang::Entity<'a>>,
         unnamed_tag_ids: &TagIdMap,
     ) -> Self {
-        // if clang_type.get_kind() == TypeKind::Attributed {
-        //     return Self::from_type(
-        //         &clang_type.get_modified_type().unwrap(),
-        //         base_parm_decls,
-        //         unnamed_tag_ids,
-        //     );
-        // }
+        if clang_type.get_kind() == TypeKind::Attributed {
+            let mut callable = Self::from_type(
+                &clang_type.get_modified_type().unwrap(),
+                base_parm_decls,
+                unnamed_tag_ids,
+            );
+            let display_name = clang_type.get_display_name();
+            // Yes, that is very ugly but I could not find a better way.
+            if display_name.contains("__attribute__((ns_returns_retained))") {
+                callable.attrs.insert(CallableAttrs::RETURNS_RETAINED);
+            } else {
+                panic!(
+                    "Have to check what this Attributed is for - {:?}",
+                    clang_type
+                );
+            }
+            return callable;
+        }
 
         // result must be processed before parameters due to the order the entities are in base_parm_decls.
         let result = Box::new(ObjCType::from_type(
@@ -617,6 +648,7 @@ impl CallableDesc {
             result,
             params,
             is_variadic: clang_type.is_variadic(),
+            attrs: CallableAttrs::empty(),
         }
     }
 }
@@ -1014,6 +1046,7 @@ struct ObjCMethod {
     kind: ObjCMethodKind,
     params: Vec<ObjCParam>,
     result: ObjCType,
+    attrs: CallableAttrs,
 }
 
 impl ObjCMethod {
@@ -1036,11 +1069,15 @@ impl ObjCMethod {
             &mut parm_decl_children(entity),
             unnamed_tag_ids,
         );
+
+        let attrs = CallableAttrs::from_decl(entity);
+
         ObjCMethod {
             name: entity.get_name().unwrap(),
             kind,
             params,
             result,
+            attrs,
         }
     }
 }
@@ -1809,6 +1846,7 @@ mod tests {
                         attrs: ParamAttrs::empty(),
                     }],
                     result: ObjCType::Void,
+                    attrs: CallableAttrs::empty(),
                 },
                 ObjCMethod {
                     name: "bar:".to_string(),
@@ -1826,6 +1864,7 @@ mod tests {
                         attrs: ParamAttrs::empty(),
                     }],
                     result: ObjCType::Void,
+                    attrs: CallableAttrs::empty(),
                 },
                 ObjCMethod {
                     name: "foobar:".to_string(),
@@ -1848,6 +1887,7 @@ mod tests {
                         }),
                         nullability: Nullability::Unspecified,
                     }),
+                    attrs: CallableAttrs::empty(),
                 },
             ],
             properties: vec![],
@@ -1925,6 +1965,7 @@ mod tests {
                         kind: ObjPtrKind::TypeParam("X".to_string()),
                         nullability: Nullability::NonNull,
                     }),
+                    attrs: CallableAttrs::empty(),
                 }],
                 properties: vec![],
             }),
@@ -1967,6 +2008,7 @@ mod tests {
                             kind: ObjCMethodKind::Instance,
                             params: vec![],
                             result: ObjCType::Void,
+                            attrs: CallableAttrs::empty(),
                         },
                         is_optional: false,
                     },
@@ -1976,6 +2018,7 @@ mod tests {
                             kind: ObjCMethodKind::Class,
                             params: vec![],
                             result: ObjCType::Void,
+                            attrs: CallableAttrs::empty(),
                         },
                         is_optional: true,
                     },
@@ -1985,6 +2028,7 @@ mod tests {
                             kind: ObjCMethodKind::Instance,
                             params: vec![],
                             result: ObjCType::Num(NumKind::Int),
+                            attrs: CallableAttrs::empty(),
                         },
                         is_optional: true,
                     },
@@ -2035,6 +2079,7 @@ mod tests {
                     kind: ObjCMethodKind::Instance,
                     params: vec![],
                     result: ObjCType::Void,
+                    attrs: CallableAttrs::empty(),
                 }],
                 properties: vec![],
             }),
@@ -2047,6 +2092,7 @@ mod tests {
                     kind: ObjCMethodKind::Instance,
                     params: vec![],
                     result: ObjCType::Void,
+                    attrs: CallableAttrs::empty(),
                 }],
                 properties: vec![],
             }),
@@ -2059,6 +2105,7 @@ mod tests {
                     kind: ObjCMethodKind::Instance,
                     params: vec![],
                     result: ObjCType::Void,
+                    attrs: CallableAttrs::empty(),
                 }],
                 properties: vec![Property {
                     name: "propertyOnUnnamedCategory".to_string(),
@@ -2104,6 +2151,7 @@ mod tests {
                         kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
                         nullability: Nullability::Unspecified,
                     }),
+                    attrs: CallableAttrs::empty(),
                 },
                 ObjCMethod {
                     name: "y".to_string(),
@@ -2115,6 +2163,7 @@ mod tests {
                         }),
                         nullability: Nullability::Unspecified,
                     }),
+                    attrs: CallableAttrs::empty(),
                 },
                 ObjCMethod {
                     name: "z".to_string(),
@@ -2126,6 +2175,7 @@ mod tests {
                         }),
                         nullability: Nullability::NonNull,
                     }),
+                    attrs: CallableAttrs::empty(),
                 },
             ],
             properties: vec![],
@@ -2163,6 +2213,7 @@ mod tests {
                     result: ObjCType::Typedef(TypedefRef {
                         name: "I".to_string(),
                     }),
+                    attrs: CallableAttrs::empty(),
                 }],
                 properties: vec![],
             }),
@@ -2218,6 +2269,7 @@ mod tests {
                             id: TagId::Named("S".to_string()),
                             kind: TagKind::Struct,
                         }),
+                        attrs: CallableAttrs::empty(),
                     },
                     ObjCMethod {
                         name: "inlineUnnamedStruct".to_string(),
@@ -2227,6 +2279,7 @@ mod tests {
                             id: TagId::Unnamed(1),
                             kind: TagKind::Struct,
                         }),
+                        attrs: CallableAttrs::empty(),
                     },
                     ObjCMethod {
                         name: "pointerToStructTypedef".to_string(),
@@ -2238,6 +2291,7 @@ mod tests {
                             })),
                             nullability: Nullability::Unspecified,
                         }),
+                        attrs: CallableAttrs::empty(),
                     },
                     ObjCMethod {
                         name: "pointerToUndeclaredStruct".to_string(),
@@ -2250,6 +2304,7 @@ mod tests {
                             })),
                             nullability: Nullability::Unspecified,
                         }),
+                        attrs: CallableAttrs::empty(),
                     },
                     ObjCMethod {
                         name: "pointerToStructDeclaredAfterwards".to_string(),
@@ -2262,6 +2317,7 @@ mod tests {
                             })),
                             nullability: Nullability::Unspecified,
                         }),
+                        attrs: CallableAttrs::empty(),
                     },
                 ],
                 properties: vec![],
@@ -2339,6 +2395,7 @@ mod tests {
                             attrs: ParamAttrs::empty(),
                         }]),
                         is_variadic: false,
+                        attrs: CallableAttrs::empty(),
                     })),
                     nullability: Nullability::Unspecified,
                 }),
@@ -2359,9 +2416,11 @@ mod tests {
                                 result: Box::new(ObjCType::Num(NumKind::Int)),
                                 params: None,
                                 is_variadic: true,
+                                attrs: CallableAttrs::empty(),
                             })),
                             nullability: Nullability::Unspecified,
                         }),
+                        attrs: CallableAttrs::empty(),
                     },
                     // - (int(*)(float, ...))returningFunctionPointerVariadic;
                     ObjCMethod {
@@ -2377,9 +2436,11 @@ mod tests {
                                     attrs: ParamAttrs::empty(),
                                 }]),
                                 is_variadic: true,
+                                attrs: CallableAttrs::empty(),
                             })),
                             nullability: Nullability::Unspecified,
                         }),
+                        attrs: CallableAttrs::empty(),
                     },
                     // - (int(*)(void))returningFunctionPointerWithNoParameters;
                     ObjCMethod {
@@ -2391,9 +2452,11 @@ mod tests {
                                 result: Box::new(ObjCType::Num(NumKind::Int)),
                                 params: Some(vec![]),
                                 is_variadic: false,
+                                attrs: CallableAttrs::empty(),
                             })),
                             nullability: Nullability::Unspecified,
                         }),
+                        attrs: CallableAttrs::empty(),
                     },
                     // - (T)returningFunctionPointerTypedef;
                     ObjCMethod {
@@ -2403,6 +2466,7 @@ mod tests {
                         result: ObjCType::Typedef(TypedefRef {
                             name: "T".to_string(),
                         }),
+                        attrs: CallableAttrs::empty(),
                     },
                     // - (char (*(*)(double innerParam))(float outerParam))returningFunctionPointerReturningFunctionPointer;
                     ObjCMethod {
@@ -2420,6 +2484,7 @@ mod tests {
                                             attrs: ParamAttrs::empty(),
                                         }]),
                                         is_variadic: false,
+                                        attrs: CallableAttrs::empty(),
                                     })),
                                     nullability: Nullability::Unspecified,
                                 })),
@@ -2429,9 +2494,11 @@ mod tests {
                                     attrs: ParamAttrs::empty(),
                                 }]),
                                 is_variadic: false,
+                                attrs: CallableAttrs::empty(),
                             })),
                             nullability: Nullability::Unspecified,
                         }),
+                        attrs: CallableAttrs::empty(),
                     },
                     // - (A *(*)(short returnedFunctionParameter))takingTypedef:(T)typedefParam andFunctionPointersTakingFunctionPointers:(A *(*)(float someFloat, int (*functionPointerParam)(char someChar)))complicatedParam;
                     ObjCMethod {
@@ -2480,6 +2547,7 @@ mod tests {
                                                                 attrs: ParamAttrs::empty(),
                                                             }]),
                                                             is_variadic: false,
+                                                            attrs: CallableAttrs::empty(),
                                                         },
                                                     )),
                                                     nullability: Nullability::Unspecified,
@@ -2488,6 +2556,7 @@ mod tests {
                                             },
                                         ]),
                                         is_variadic: false,
+                                        attrs: CallableAttrs::empty(),
                                     })),
                                     nullability: Nullability::Unspecified,
                                 }),
@@ -2510,9 +2579,11 @@ mod tests {
                                     attrs: ParamAttrs::empty(),
                                 }]),
                                 is_variadic: false,
+                                attrs: CallableAttrs::empty(),
                             })),
                             nullability: Nullability::Unspecified,
                         }),
+                        attrs: CallableAttrs::empty(),
                     },
                 ],
                 properties: vec![],
@@ -2608,6 +2679,7 @@ mod tests {
                             },
                         ]),
                         is_variadic: true,
+                        attrs: CallableAttrs::empty(),
                     })),
                     nullability: Nullability::Unspecified,
                 }),
@@ -2627,6 +2699,7 @@ mod tests {
                         result: ObjCType::Typedef(TypedefRef {
                             name: "IMP".to_string(),
                         }),
+                        attrs: CallableAttrs::empty(),
                     },
                     is_optional: false,
                 }],
@@ -2665,6 +2738,7 @@ mod tests {
                     attrs: ParamAttrs::empty(),
                 }]),
                 is_variadic: true,
+                attrs: CallableAttrs::empty(),
             },
         })];
 
@@ -2673,7 +2747,7 @@ mod tests {
     }
 
     #[test]
-    fn test_attributes() {
+    fn test_param_attributes() {
         let clang = Clang::new().expect("Could not load libclang");
 
         // NSLog seems to be already known by the compiler so handled a bit differently by it.
@@ -2702,6 +2776,7 @@ mod tests {
                         attrs: ParamAttrs::CONSUMED,
                     }],
                     result: ObjCType::Void,
+                    attrs: CallableAttrs::empty(),
                 }],
                 properties: vec![],
             }),
@@ -2718,6 +2793,55 @@ mod tests {
                         attrs: ParamAttrs::CONSUMED,
                     }]),
                     is_variadic: false,
+                    attrs: CallableAttrs::empty(),
+                },
+            }),
+        ];
+
+        let parsed_decls = parse_objc(&clang, source).unwrap();
+        assert_eq!(parsed_decls, expected_decls);
+    }
+
+    #[test]
+    fn test_return_attributes() {
+        let clang = Clang::new().expect("Could not load libclang");
+
+        // NSLog seems to be already known by the compiler so handled a bit differently by it.
+        let source = "
+            @interface I
+            - (id)methodWithRetainedReturn __attribute__((__ns_returns_retained__));
+            @end
+            __attribute__((ns_returns_retained)) id function_with_retained_return(void);
+        ";
+
+        let expected_decls = vec![
+            Decl::InterfaceDef(InterfaceDef {
+                name: "I".to_string(),
+                superclass: None,
+                adopted_protocols: vec![],
+                template_params: vec![],
+                methods: vec![ObjCMethod {
+                    name: "methodWithRetainedReturn".to_string(),
+                    kind: ObjCMethodKind::Instance,
+                    params: vec![],
+                    result: ObjCType::ObjPtr(ObjPtr {
+                        kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
+                        nullability: Nullability::Unspecified,
+                    }),
+                    attrs: CallableAttrs::RETURNS_RETAINED,
+                }],
+                properties: vec![],
+            }),
+            Decl::FuncDecl(FuncDecl {
+                name: "function_with_retained_return".to_string(),
+                desc: CallableDesc {
+                    result: Box::new(ObjCType::ObjPtr(ObjPtr {
+                        kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
+                        nullability: Nullability::Unspecified,
+                    })),
+                    params: Some(vec![]),
+                    is_variadic: false,
+                    attrs: CallableAttrs::RETURNS_RETAINED,
                 },
             }),
         ];
