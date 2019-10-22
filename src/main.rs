@@ -20,6 +20,10 @@ use std::collections::{HashMap, HashSet};
 // - bit fields
 // - try getting the best definition of a function (unfortunately libclang's "canonical" seems to just be the first one)
 // - struct or type declaration inside interface declaration
+// - __attribute__((NSObject)), __attribute__((objc_bridge*))
+// - __attribute__((ns_consumes_self)) (implicit on all init)
+// - __attribute__((cf_returns_*))
+// - __attribute__((noescape))
 
 #[derive(Debug, PartialEq)]
 enum Origin {
@@ -106,7 +110,7 @@ fn sdk_path(sdk: AppleSdk) -> String {
         .output()
         .expect("xcrun command failed to start");
     assert!(output.status.success());
-    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
 fn show_type(desc: &str, clang_type: &clang::Type, indent_level: usize) {
@@ -529,7 +533,7 @@ impl TagRef {
 
 bitflags! {
     struct ParamAttrs: u8 {
-        const CONSUMED = 0x000001;
+        const CONSUMED = 0b0000_0001;
     }
 }
 
@@ -556,7 +560,7 @@ struct Param {
 
 bitflags! {
     struct CallableAttrs: u8 {
-        const RETURNS_RETAINED = 0x000001;
+        const RETURNS_RETAINED = 0b0000_0001;
     }
 }
 
@@ -1609,8 +1613,43 @@ impl From<clang::SourceError> for ParseError {
 
 type TagIdMap = HashMap<clang::Usr, u32>;
 
+fn preprocess_objc(source: &str) -> String {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new("xcrun")
+        .args(&[
+            "clang",
+            "-E",
+            "-x",
+            "objective-c",
+            "-fobjc-arc",
+            "-isysroot",
+            &sdk_path(AppleSdk::MacOs),
+            "-", // read from stdin
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("clang command failed to start");
+
+    {
+        let stdin = child.stdin.as_mut().expect("Failed to open stdin");
+        stdin
+            .write_all(source.as_bytes())
+            .expect("Failed to write to stdin");
+    }
+
+    let output = child.wait_with_output().expect("Failed to read stdout");
+    assert!(output.status.success());
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
 fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<Decl>, ParseError> {
     use clang::diagnostic::Severity;
+
+    // Preprocess before to get more easily interesting tokens coming from #defines.
+    let source: &str = &preprocess_objc(source);
 
     // The documentation says that files specified as unsaved must exist so create a dummy temporary empty file
     let file = tempfile::NamedTempFile::new().unwrap();
@@ -1619,7 +1658,7 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<Decl>, ParseError> {
 
     parser.arguments(&[
         "-x",
-        "objective-c", // The file doesn't have an Objective-C extension so set the language explicitely
+        "objective-c", // The file doesn't have an Objective-C extension so set the language explicitely (for some reason -ObjC doesn't work properly)
         "-fobjc-arc",
         "-isysroot",
         &sdk_path(AppleSdk::MacOs),
@@ -1752,16 +1791,19 @@ fn parse_objc(clang: &Clang, source: &str) -> Result<Vec<Decl>, ParseError> {
 
 fn main() {
     let source = r#"
-        // extern __attribute__((visibility("default"))) __attribute__((__malloc__)) __attribute__((__ns_returns_retained__)) __attribute__((__warn_unused_result__))
-        // __attribute__((__nothrow__))
-        // C *foo(void);
-        @interface I
-        - (void) foo: (id) __attribute((ns_consumed)) x;
-        @end
-        void foo(__attribute((ns_consumed)) id x);
+        // @interface I
+        // - (id)foo __attribute__((__ns_returns_retained__));
+        // @end
+        // __attribute__((ns_returns_retained)) id foo(void);
 
         // #import <AVFoundation/AVFoundation.h>
         // #import <Cocoa/Cocoa.h>
+
+        // void foo(void (__attribute__((noescape)) ^)(void));
+
+#define BRIDGE __attribute__((objc_bridge(id)))
+        typedef struct BRIDGE CGColor *CGColorRef;
+
         // typedef enum { A = 1 } foo;
         // enum E { B = 1000 };
         // typedef signed long CFIndex;
