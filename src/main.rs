@@ -20,10 +20,9 @@ use std::collections::{HashMap, HashSet};
 // - bit fields
 // - try getting the best definition of a function (unfortunately libclang's "canonical" seems to just be the first one)
 // - struct or type declaration inside interface declaration
-// - __attribute__((NSObject)), __attribute__((objc_bridge*))
+// - __attribute__((NSObject)), __attribute__/objc_bridge_mutable((objc_bridge*))
 // - __attribute__((ns_consumes_self)) (implicit on all init)
 // - __attribute__((cf_returns_*))
-// - __attribute__((noescape))
 
 #[derive(Debug, PartialEq)]
 enum Origin {
@@ -534,6 +533,10 @@ impl TagRef {
 bitflags! {
     struct ParamAttrs: u8 {
         const CONSUMED = 0b0000_0001;
+        // noescape should really be for function and block pointers
+        // (or typedefs of those), but with the AST libclang provides,
+        // it's way easier to handle it as a parameter attribute.
+        const NOESCAPE = 0b0000_0010;
     }
 }
 
@@ -544,6 +547,14 @@ impl ParamAttrs {
         for child in decl.get_children() {
             match child.get_kind() {
                 EntityKind::NSConsumed => attrs.insert(Self::CONSUMED),
+                EntityKind::UnexposedAttr => {
+                    if let Some(range) = child.get_range() {
+                        let tokens = range.tokenize();
+                        if tokens.len() == 1 && tokens[0].get_spelling() == "noescape" {
+                            attrs.insert(Self::NOESCAPE);
+                        }
+                    }
+                }
                 _ => (),
             }
         }
@@ -1026,14 +1037,17 @@ struct ObjCParam {
 impl ObjCParam {
     fn from_entity(decl: &clang::Entity, unnamed_tag_ids: &TagIdMap) -> Self {
         assert_eq!(decl.get_kind(), EntityKind::ParmDecl);
+        let name = decl.get_name().unwrap();
+        let objc_type = ObjCType::from_type(
+            &decl.get_type().unwrap(),
+            &mut parm_decl_children(decl),
+            unnamed_tag_ids,
+        );
+        let attrs = ParamAttrs::from_decl(&decl);
         ObjCParam {
-            name: decl.get_name().unwrap(),
-            objc_type: ObjCType::from_type(
-                &decl.get_type().unwrap(),
-                &mut parm_decl_children(decl),
-                unnamed_tag_ids,
-            ),
-            attrs: ParamAttrs::from_decl(&decl),
+            name,
+            objc_type,
+            attrs,
         }
     }
 }
@@ -1799,10 +1813,7 @@ fn main() {
         // #import <AVFoundation/AVFoundation.h>
         // #import <Cocoa/Cocoa.h>
 
-        // void foo(void (__attribute__((noescape)) ^)(void));
-
-#define BRIDGE __attribute__((objc_bridge(id)))
-        typedef struct BRIDGE CGColor *CGColorRef;
+// typedef const struct __attribute__((objc_bridge(NSString))) __CFString * CFStringRef;
 
         // typedef enum { A = 1 } foo;
         // enum E { B = 1000 };
@@ -2792,12 +2803,13 @@ mod tests {
     fn test_param_attributes() {
         let clang = Clang::new().expect("Could not load libclang");
 
-        // NSLog seems to be already known by the compiler so handled a bit differently by it.
         let source = "
             @interface I
-            - (void) methodWithConsumedParam: (id) __attribute((ns_consumed)) consumedParam;
+            - (void)methodWithConsumedParam:(id) __attribute((ns_consumed)) consumedParam;
+            - (void)methodWithNoescapeBlock:(void (__attribute__((noescape)) ^)(void))block;
             @end
             void function_with_consumed_param(__attribute((ns_consumed)) id consumedParam);
+            void function_with_noescape_block(void (__attribute__((noescape)) ^)(void));
         ";
 
         let expected_decls = vec![
@@ -2806,20 +2818,41 @@ mod tests {
                 superclass: None,
                 adopted_protocols: vec![],
                 template_params: vec![],
-                methods: vec![ObjCMethod {
-                    name: "methodWithConsumedParam:".to_string(),
-                    kind: ObjCMethodKind::Instance,
-                    params: vec![ObjCParam {
-                        name: "consumedParam".to_string(),
-                        objc_type: ObjCType::ObjPtr(ObjPtr {
-                            kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
-                            nullability: Nullability::Unspecified,
-                        }),
-                        attrs: ParamAttrs::CONSUMED,
-                    }],
-                    result: ObjCType::Void,
-                    attrs: CallableAttrs::empty(),
-                }],
+                methods: vec![
+                    ObjCMethod {
+                        name: "methodWithConsumedParam:".to_string(),
+                        kind: ObjCMethodKind::Instance,
+                        params: vec![ObjCParam {
+                            name: "consumedParam".to_string(),
+                            objc_type: ObjCType::ObjPtr(ObjPtr {
+                                kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
+                                nullability: Nullability::Unspecified,
+                            }),
+                            attrs: ParamAttrs::CONSUMED,
+                        }],
+                        result: ObjCType::Void,
+                        attrs: CallableAttrs::empty(),
+                    },
+                    ObjCMethod {
+                        name: "methodWithNoescapeBlock:".to_string(),
+                        kind: ObjCMethodKind::Instance,
+                        params: vec![ObjCParam {
+                            name: "block".to_string(),
+                            objc_type: ObjCType::ObjPtr(ObjPtr {
+                                kind: ObjPtrKind::Block(CallableDesc {
+                                    result: Box::new(ObjCType::Void),
+                                    params: Some(vec![]),
+                                    is_variadic: false,
+                                    attrs: CallableAttrs::empty(),
+                                }),
+                                nullability: Nullability::Unspecified,
+                            }),
+                            attrs: ParamAttrs::NOESCAPE,
+                        }],
+                        result: ObjCType::Void,
+                        attrs: CallableAttrs::empty(),
+                    },
+                ],
                 properties: vec![],
             }),
             Decl::FuncDecl(FuncDecl {
@@ -2833,6 +2866,27 @@ mod tests {
                             nullability: Nullability::Unspecified,
                         }),
                         attrs: ParamAttrs::CONSUMED,
+                    }]),
+                    is_variadic: false,
+                    attrs: CallableAttrs::empty(),
+                },
+            }),
+            Decl::FuncDecl(FuncDecl {
+                name: "function_with_noescape_block".to_string(),
+                desc: CallableDesc {
+                    result: Box::new(ObjCType::Void),
+                    params: Some(vec![Param {
+                        name: None,
+                        objc_type: ObjCType::ObjPtr(ObjPtr {
+                            kind: ObjPtrKind::Block(CallableDesc {
+                                result: Box::new(ObjCType::Void),
+                                params: Some(vec![]),
+                                is_variadic: false,
+                                attrs: CallableAttrs::empty(),
+                            }),
+                            nullability: Nullability::Unspecified,
+                        }),
+                        attrs: ParamAttrs::NOESCAPE,
                     }]),
                     is_variadic: false,
                     attrs: CallableAttrs::empty(),
