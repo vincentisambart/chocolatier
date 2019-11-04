@@ -55,7 +55,8 @@ extern "C" {
     fn objc_retain(value: *mut Object) -> *mut Object;
 }
 
-trait ObjCPtr {
+trait ObjCPtr: Sized {
+    unsafe fn from_raw_unchecked(ptr: NonNull<Object>) -> Self;
     fn ptr(&self) -> NonNull<Object>;
 }
 
@@ -81,6 +82,13 @@ trait NSObjectProtocol: ObjCPtr {
     fn retain_count(&self) -> isize {
         unsafe { CFGetRetainCount(self.ptr().as_ptr()) }
     }
+    fn retain(&self) -> Self {
+        let raw_self = self.ptr().as_ptr();
+        let raw_ptr = unsafe { objc_retain(raw_self) };
+        debug_assert_eq!(raw_ptr, raw_self);
+        let ptr = NonNull::new(raw_ptr).expect("objc_retain should not return a null pointer.");
+        unsafe { Self::from_raw_unchecked(ptr) }
+    }
 }
 
 trait NSObjectInterface: NSObjectProtocol {}
@@ -93,6 +101,10 @@ impl NSObjectProtocol for NSObject {}
 impl NSObjectInterface for NSObject {}
 
 impl ObjCPtr for NSObject {
+    unsafe fn from_raw_unchecked(ptr: NonNull<Object>) -> Self {
+        NSObject { ptr }
+    }
+
     fn ptr(&self) -> NonNull<Object> {
         self.ptr
     }
@@ -103,14 +115,6 @@ impl NSObject {
         let raw_ptr = unsafe { chocolat_Foundation_NSObjectInterface_class_new() };
         let ptr =
             NonNull::new(raw_ptr).expect("Expecting +[NSObject new] to return a non null pointer.");
-        NSObject { ptr }
-    }
-
-    fn retain(&self) -> Self {
-        let raw_self = self.ptr().as_ptr();
-        let raw_ptr = unsafe { objc_retain(raw_self) };
-        debug_assert_eq!(raw_ptr, raw_self);
-        let ptr = NonNull::new(raw_ptr).expect("objc_retain should not return a null pointer.");
         NSObject { ptr }
     }
 }
@@ -154,6 +158,10 @@ impl NSObjectInterface for NSString {}
 impl NSStringInterface for NSString {}
 
 impl ObjCPtr for NSString {
+    unsafe fn from_raw_unchecked(ptr: NonNull<Object>) -> Self {
+        NSString { ptr }
+    }
+
     fn ptr(&self) -> NonNull<Object> {
         self.ptr
     }
@@ -201,6 +209,10 @@ impl NSObjectInterface for Foo {}
 impl FooInterface for Foo {}
 
 impl ObjCPtr for Foo {
+    unsafe fn from_raw_unchecked(ptr: NonNull<Object>) -> Self {
+        Foo { ptr }
+    }
+
     fn ptr(&self) -> NonNull<Object> {
         self.ptr
     }
