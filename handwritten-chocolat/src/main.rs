@@ -59,38 +59,15 @@ trait ObjCPtr {
     fn ptr(&self) -> NonNull<Object>;
 }
 
-trait NullableObjCPtr {
-    fn nullable_ptr(&self) -> *mut Object;
-}
-
-impl<T> NullableObjCPtr for T
-where
-    T: ObjCPtr,
-{
-    fn nullable_ptr(&self) -> *mut Object {
-        self.ptr().as_ptr()
-    }
-}
-
-impl<T> NullableObjCPtr for Option<T>
-where
-    T: ObjCPtr,
-{
-    fn nullable_ptr(&self) -> *mut Object {
-        self.as_ref()
-            .map_or(std::ptr::null_mut(), |obj| obj.ptr().as_ptr())
-    }
-}
-
 trait NSObjectProtocol: ObjCPtr {
     fn hash(&self) -> usize {
         unsafe { chocolat_Foundation_NSObjectProtocol_instance_hash(self.ptr().as_ptr()) }
     }
-    fn is_equal(&self, object: &impl NullableObjCPtr) -> bool {
+    fn is_equal(&self, object: Option<&impl ObjCPtr>) -> bool {
         let ret = unsafe {
             chocolat_Foundation_NSObjectProtocol_instance_isEqual(
                 self.ptr().as_ptr(),
-                object.nullable_ptr(),
+                object.map_or(std::ptr::null_mut(), |obj| obj.ptr().as_ptr()),
             )
         };
         ret != 0
@@ -265,11 +242,12 @@ fn main() {
         println!("hash1: {}", obj1.hash());
         println!("hash1: {}", obj1.hash());
         println!("hash2: {}", obj2.hash());
-        println!("equal0: {}", obj1.is_equal(&obj1));
-        println!("equal1: {}", obj1.is_equal(&obj2));
-        println!("equal2: {}", obj2.is_equal(&obj2));
-        println!("equal3: {}", obj2.is_equal(&None::<NSObject>));
-        println!("equal4: {}", obj2.is_equal(&obj3));
+        println!("equal0: {}", obj1.is_equal(Some(&obj1)));
+        println!("equal1: {}", obj1.is_equal(Some(&obj2)));
+        println!("equal2: {}", obj2.is_equal(Some(&obj2)));
+        println!("equal3: {}", obj2.is_equal(None::<&NSObject>));
+        println!("equal4: {}", obj2.is_equal(obj3.as_ref()));
+        println!("equal4: {}", obj2.is_equal(obj3.as_ref()));
         println!("desc: {}", obj1.description().unwrap().to_string().unwrap());
         let x = NSString::new_with_str("こんにちは！");
         let desc = x.description();
