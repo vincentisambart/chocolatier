@@ -57,72 +57,70 @@ extern "C" {
 
 trait ObjCPtr: Sized {
     unsafe fn from_raw_unchecked(ptr: NonNull<Object>) -> Self;
-    fn ptr(&self) -> NonNull<Object>;
+    fn as_raw(&self) -> NonNull<Object>;
 }
 
 trait NSObjectProtocol: ObjCPtr {
     fn hash(&self) -> usize {
-        unsafe { chocolat_Foundation_NSObjectProtocol_instance_hash(self.ptr().as_ptr()) }
+        unsafe { chocolat_Foundation_NSObjectProtocol_instance_hash(self.as_raw().as_ptr()) }
     }
     fn is_equal(&self, object: Option<&impl ObjCPtr>) -> bool {
-        let ret = unsafe {
-            chocolat_Foundation_NSObjectProtocol_instance_isEqual(
-                self.ptr().as_ptr(),
-                object.map_or(std::ptr::null_mut(), |obj| obj.ptr().as_ptr()),
-            )
-        };
+        let self_raw = self.as_raw().as_ptr();
+        let object_raw = object.map_or(std::ptr::null_mut(), |obj| obj.as_raw().as_ptr());
+        let ret =
+            unsafe { chocolat_Foundation_NSObjectProtocol_instance_isEqual(self_raw, object_raw) };
         ret != 0
     }
     fn description(&self) -> Option<NSString> {
-        let raw_self = self.ptr().as_ptr();
+        let raw_self = self.as_raw().as_ptr();
         let raw_ptr =
             unsafe { chocolat_Foundation_NSObjectProtocol_instance_description(raw_self) };
-        NonNull::new(raw_ptr).map(|ptr| NSString { ptr })
+        NonNull::new(raw_ptr).map(|raw| unsafe { NSString::from_raw_unchecked(raw) })
     }
     fn retain_count(&self) -> isize {
-        unsafe { CFGetRetainCount(self.ptr().as_ptr()) }
+        unsafe { CFGetRetainCount(self.as_raw().as_ptr()) }
     }
     fn retain(&self) -> Self {
-        let raw_self = self.ptr().as_ptr();
-        let raw_ptr = unsafe { objc_retain(raw_self) };
-        debug_assert_eq!(raw_ptr, raw_self);
-        let ptr = NonNull::new(raw_ptr).expect("objc_retain should not return a null pointer.");
-        unsafe { Self::from_raw_unchecked(ptr) }
+        let raw_self = self.as_raw().as_ptr();
+        let ptr_ret = unsafe { objc_retain(raw_self) };
+        debug_assert_eq!(ptr_ret, raw_self);
+        let raw_ret = NonNull::new(ptr_ret).expect("objc_retain should not return a null pointer.");
+        unsafe { Self::from_raw_unchecked(raw_ret) }
     }
 }
 
 trait NSObjectInterface: NSObjectProtocol {}
 
 struct NSObject {
-    ptr: NonNull<Object>,
+    raw: NonNull<Object>,
 }
 
 impl NSObjectProtocol for NSObject {}
 impl NSObjectInterface for NSObject {}
 
 impl ObjCPtr for NSObject {
-    unsafe fn from_raw_unchecked(ptr: NonNull<Object>) -> Self {
-        NSObject { ptr }
+    unsafe fn from_raw_unchecked(raw: NonNull<Object>) -> Self {
+        NSObject { raw }
     }
 
-    fn ptr(&self) -> NonNull<Object> {
-        self.ptr
+    fn as_raw(&self) -> NonNull<Object> {
+        self.raw
     }
 }
 
 impl NSObject {
     fn new() -> Self {
         let raw_ptr = unsafe { chocolat_Foundation_NSObjectInterface_class_new() };
-        let ptr =
+        let raw =
             NonNull::new(raw_ptr).expect("Expecting +[NSObject new] to return a non null pointer.");
-        NSObject { ptr }
+        unsafe { Self::from_raw_unchecked(raw) }
     }
 }
 
 impl Drop for NSObject {
     fn drop(&mut self) {
         unsafe {
-            objc_release(self.ptr().as_ptr());
+            objc_release(self.as_raw().as_ptr());
         }
     }
 }
@@ -140,7 +138,7 @@ impl NSStringEncoding {
 
 trait NSStringInterface: NSObjectInterface {
     fn to_string(&self) -> Result<String, std::str::Utf8Error> {
-        let raw_self = self.ptr().as_ptr();
+        let raw_self = self.as_raw().as_ptr();
         let cstr = unsafe {
             let bytes = chocolat_Foundation_NSStringInterface_instance_UTF8String(raw_self);
             ffi::CStr::from_ptr(bytes)
@@ -150,7 +148,7 @@ trait NSStringInterface: NSObjectInterface {
 }
 
 struct NSString {
-    ptr: NonNull<Object>,
+    raw: NonNull<Object>,
 }
 
 impl NSObjectProtocol for NSString {}
@@ -158,50 +156,51 @@ impl NSObjectInterface for NSString {}
 impl NSStringInterface for NSString {}
 
 impl ObjCPtr for NSString {
-    unsafe fn from_raw_unchecked(ptr: NonNull<Object>) -> Self {
-        NSString { ptr }
+    unsafe fn from_raw_unchecked(raw: NonNull<Object>) -> Self {
+        NSString { raw }
     }
 
-    fn ptr(&self) -> NonNull<Object> {
-        self.ptr
+    fn as_raw(&self) -> NonNull<Object> {
+        self.raw
     }
 }
 
 impl NSString {
     fn new_with_str(text: &str) -> Self {
+        let bytes = text.as_ptr() as *const ffi::c_void;
+        let len = text.len();
+        let encoding = NSStringEncoding::UTF8;
         let raw_ptr = unsafe {
             chocolat_Foundation_NSStringInterface_class_newWithBytes_length_encoding(
-                text.as_ptr() as *const ffi::c_void,
-                text.len(),
-                NSStringEncoding(4),
+                bytes, len, encoding,
             )
         };
         let ptr = NonNull::new(raw_ptr).expect(
             "expecting -[NSString initWithBytes:length:encoding:] to return a non null pointer.",
         );
-        NSString { ptr }
+        unsafe { Self::from_raw_unchecked(ptr) }
     }
 }
 
 impl Drop for NSString {
     fn drop(&mut self) {
         unsafe {
-            objc_release(self.ptr().as_ptr());
+            objc_release(self.as_raw().as_ptr());
         }
     }
 }
 
 trait FooInterface: ObjCPtr {
     fn bar(&self) -> NSObject {
-        let raw_self = self.ptr().as_ptr();
+        let raw_self = self.as_raw().as_ptr();
         let raw_ptr = unsafe { chocolat_Foundation_FooInterface_instance_bar(raw_self) };
-        let ptr = NonNull::new(raw_ptr).expect("expecting non-null");
-        NSObject { ptr }
+        let raw = NonNull::new(raw_ptr).expect("expecting non-null");
+        unsafe { NSObject::from_raw_unchecked(raw) }
     }
 }
 
 struct Foo {
-    ptr: NonNull<Object>,
+    raw: NonNull<Object>,
 }
 
 impl NSObjectProtocol for Foo {}
@@ -209,36 +208,36 @@ impl NSObjectInterface for Foo {}
 impl FooInterface for Foo {}
 
 impl ObjCPtr for Foo {
-    unsafe fn from_raw_unchecked(ptr: NonNull<Object>) -> Self {
-        Foo { ptr }
+    unsafe fn from_raw_unchecked(raw: NonNull<Object>) -> Self {
+        Foo { raw }
     }
 
-    fn ptr(&self) -> NonNull<Object> {
-        self.ptr
+    fn as_raw(&self) -> NonNull<Object> {
+        self.raw
     }
 }
 
 impl Foo {
     fn new() -> Self {
         let raw_ptr = unsafe { chocolat_Foundation_FooInterface_class_new() };
-        let ptr =
+        let raw =
             NonNull::new(raw_ptr).expect("Expecting +[Foo new] to return a non null pointer.");
-        Foo { ptr }
+        unsafe { Self::from_raw_unchecked(raw) }
     }
 
     fn retain(&self) -> Self {
-        let raw_self = self.ptr().as_ptr();
+        let raw_self = self.as_raw().as_ptr();
         let raw_ptr = unsafe { objc_retain(raw_self) };
         debug_assert_eq!(raw_ptr, raw_self);
-        let ptr = NonNull::new(raw_ptr).expect("objc_retain should not return a null pointer.");
-        Foo { ptr }
+        let raw = NonNull::new(raw_ptr).expect("objc_retain should not return a null pointer");
+        unsafe { Self::from_raw_unchecked(raw) }
     }
 }
 
 impl Drop for Foo {
     fn drop(&mut self) {
         unsafe {
-            objc_release(self.ptr().as_ptr());
+            objc_release(self.as_raw().as_ptr());
         }
     }
 }
