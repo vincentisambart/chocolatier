@@ -12,11 +12,15 @@ fn main() {
 
         // #import <AVFoundation/AVFoundation.h>
         // #import <Cocoa/Cocoa.h>
+        #import <Foundation/Foundation.h>
+
+        // @interface I
+        // @end
 
 // typedef const struct __attribute__((objc_bridge(NSString))) __CFString * CFStringRef;
 
-        typedef enum { A = 1 } foo;
-        enum E { B = 1000 };
+        // typedef enum { A = 1 } foo;
+        // enum E { B = 1000 };
         // typedef signed long CFIndex;
         // typedef enum __attribute__((enum_extensibility(open))) CFStreamStatus : CFIndex CFStreamStatus; enum CFStreamStatus : CFIndex {
         //     kCFStreamStatusNotOpen = 0,
@@ -32,6 +36,6 @@ fn main() {
         // struct { float f; union { int i; double d; }; } a;
   "#;
     let decls = ast::ast_from_str(source).unwrap();
-    ast::print_full_clang_ast(source);
+    // ast::print_full_clang_ast(source);
     println!("{:#?}", decls);
 }

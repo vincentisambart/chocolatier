@@ -1,6 +1,3 @@
-#![allow(dead_code)]
-#![allow(clippy::cognitive_complexity)]
-
 use bitflags::bitflags;
 use clang::{Clang, EntityKind, TypeKind};
 use std::collections::{HashMap, HashSet};
@@ -24,55 +21,54 @@ use std::collections::{HashMap, HashSet};
 // - __attribute__((ns_consumes_self)) (implicit on all init)
 // - __attribute__((cf_returns_*))
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum Origin {
     ObjCCore,
+    System,
     Framework(String),
     Library(String),
-    Unknown,
 }
 
-fn guess_origin(path: &str) -> Origin {
-    use lazy_static::lazy_static;
-    use regex::Regex;
+impl Origin {
+    fn from_path(path: &str) -> Option<Self> {
+        use lazy_static::lazy_static;
+        use regex::Regex;
 
-    lazy_static! {
-        static ref FRAMEWORK_PATH_RE: Regex =
-            Regex::new(r"/([^./]+)\.framework/Headers/[^./]+.h\z").unwrap();
-    }
-    if let Some(caps) = FRAMEWORK_PATH_RE.captures(path) {
-        return Origin::Framework(caps.get(1).unwrap().as_str().to_owned());
-    }
-
-    lazy_static! {
-        static ref LIBRARY_PATH_RE: Regex =
-            Regex::new(r"/usr/include/([^./]+)/[^./]+.h\z").unwrap();
-    }
-    if let Some(caps) = LIBRARY_PATH_RE.captures(path) {
-        let library = caps.get(1).unwrap().as_str();
-        if library == "objc" {
-            return Origin::ObjCCore;
-        } else {
-            return Origin::Library(library.to_owned());
+        lazy_static! {
+            static ref FRAMEWORK_PATH_RE: Regex =
+                Regex::new(r"/([^./]+)\.framework/Headers/[^./]+.h\z").unwrap();
         }
+        if let Some(caps) = FRAMEWORK_PATH_RE.captures(path) {
+            let framework = caps.get(1).unwrap().as_str().to_owned();
+            return Some(Origin::Framework(framework));
+        }
+
+        if path.contains("/usr/include/") {
+            lazy_static! {
+                static ref LIBRARY_PATH_RE: Regex =
+                    Regex::new(r"/usr/include/([^./]+)/.+.h\z").unwrap();
+            }
+            if let Some(caps) = LIBRARY_PATH_RE.captures(path) {
+                let library = caps.get(1).unwrap().as_str();
+                if library == "objc" {
+                    return Some(Origin::ObjCCore);
+                } else if library == "sys" || library == "i386" {
+                    return Some(Origin::System);
+                } else {
+                    return Some(Origin::Library(library.to_owned()));
+                }
+            } else {
+                return Some(Origin::System);
+            }
+        }
+
+        None
     }
 
-    Origin::Unknown
-}
-
-fn get_entity_file_path(entity: &clang::Entity) -> Option<String> {
-    let path = entity.get_location()?.get_file_location().file?.get_path();
-    match path.into_os_string().into_string() {
-        Ok(string) => Some(string),
-        _ => None,
-    }
-}
-
-fn guess_entity_origin(entity: &clang::Entity) -> Origin {
-    if let Some(file_path) = get_entity_file_path(entity) {
-        guess_origin(&file_path)
-    } else {
-        Origin::Unknown
+    fn from_entity(entity: &clang::Entity) -> Option<Origin> {
+        // As preprocess the file in advance using the system compiler, we have to use get_presumed_location().
+        let (path, _, _) = entity.get_location()?.get_presumed_location();
+        Self::from_path(&path)
     }
 }
 
@@ -1283,6 +1279,7 @@ pub(crate) struct InterfaceDef {
     template_params: Vec<String>,
     methods: Vec<ObjCMethod>,
     properties: Vec<Property>,
+    origin: Option<Origin>,
 }
 
 impl InterfaceDef {
@@ -1324,6 +1321,7 @@ impl InterfaceDef {
             .filter(|child| child.get_kind() == EntityKind::ObjCPropertyDecl)
             .map(|prop| Property::from_entity(prop, unnamed_tag_ids))
             .collect();
+        let origin = Origin::from_entity(entity);
 
         InterfaceDef {
             name,
@@ -1332,6 +1330,7 @@ impl InterfaceDef {
             template_params,
             methods,
             properties,
+            origin,
         }
     }
 }
@@ -1343,6 +1342,7 @@ pub(crate) struct CategoryDef {
     adopted_protocols: Vec<String>,
     methods: Vec<ObjCMethod>,
     properties: Vec<Property>,
+    origin: Option<Origin>,
 }
 
 impl CategoryDef {
@@ -1386,12 +1386,15 @@ impl CategoryDef {
             .map(|prop| Property::from_entity(prop, unnamed_tag_ids))
             .collect();
 
+        let origin = Origin::from_entity(entity);
+
         CategoryDef {
             name,
             class,
             adopted_protocols,
             methods,
             properties,
+            origin,
         }
     }
 }
@@ -1414,6 +1417,7 @@ pub(crate) struct ProtocolDef {
     inherited_protocols: Vec<String>,
     methods: Vec<ProtocolMethod>,
     properties: Vec<ProtocolProperty>,
+    origin: Option<Origin>,
 }
 
 impl ProtocolDef {
@@ -1454,11 +1458,14 @@ impl ProtocolDef {
             })
             .collect();
 
+        let origin = Origin::from_entity(entity);
+
         ProtocolDef {
             name: entity.get_name().unwrap(),
             inherited_protocols,
             methods,
             properties,
+            origin,
         }
     }
 }
@@ -1467,19 +1474,25 @@ impl ProtocolDef {
 pub(crate) struct TypedefDecl {
     name: String,
     underlying: ObjCType,
+    origin: Option<Origin>,
 }
 
 impl TypedefDecl {
     fn from_entity(decl: &clang::Entity, unnamed_tag_ids: &TagIdMap) -> Self {
         assert_eq!(decl.get_kind(), EntityKind::TypedefDecl);
 
+        let name = decl.get_name().unwrap();
+        let underlying = ObjCType::from_type(
+            &decl.get_typedef_underlying_type().unwrap(),
+            &mut parm_decl_children(&decl),
+            unnamed_tag_ids,
+        );
+        let origin = Origin::from_entity(decl);
+
         TypedefDecl {
-            name: decl.get_name().unwrap(),
-            underlying: ObjCType::from_type(
-                &decl.get_typedef_underlying_type().unwrap(),
-                &mut parm_decl_children(&decl),
-                unnamed_tag_ids,
-            ),
+            name,
+            underlying,
+            origin,
         }
     }
 }
@@ -1495,7 +1508,7 @@ pub(crate) struct RecordDef {
     id: TagId,
     kind: RecordKind,
     fields: Vec<Field>,
-    // location: Location,
+    origin: Option<Origin>,
 }
 
 impl RecordDef {
@@ -1521,13 +1534,13 @@ impl RecordDef {
             .map(|field| Field::from_entity(field, unnamed_tag_ids))
             .collect();
 
-        // let location = Location::from_entity(decl);
+        let origin = Origin::from_entity(decl);
 
         RecordDef {
             id,
             kind,
             fields,
-            // location,
+            origin,
         }
     }
 }
@@ -1536,6 +1549,7 @@ impl RecordDef {
 pub(crate) struct FuncDecl {
     name: String,
     desc: CallableDesc,
+    origin: Option<Origin>,
 }
 
 impl FuncDecl {
@@ -1543,14 +1557,12 @@ impl FuncDecl {
         assert_eq!(decl.get_kind(), EntityKind::FunctionDecl);
         let clang_type = decl.get_type().unwrap();
 
-        FuncDecl {
-            name: decl.get_name().unwrap(),
-            desc: CallableDesc::from_type(
-                &clang_type,
-                &mut parm_decl_children(&decl),
-                unnamed_tag_ids,
-            ),
-        }
+        let name = decl.get_name().unwrap();
+        let desc =
+            CallableDesc::from_type(&clang_type, &mut parm_decl_children(&decl), unnamed_tag_ids);
+        let origin = Origin::from_entity(decl);
+
+        FuncDecl { name, desc, origin }
     }
 }
 
@@ -1559,6 +1571,7 @@ pub(crate) struct EnumDef {
     id: TagId,
     underlying: ObjCType,
     values: Vec<EnumValue>,
+    origin: Option<Origin>,
 }
 
 impl EnumDef {
@@ -1592,11 +1605,13 @@ impl EnumDef {
                 }
             })
             .collect();
+        let origin = Origin::from_entity(decl);
 
         EnumDef {
             id,
             underlying,
             values,
+            origin,
         }
     }
 }
@@ -1828,27 +1843,53 @@ mod tests {
 
     #[test]
     fn test_guess_origin() {
-        assert_eq!(guess_origin(""), Origin::Unknown);
+        assert_eq!(Origin::from_path(""), None);
         assert_eq!(
-            guess_origin("/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.13.sdk/System/Library/Frameworks/Foundation.framework/Headers/NSValue.h"),
-            Origin::Framework("Foundation".to_owned()),
+            Origin::from_path("/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.13.sdk/System/Library/Frameworks/Foundation.framework/Headers/NSValue.h"),
+            Some(Origin::Framework("Foundation".to_owned())),
         );
         assert_eq!(
-            guess_origin("/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.13.sdk/System/Library/Frameworks/Metal.framework/Headers/MTLCaptureManager.h"),
-            Origin::Framework("Metal".to_owned()),
+            Origin::from_path("/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.13.sdk/System/Library/Frameworks/Metal.framework/Headers/MTLCaptureManager.h"),
+            Some(Origin::Framework("Metal".to_owned())),
         );
         assert_eq!(
-            guess_origin("/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.13.sdk/usr/include/objc/NSObject.h"),
-            Origin::ObjCCore,
+            Origin::from_path("/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.13.sdk/usr/include/objc/NSObject.h"),
+            Some(Origin::ObjCCore),
         );
         assert_eq!(
-            guess_origin("/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.13.sdk/usr/include/dispatch/object.h"),
-            Origin::Library("dispatch".to_owned()),
+            Origin::from_path("/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.13.sdk/usr/include/dispatch/object.h"),
+            Some(Origin::Library("dispatch".to_owned())),
         );
         assert_eq!(
-            guess_origin("/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.13.sdk/usr/include/dispatch/queue.h"),
-            Origin::Library("dispatch".to_owned()),
+            Origin::from_path("/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.13.sdk/usr/include/dispatch/queue.h"),
+            Some(Origin::Library("dispatch".to_owned())),
         );
+        assert_eq!(
+            Origin::from_path("/usr/include/i386/_types.h"),
+            Some(Origin::System)
+        );
+        assert_eq!(
+            Origin::from_path("/usr/include/_ctype.h"),
+            Some(Origin::System)
+        );
+        assert_eq!(
+            Origin::from_path("/usr/include/sys/_types/_wchar_t.h"),
+            Some(Origin::System)
+        );
+
+        let source = r#"
+            # 1 "/System/Library/Frameworks/Foundation.framework/Headers/Foundation.h" 1 3
+            typedef int I;
+        "#;
+
+        let expected_decls = vec![Decl::TypedefDecl(TypedefDecl {
+            name: "I".to_string(),
+            underlying: ObjCType::Num(NumKind::Int),
+            origin: Some(Origin::Framework("Foundation".to_string())),
+        })];
+
+        let parsed_decls = ast_from_str(source).unwrap();
+        assert_eq!(parsed_decls, expected_decls);
     }
 
     #[test]
@@ -1928,6 +1969,7 @@ mod tests {
                 },
             ],
             properties: vec![],
+            origin: None,
         })];
 
         let parsed_decls = ast_from_str(source).unwrap();
@@ -1951,6 +1993,7 @@ mod tests {
                 template_params: vec![],
                 methods: vec![],
                 properties: vec![],
+                origin: None,
             }),
             Decl::InterfaceDef(InterfaceDef {
                 name: "B".to_string(),
@@ -1959,6 +2002,7 @@ mod tests {
                 template_params: vec![],
                 methods: vec![],
                 properties: vec![],
+                origin: None,
             }),
         ];
 
@@ -1984,6 +2028,7 @@ mod tests {
                 template_params: vec![],
                 methods: vec![],
                 properties: vec![],
+                origin: None,
             }),
             Decl::InterfaceDef(InterfaceDef {
                 name: "B".to_string(),
@@ -2001,6 +2046,7 @@ mod tests {
                     attrs: CallableAttrs::empty(),
                 }],
                 properties: vec![],
+                origin: None,
             }),
         ];
 
@@ -2028,6 +2074,7 @@ mod tests {
                 inherited_protocols: vec![],
                 methods: vec![],
                 properties: vec![],
+                origin: None,
             }),
             Decl::ProtocolDef(ProtocolDef {
                 name: "A".to_string(),
@@ -2065,6 +2112,7 @@ mod tests {
                     },
                 ],
                 properties: vec![],
+                origin: None,
             }),
         ];
 
@@ -2098,6 +2146,7 @@ mod tests {
                 template_params: vec![],
                 methods: vec![],
                 properties: vec![],
+                origin: None,
             }),
             Decl::CategoryDef(CategoryDef {
                 name: Some("Categ".to_string()),
@@ -2111,6 +2160,7 @@ mod tests {
                     attrs: CallableAttrs::empty(),
                 }],
                 properties: vec![],
+                origin: None,
             }),
             Decl::CategoryDef(CategoryDef {
                 name: None,
@@ -2124,6 +2174,7 @@ mod tests {
                     attrs: CallableAttrs::empty(),
                 }],
                 properties: vec![],
+                origin: None,
             }),
             Decl::CategoryDef(CategoryDef {
                 name: None,
@@ -2146,6 +2197,7 @@ mod tests {
                     getter: None,
                     setter: None,
                 }],
+                origin: None,
             }),
         ];
 
@@ -2206,6 +2258,7 @@ mod tests {
                 },
             ],
             properties: vec![],
+            origin: None,
         })];
 
         let parsed_decls = ast_from_str(source).unwrap();
@@ -2225,6 +2278,7 @@ mod tests {
             Decl::TypedefDecl(TypedefDecl {
                 name: "I".to_string(),
                 underlying: ObjCType::Num(NumKind::Int),
+                origin: None,
             }),
             Decl::InterfaceDef(InterfaceDef {
                 name: "A".to_string(),
@@ -2241,6 +2295,7 @@ mod tests {
                     attrs: CallableAttrs::empty(),
                 }],
                 properties: vec![],
+                origin: None,
             }),
         ];
 
@@ -2270,6 +2325,7 @@ mod tests {
                     objc_type: ObjCType::Num(NumKind::Int),
                 }],
                 kind: RecordKind::Struct,
+                origin: None,
             }),
             Decl::TypedefDecl(TypedefDecl {
                 name: "T".to_string(),
@@ -2277,6 +2333,7 @@ mod tests {
                     id: TagId::Named("S".to_string()),
                     kind: TagKind::Struct,
                 }),
+                origin: None,
             }),
             Decl::InterfaceDef(InterfaceDef {
                 name: "A".to_string(),
@@ -2344,6 +2401,7 @@ mod tests {
                     },
                 ],
                 properties: vec![],
+                origin: None,
             }),
             Decl::RecordDef(RecordDef {
                 id: TagId::Unnamed(1),
@@ -2361,6 +2419,7 @@ mod tests {
                         }),
                     },
                 ],
+                origin: None,
             }),
             Decl::RecordDef(RecordDef {
                 id: TagId::Unnamed(2),
@@ -2375,6 +2434,7 @@ mod tests {
                         objc_type: ObjCType::Num(NumKind::Double),
                     },
                 ],
+                origin: None,
             }),
             Decl::RecordDef(RecordDef {
                 id: TagId::Named("DeclaredAfterwards".to_string()),
@@ -2383,6 +2443,7 @@ mod tests {
                     objc_type: ObjCType::Num(NumKind::SChar),
                 }],
                 kind: RecordKind::Struct,
+                origin: None,
             }),
         ];
 
@@ -2420,6 +2481,7 @@ mod tests {
                     })),
                     nullability: Nullability::Unspecified,
                 }),
+                origin: None,
             }),
             Decl::InterfaceDef(InterfaceDef {
                 name: "A".to_string(),
@@ -2608,6 +2670,7 @@ mod tests {
                     },
                 ],
                 properties: vec![],
+                origin: None,
             }),
         ];
 
@@ -2642,6 +2705,7 @@ mod tests {
                     })),
                     nullability: Nullability::Unspecified,
                 }),
+                origin: None,
             }),
             Decl::RecordDef(RecordDef {
                 id: TagId::Named("objc_object".to_string()),
@@ -2653,6 +2717,7 @@ mod tests {
                     }),
                 }],
                 kind: RecordKind::Struct,
+                origin: None,
             }),
             Decl::TypedefDecl(TypedefDecl {
                 name: "id".to_string(),
@@ -2663,6 +2728,7 @@ mod tests {
                     })),
                     nullability: Nullability::Unspecified,
                 }),
+                origin: None,
             }),
             Decl::TypedefDecl(TypedefDecl {
                 name: "SEL".to_string(),
@@ -2673,6 +2739,7 @@ mod tests {
                     })),
                     nullability: Nullability::Unspecified,
                 }),
+                origin: None,
             }),
             Decl::TypedefDecl(TypedefDecl {
                 name: "IMP".to_string(),
@@ -2702,6 +2769,7 @@ mod tests {
                     })),
                     nullability: Nullability::Unspecified,
                 }),
+                origin: None,
             }),
             Decl::ProtocolDef(ProtocolDef {
                 name: "P".to_string(),
@@ -2723,6 +2791,7 @@ mod tests {
                     is_optional: false,
                 }],
                 properties: vec![],
+                origin: None,
             }),
         ];
 
@@ -2757,6 +2826,7 @@ mod tests {
                 is_variadic: true,
                 attrs: CallableAttrs::empty(),
             },
+            origin: None,
         })];
 
         let parsed_decls = ast_from_str(source).unwrap();
@@ -2816,6 +2886,7 @@ mod tests {
                     },
                 ],
                 properties: vec![],
+                origin: None,
             }),
             Decl::FuncDecl(FuncDecl {
                 name: "function_with_consumed_param".to_string(),
@@ -2832,6 +2903,7 @@ mod tests {
                     is_variadic: false,
                     attrs: CallableAttrs::empty(),
                 },
+                origin: None,
             }),
             Decl::FuncDecl(FuncDecl {
                 name: "function_with_noescape_block".to_string(),
@@ -2853,6 +2925,7 @@ mod tests {
                     is_variadic: false,
                     attrs: CallableAttrs::empty(),
                 },
+                origin: None,
             }),
         ];
 
@@ -2887,6 +2960,7 @@ mod tests {
                     attrs: CallableAttrs::RETURNS_RETAINED,
                 }],
                 properties: vec![],
+                origin: None,
             }),
             Decl::FuncDecl(FuncDecl {
                 name: "function_with_retained_return".to_string(),
@@ -2899,6 +2973,7 @@ mod tests {
                     is_variadic: false,
                     attrs: CallableAttrs::RETURNS_RETAINED,
                 },
+                origin: None,
             }),
         ];
 
