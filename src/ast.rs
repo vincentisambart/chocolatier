@@ -13,7 +13,6 @@ use std::collections::{HashMap, HashSet};
 // - instancetype
 // - namespacing of ObjC exported from Swift (though that might be fine as we're calling from generated ObjC)
 // - const
-// - module name
 // - bit fields
 // - try getting the best definition of a function (unfortunately libclang's "canonical" seems to just be the first one)
 // - struct or type declaration inside interface declaration
@@ -466,8 +465,8 @@ impl Field {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-enum TagId {
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum TagId {
     Named(String),
     Unnamed(u32),
 }
@@ -1273,7 +1272,7 @@ impl Property {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct InterfaceDef {
-    name: String,
+    pub(crate) name: String,
     superclass: Option<String>,
     adopted_protocols: Vec<String>,
     template_params: Vec<String>,
@@ -1337,8 +1336,8 @@ impl InterfaceDef {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct CategoryDef {
-    name: Option<String>,
-    class: String,
+    pub(crate) name: Option<String>,
+    pub(crate) class: String,
     adopted_protocols: Vec<String>,
     methods: Vec<ObjCMethod>,
     properties: Vec<Property>,
@@ -1413,7 +1412,7 @@ struct ProtocolProperty {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ProtocolDef {
-    name: String,
+    pub(crate) name: String,
     inherited_protocols: Vec<String>,
     methods: Vec<ProtocolMethod>,
     properties: Vec<ProtocolProperty>,
@@ -1472,7 +1471,7 @@ impl ProtocolDef {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct TypedefDecl {
-    name: String,
+    pub(crate) name: String,
     underlying: ObjCType,
     origin: Option<Origin>,
 }
@@ -1498,15 +1497,15 @@ impl TypedefDecl {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
-enum RecordKind {
+pub(crate) enum RecordKind {
     Union,
     Struct,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RecordDef {
-    id: TagId,
-    kind: RecordKind,
+    pub(crate) id: TagId,
+    pub(crate) kind: RecordKind,
     fields: Vec<Field>,
     origin: Option<Origin>,
 }
@@ -1547,7 +1546,7 @@ impl RecordDef {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct FuncDecl {
-    name: String,
+    pub(crate) name: String,
     desc: CallableDesc,
     origin: Option<Origin>,
 }
@@ -1568,7 +1567,7 @@ impl FuncDecl {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct EnumDef {
-    id: TagId,
+    pub(crate) id: TagId,
     underlying: ObjCType,
     values: Vec<EnumValue>,
     origin: Option<Origin>,
