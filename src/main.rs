@@ -104,6 +104,11 @@ fn generate(decls: &Vec<ast::Decl>, _index: &TypeIndex) {
                     TagId::Unnamed(_) => continue,
                 };
 
+                // Enums with names starting with an underscore are probably private.
+                if enum_name.starts_with('_') {
+                    continue;
+                }
+
                 let struct_ident = format_ident!("{}", enum_name);
 
                 let value_names =
@@ -188,47 +193,80 @@ fn snake_case_split(text: &str) -> Vec<String> {
     text.split('_').map(|s| s.to_string()).collect()
 }
 
-fn without_final_s(text: &str) -> &str {
-    if text.ends_with('s') || text.ends_with('S') {
-        &text[..text.len() - 1]
-    } else {
-        text
-    }
-}
-
 fn loosely_equal(text1: &str, text2: &str) -> bool {
-    without_final_s(text1) == without_final_s(text2)
+    text1.trim_end_matches('s') == text2.trim_end_matches('s')
 }
 
 fn cleanup_enum_value_names<S: AsRef<str>, Iter: Iterator<Item = S>>(
     enum_name: &str,
     value_names: Iter,
 ) -> Vec<String> {
-    let split_enum_name = snake_case_split(enum_name);
-
-    value_names
-        .map(|value_name| {
-            let split_value_name = snake_case_split(value_name.as_ref());
-            let mut value_name_iter = split_value_name.iter().peekable();
-            if let Some(ref s) = value_name_iter.peek() {
-                if *s == &"k" {
-                    value_name_iter.next();
-                }
+    let enum_name_split = snake_case_split(enum_name);
+    let value_names_split = value_names
+        .map(|name| {
+            let mut split_name = snake_case_split(name.as_ref());
+            // Ignore "k" at the start of a value name.
+            if split_name[0] == "k" {
+                split_name.remove(0);
             }
-            let mut split_enum_name_iter = split_enum_name.iter();
-            let name = value_name_iter
-                .skip_while(|value_name_part| match split_enum_name_iter.next() {
-                    Some(enum_name_part) => loosely_equal(value_name_part, enum_name_part),
-                    None => false,
+            split_name
+        })
+        .collect::<Vec<_>>();
+
+    let matching_head_len = value_names_split
+        .iter()
+        .map(|value_name_split| {
+            let matching_len = enum_name_split
+                .iter()
+                .enumerate()
+                .find(|(i, enum_name_part)| {
+                    *i >= value_name_split.len()
+                        || !loosely_equal(enum_name_part, &value_name_split[*i])
                 })
+                .map_or(enum_name_split.len(), |(i, _)| i);
+            if matching_len == value_name_split.len() {
+                // If the whole value name matched, do not include the last word.
+                matching_len - 1
+            } else {
+                matching_len
+            }
+        })
+        .min()
+        .unwrap();
+
+    let matching_tail_len = value_names_split
+        .iter()
+        .map(|value_name_split| {
+            let matching_len = enum_name_split
+                .iter()
+                .rev()
+                .enumerate()
+                .find(|(i, enum_name_part)| {
+                    *i >= value_name_split.len()
+                        || !loosely_equal(
+                            enum_name_part,
+                            &value_name_split[value_name_split.len() - 1 - *i],
+                        )
+                })
+                .map_or(enum_name_split.len(), |(i, _)| i);
+            if matching_len == value_name_split.len() {
+                // If the whole value name matched, consider nothing matched.
+                0
+            } else {
+                matching_len
+            }
+        })
+        .min()
+        .unwrap();
+
+    value_names_split
+        .iter()
+        .map(|value_name_split| {
+            value_name_split[matching_head_len..value_name_split.len() - matching_tail_len]
+                .iter()
                 .map(|word| word.to_ascii_uppercase())
                 .collect::<Vec<String>>()
-                .join("_");
-            if name.is_empty() {
-                split_value_name.last().unwrap().to_ascii_uppercase()
-            } else {
-                name
-            }
+                .join("_")
         })
         .collect()
 }
@@ -239,20 +277,6 @@ mod tests {
 
     #[test]
     fn test_enum_cleanup() {
-        assert_eq!(
-            cleanup_enum_value_names(
-                "CFGregorianUnitFlags",
-                [
-                    "kCFGregorianUnitsYears",
-                    "kCFGregorianUnitsMonths",
-                    "kCFGregorianUnitsDays",
-                    "kCFGregorianAllUnits",
-                ]
-                .into_iter()
-            ),
-            ["YEARS", "MONTHS", "DAYS", "ALL_UNITS"],
-        );
-
         assert_eq!(
             cleanup_enum_value_names(
                 "NSQualityOfService",
@@ -277,9 +301,107 @@ mod tests {
         assert_eq!(
             cleanup_enum_value_names(
                 "CFSocketError",
-                ["kCFSocketSuccess", "kCFSocketError", "kCFSocketTimeout",].into_iter()
+                ["kCFSocketSuccess", "kCFSocketError", "kCFSocketTimeout"].into_iter()
             ),
-            ["SUCCESS", "ERROR", "TIMEOUT",],
+            ["SUCCESS", "ERROR", "TIMEOUT"],
+        );
+
+        assert_eq!(
+            cleanup_enum_value_names(
+                "CGWindowLevelKey",
+                [
+                    "kCGBaseWindowLevelKey",
+                    "kCGMinimumWindowLevelKey",
+                    "kCGDesktopWindowLevelKey",
+                    "kCGBackstopMenuLevelKey",
+                    "kCGNormalWindowLevelKey",
+                    "kCGFloatingWindowLevelKey",
+                    "kCGTornOffMenuWindowLevelKey",
+                    "kCGDockWindowLevelKey",
+                ]
+                .into_iter()
+            ),
+            [
+                "BASE_WINDOW",
+                "MINIMUM_WINDOW",
+                "DESKTOP_WINDOW",
+                "BACKSTOP_MENU",
+                "NORMAL_WINDOW",
+                "FLOATING_WINDOW",
+                "TORN_OFF_MENU_WINDOW",
+                "DOCK_WINDOW",
+            ],
+        );
+
+        assert_eq!(
+            cleanup_enum_value_names(
+                "CMSCertificateChainMode",
+                [
+                    "kCMSCertificateNone",
+                    "kCMSCertificateSignerOnly",
+                    "kCMSCertificateChain",
+                    "kCMSCertificateChainWithRoot",
+                    "kCMSCertificateChainWithRootOrFail",
+                ]
+                .into_iter()
+            ),
+            [
+                "NONE",
+                "SIGNER_ONLY",
+                "CHAIN",
+                "CHAIN_WITH_ROOT",
+                "CHAIN_WITH_ROOT_OR_FAIL",
+            ],
+        );
+
+        assert_eq!(
+            cleanup_enum_value_names(
+                "NSDateComponentsFormatterZeroFormattingBehavior",
+                [
+                    "NSDateComponentsFormatterZeroFormattingBehaviorNone",
+                    "NSDateComponentsFormatterZeroFormattingBehaviorDefault",
+                    "NSDateComponentsFormatterZeroFormattingBehaviorDropLeading",
+                    "NSDateComponentsFormatterZeroFormattingBehaviorDropMiddle",
+                    "NSDateComponentsFormatterZeroFormattingBehaviorDropTrailing",
+                    "NSDateComponentsFormatterZeroFormattingBehaviorDropAll",
+                    "NSDateComponentsFormatterZeroFormattingBehaviorPad",
+                ]
+                .into_iter()
+            ),
+            [
+                "NONE",
+                "DEFAULT",
+                "DROP_LEADING",
+                "DROP_MIDDLE",
+                "DROP_TRAILING",
+                "DROP_ALL",
+                "PAD",
+            ],
+        );
+
+        assert_eq!(
+            cleanup_enum_value_names(
+                "CFStringEncodings",
+                [
+                    "kCFStringEncodingMacJapanese",
+                    "kCFStringEncodingMacChineseTrad",
+                    "kCFStringEncodingMacKorean",
+                    "kCFStringEncodingMacArabic",
+                    "kCFStringEncodingMacHebrew",
+                    "kCFStringEncodingMacGreek",
+                    "kCFStringEncodingMacCyrillic",
+                ]
+                .into_iter()
+            ),
+            [
+                "MAC_JAPANESE",
+                "MAC_CHINESE_TRAD",
+                "MAC_KOREAN",
+                "MAC_ARABIC",
+                "MAC_HEBREW",
+                "MAC_GREEK",
+                "MAC_CYRILLIC",
+            ],
         );
     }
 }
