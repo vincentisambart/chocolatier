@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 // - __attribute__((cf_returns_*))
 
 #[derive(Clone, Debug, PartialEq)]
-enum Origin {
+pub(crate) enum Origin {
     ObjCCore,
     System,
     Framework(String),
@@ -386,7 +386,7 @@ fn show_tree(entity: &clang::Entity, indent_level: usize) {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
-enum Nullability {
+pub(crate) enum Nullability {
     NonNull,
     Nullable,
     Unspecified,
@@ -424,7 +424,7 @@ enum ObjPtrKind {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct ObjPtr {
+pub(crate) struct ObjPtr {
     kind: ObjPtrKind,
     nullability: Nullability,
 }
@@ -500,7 +500,7 @@ enum TagKind {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct TagRef {
+pub(crate) struct TagRef {
     id: TagId,
     kind: TagKind,
 }
@@ -584,7 +584,7 @@ impl CallableAttrs {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct CallableDesc {
+pub(crate) struct CallableDesc {
     result: Box<ObjCType>,
     params: Option<Vec<Param>>,
     is_variadic: bool,
@@ -664,7 +664,7 @@ impl CallableDesc {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct TypedefRef {
+pub(crate) struct TypedefRef {
     name: String,
 }
 
@@ -677,7 +677,7 @@ impl TypedefRef {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct Pointer {
+pub(crate) struct Pointer {
     pointee: Box<ObjCType>,
     nullability: Nullability,
 }
@@ -692,21 +692,21 @@ impl Pointer {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct Array {
+pub(crate) struct Array {
     size: Option<usize>,
     element: Box<ObjCType>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
-enum SignedOrNotInt {
+pub(crate) enum SignedOrNotInt {
     Signed(i64),
     Unsigned(u64),
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct EnumValue {
-    name: String,
-    value: SignedOrNotInt,
+pub(crate) struct EnumValue {
+    pub(crate) name: String,
+    pub(crate) value: SignedOrNotInt,
 }
 
 fn type_signedness(clang_type: &clang::Type) -> Option<Signedness> {
@@ -752,7 +752,7 @@ enum Signedness {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
-enum NumKind {
+pub(crate) enum NumKind {
     SChar,
     UChar,
     Short,
@@ -769,13 +769,13 @@ enum NumKind {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
-enum Unsupported {
+pub(crate) enum Unsupported {
     Vector,
     Unexposed,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-enum ObjCType {
+pub(crate) enum ObjCType {
     Void,
     Bool,
     Num(NumKind),
@@ -1568,9 +1568,9 @@ impl FuncDecl {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct EnumDef {
     pub(crate) id: TagId,
-    underlying: ObjCType,
-    values: Vec<EnumValue>,
-    origin: Option<Origin>,
+    pub(crate) underlying: ObjCType,
+    pub(crate) values: Vec<EnumValue>,
+    pub(crate) origin: Option<Origin>,
 }
 
 impl EnumDef {
@@ -1673,6 +1673,9 @@ fn preprocess_objc(source: &str) -> String {
     String::from_utf8_lossy(&output.stdout).to_string()
 }
 
+/// Prints the full clang AST.
+///
+/// Should only be used for debugging purpose. Definitions with cycles can end up in a stack overflow.
 pub(crate) fn print_full_clang_ast(source: &str) {
     let clang = Clang::new().expect("Could not load libclang");
 

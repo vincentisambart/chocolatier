@@ -77,6 +77,63 @@ impl TypeIndex {
     }
 }
 
+impl quote::ToTokens for ast::SignedOrNotInt {
+    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+        use ast::SignedOrNotInt;
+        use proc_macro2::Literal;
+        use quote::TokenStreamExt;
+
+        // Use unsuffixed values before SignedOrNotInt stores everything as 64-bit values even if the enum's underlying type is smaller.
+        match self {
+            SignedOrNotInt::Signed(i) => tokens.append(Literal::i64_unsuffixed(*i)),
+            SignedOrNotInt::Unsigned(u) => tokens.append(Literal::u64_unsuffixed(*u)),
+        }
+    }
+}
+
+fn generate(decls: &Vec<ast::Decl>, _index: &TypeIndex) {
+    use ast::{Decl, TagId};
+    use quote::{format_ident, quote};
+
+    for decl in decls {
+        // let streams = Vec::new();
+        match decl {
+            Decl::EnumDef(def) => {
+                let enum_name = match def.id {
+                    TagId::Named(ref name) => name,
+                    TagId::Unnamed(_) => continue,
+                };
+
+                let struct_ident = format_ident!("{}", enum_name);
+
+                let value_names =
+                    cleanup_enum_value_names(enum_name, def.values.iter().map(|value| &value.name));
+
+                let value_name_idents = value_names
+                    .iter()
+                    .map(|value_name| format_ident!("{}", value_name));
+
+                let original_value_names = def.values.iter().map(|value| &value.name);
+
+                let values = def.values.iter().map(|value| value.value);
+
+                let underlying = quote! {isize}; // TODO
+                let code = quote! {
+                    #[repr(transparent)]
+                    struct #struct_ident(#underlying);
+
+                    impl #struct_ident {
+                        #(#[doc = #original_value_names] const #value_name_idents: Self = #struct_ident(#values);)*
+                    }
+                };
+
+                println!("{}", code.to_string());
+            }
+            _ => {}
+        }
+    }
+}
+
 fn main() {
     let source = r#"
         // @interface I
@@ -86,7 +143,7 @@ fn main() {
 
         // #import <AVFoundation/AVFoundation.h>
         // #import <Cocoa/Cocoa.h>
-        #import <Foundation/NSString.h>
+        #import <Foundation/Foundation.h>
 
         // @interface I
         // @end
@@ -113,5 +170,116 @@ fn main() {
     // ast::print_full_clang_ast(source);
     // println!("{:#?}", decls);
     let index = TypeIndex::from(&decls);
-    println!("{:#?}", index);
+    // println!("{:#?}", index);
+    generate(&decls, &index);
+}
+
+fn snake_case_split(text: &str) -> Vec<String> {
+    use lazy_static::lazy_static;
+    use regex::Regex;
+
+    lazy_static! {
+        static ref LOWER_TO_UPPER_RE: Regex = Regex::new(r"([a-z])([A-Z])").unwrap();
+        static ref UPPER_TO_LOWER_RE: Regex = Regex::new(r"([A-Z])([A-Z][a-z])").unwrap();
+    }
+
+    let text = &LOWER_TO_UPPER_RE.replace_all(text, "${1}_${2}");
+    let text = UPPER_TO_LOWER_RE.replace_all(text, "${1}_${2}");
+    text.split('_').map(|s| s.to_string()).collect()
+}
+
+fn without_final_s(text: &str) -> &str {
+    if text.ends_with('s') || text.ends_with('S') {
+        &text[..text.len() - 1]
+    } else {
+        text
+    }
+}
+
+fn loosely_equal(text1: &str, text2: &str) -> bool {
+    without_final_s(text1) == without_final_s(text2)
+}
+
+fn cleanup_enum_value_names<S: AsRef<str>, Iter: Iterator<Item = S>>(
+    enum_name: &str,
+    value_names: Iter,
+) -> Vec<String> {
+    let split_enum_name = snake_case_split(enum_name);
+
+    value_names
+        .map(|value_name| {
+            let split_value_name = snake_case_split(value_name.as_ref());
+            let mut value_name_iter = split_value_name.iter().peekable();
+            if let Some(ref s) = value_name_iter.peek() {
+                if *s == &"k" {
+                    value_name_iter.next();
+                }
+            }
+            let mut split_enum_name_iter = split_enum_name.iter();
+            let name = value_name_iter
+                .skip_while(|value_name_part| match split_enum_name_iter.next() {
+                    Some(enum_name_part) => loosely_equal(value_name_part, enum_name_part),
+                    None => false,
+                })
+                .map(|word| word.to_ascii_uppercase())
+                .collect::<Vec<String>>()
+                .join("_");
+            if name.is_empty() {
+                split_value_name.last().unwrap().to_ascii_uppercase()
+            } else {
+                name
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_enum_cleanup() {
+        assert_eq!(
+            cleanup_enum_value_names(
+                "CFGregorianUnitFlags",
+                [
+                    "kCFGregorianUnitsYears",
+                    "kCFGregorianUnitsMonths",
+                    "kCFGregorianUnitsDays",
+                    "kCFGregorianAllUnits",
+                ]
+                .into_iter()
+            ),
+            ["YEARS", "MONTHS", "DAYS", "ALL_UNITS"],
+        );
+
+        assert_eq!(
+            cleanup_enum_value_names(
+                "NSQualityOfService",
+                [
+                    "NSQualityOfServiceUserInteractive",
+                    "NSQualityOfServiceUserInitiated",
+                    "NSQualityOfServiceUtility",
+                    "NSQualityOfServiceBackground",
+                    "NSQualityOfServiceDefault",
+                ]
+                .into_iter()
+            ),
+            [
+                "USER_INTERACTIVE",
+                "USER_INITIATED",
+                "UTILITY",
+                "BACKGROUND",
+                "DEFAULT",
+            ],
+        );
+
+        assert_eq!(
+            cleanup_enum_value_names(
+                "CFSocketError",
+                ["kCFSocketSuccess", "kCFSocketError", "kCFSocketTimeout",].into_iter()
+            ),
+            ["SUCCESS", "ERROR", "TIMEOUT",],
+        );
+    }
 }
