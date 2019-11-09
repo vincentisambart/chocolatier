@@ -666,7 +666,7 @@ impl CallableDesc {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct TypedefRef {
-    name: String,
+    pub(crate) name: String,
 }
 
 impl TypedefRef {

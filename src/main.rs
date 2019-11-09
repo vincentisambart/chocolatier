@@ -91,6 +91,36 @@ impl quote::ToTokens for ast::SignedOrNotInt {
     }
 }
 
+fn rust_type_name_for_enum_underlying(underlying: &ast::ObjCType) -> &'static str {
+    use ast::{NumKind, ObjCType};
+
+    match underlying {
+        ObjCType::Typedef(typedef) => {
+            match typedef.name.as_ref() {
+                "CFIndex" | "NSInteger" => "isize",
+                "CFOptionFlags" | "NSUInteger" => "usize",
+                "CFStringEncoding" => "u32", // TODO: Should be probably handled differently
+                "OSStatus" | "SInt32" | "int32_t" => "i32",
+                "int8_t" => "i8",
+                "uint16" | "uint16_t" => "u16",
+                "FourCharCode" | "OSType" | "OptionBits" | "UInt32" | "uint32" | "uint32_t" => {
+                    "u32"
+                }
+                "uint64_t" => "u64",
+                "uint8_t" => "u8",
+                name => unimplemented!("unsupported typedef {:#?}", name),
+            }
+        }
+        ObjCType::Num(kind) => match kind {
+            NumKind::Int => "i32",
+            NumKind::UInt => "u32",
+            NumKind::ULongLong => "u64",
+            kind => unimplemented!("unsupported numeric type {:?}", kind),
+        },
+        _ => unimplemented!("unsupported type {:#?}", underlying),
+    }
+}
+
 fn generate(decls: &Vec<ast::Decl>, _index: &TypeIndex) {
     use ast::{Decl, TagId};
     use quote::{format_ident, quote};
@@ -122,7 +152,8 @@ fn generate(decls: &Vec<ast::Decl>, _index: &TypeIndex) {
 
                 let values = def.values.iter().map(|value| value.value);
 
-                let underlying = quote! {isize}; // TODO
+                let underlying =
+                    format_ident!("{}", rust_type_name_for_enum_underlying(&def.underlying));
                 let code = quote! {
                     #[repr(transparent)]
                     struct #struct_ident(#underlying);
