@@ -19,6 +19,7 @@ use std::collections::{HashMap, HashSet};
 // - __attribute__((NSObject)), __attribute__/objc_bridge_mutable((objc_bridge*))
 // - __attribute__((ns_consumes_self)) (implicit on all init)
 // - __attribute__((cf_returns_*))
+// - ignore enum values with a better named replacement (for example in NSCalendarUnit)
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Origin {
