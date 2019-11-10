@@ -199,9 +199,10 @@ fn generate(decls: &Vec<ast::Decl>, index: &TypeIndex) {
                 let value_names =
                     cleanup_enum_value_names(enum_name, def.values.iter().map(|value| &value.name));
 
-                let value_name_idents = value_names
+                let value_name_idents: Vec<_> = value_names
                     .iter()
-                    .map(|value_name| format_ident!("{}", value_name));
+                    .map(|value_name| format_ident!("{}", value_name))
+                    .collect();
 
                 let original_value_names = def.values.iter().map(|value| &value.name);
 
@@ -211,12 +212,23 @@ fn generate(decls: &Vec<ast::Decl>, index: &TypeIndex) {
                     "{}",
                     rust_type_name_for_enum_underlying(&def.underlying, index)
                 );
+                let debug_default = format!("{}({{}})", enum_name);
                 let code = quote! {
                     #[repr(transparent)]
+                    #[derive(Copy, Clone, PartialEq, Eq)]
                     struct #struct_ident(#underlying);
 
                     impl #struct_ident {
                         #(#[doc = #original_value_names] const #value_name_idents: Self = #struct_ident(#values);)*
+                    }
+
+                    impl std::fmt::Debug for #struct_ident {
+                        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                            match *self {
+                                #(#struct_ident::#value_name_idents => f.write_str(#value_names),)*
+                                _ => write!(f, #debug_default, self.0),
+                            }
+                        }
                     }
                 };
 
