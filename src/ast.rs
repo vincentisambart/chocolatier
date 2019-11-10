@@ -1473,8 +1473,8 @@ impl ProtocolDef {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct TypedefDecl {
     pub(crate) name: String,
-    underlying: ObjCType,
-    origin: Option<Origin>,
+    pub(crate) underlying: ObjCType,
+    pub(crate) origin: Option<Origin>,
 }
 
 impl TypedefDecl {

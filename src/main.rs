@@ -91,29 +91,82 @@ impl quote::ToTokens for ast::SignedOrNotInt {
     }
 }
 
-fn rust_type_name_for_enum_underlying(underlying: &ast::ObjCType) -> &'static str {
+fn rust_type_name_for_fixed_int(name: &str) -> Option<&'static str> {
+    use lazy_static::lazy_static;
+    use regex::Regex;
+
+    lazy_static! {
+        static ref FIXED_SIZE_INT_RE: Regex = Regex::new(r"(?i)\A([us]?)int([0-9]+)").unwrap();
+    }
+    match FIXED_SIZE_INT_RE.captures(name) {
+        Some(cap) => {
+            let signed = match &cap[1] {
+                "U" | "u" => false,
+                "S" | "s" | "" => true,
+                _ => unreachable!(),
+            };
+            Some(match &cap[2] {
+                "8" => {
+                    if signed {
+                        "i8"
+                    } else {
+                        "u8"
+                    }
+                }
+                "16" => {
+                    if signed {
+                        "i16"
+                    } else {
+                        "u16"
+                    }
+                }
+                "32" => {
+                    if signed {
+                        "i32"
+                    } else {
+                        "u32"
+                    }
+                }
+                "64" => {
+                    if signed {
+                        "i64"
+                    } else {
+                        "u64"
+                    }
+                }
+                _ => unimplemented!("unrecognized fixed in type {}", name),
+            })
+        }
+        None => None,
+    }
+}
+
+// TODO: Maybe special handling for CFStringEncoding.
+fn rust_type_name_for_enum_underlying(
+    underlying: &ast::ObjCType,
+    index: &TypeIndex,
+) -> &'static str {
     use ast::{NumKind, ObjCType};
 
     match underlying {
-        ObjCType::Typedef(typedef) => {
-            match typedef.name.as_ref() {
-                "CFIndex" | "NSInteger" => "isize",
-                "CFOptionFlags" | "NSUInteger" => "usize",
-                "CFStringEncoding" => "u32", // TODO: Should be probably handled differently
-                "OSStatus" | "SInt32" | "int32_t" => "i32",
-                "int8_t" => "i8",
-                "uint16" | "uint16_t" => "u16",
-                "FourCharCode" | "OSType" | "OptionBits" | "UInt32" | "uint32" | "uint32_t" => {
-                    "u32"
-                }
-                "uint64_t" => "u64",
-                "uint8_t" => "u8",
-                name => unimplemented!("unsupported typedef {:#?}", name),
+        ObjCType::Typedef(typedef) => match rust_type_name_for_fixed_int(&typedef.name) {
+            Some(name) => name,
+            None => {
+                let objc_type = &index.typedefs[&typedef.name].underlying;
+                rust_type_name_for_enum_underlying(&objc_type, index)
             }
-        }
+        },
+        // There are platforms the following is not true (long is 32-bit on Windows), but that should be true on all Apple platforms.
         ObjCType::Num(kind) => match kind {
+            NumKind::SChar => "i8",
+            NumKind::UChar => "u8",
             NumKind::Int => "i32",
             NumKind::UInt => "u32",
+            NumKind::Long => "isize",
+            NumKind::ULong => "usize",
+            NumKind::Short => "i16",
+            NumKind::UShort => "u16",
+            NumKind::LongLong => "i64",
             NumKind::ULongLong => "u64",
             kind => unimplemented!("unsupported numeric type {:?}", kind),
         },
@@ -121,7 +174,7 @@ fn rust_type_name_for_enum_underlying(underlying: &ast::ObjCType) -> &'static st
     }
 }
 
-fn generate(decls: &Vec<ast::Decl>, _index: &TypeIndex) {
+fn generate(decls: &Vec<ast::Decl>, index: &TypeIndex) {
     use ast::{Decl, TagId};
     use quote::{format_ident, quote};
 
@@ -152,8 +205,10 @@ fn generate(decls: &Vec<ast::Decl>, _index: &TypeIndex) {
 
                 let values = def.values.iter().map(|value| value.value);
 
-                let underlying =
-                    format_ident!("{}", rust_type_name_for_enum_underlying(&def.underlying));
+                let underlying = format_ident!(
+                    "{}",
+                    rust_type_name_for_enum_underlying(&def.underlying, index)
+                );
                 let code = quote! {
                     #[repr(transparent)]
                     struct #struct_ident(#underlying);
@@ -434,5 +489,18 @@ mod tests {
                 "MAC_CYRILLIC",
             ],
         );
+    }
+
+    #[test]
+    fn test_rust_type_name_for_fixed_int() {
+        assert_eq!(rust_type_name_for_fixed_int("int8_t"), Some("i8"));
+        assert_eq!(rust_type_name_for_fixed_int("uint16"), Some("u16"));
+        assert_eq!(rust_type_name_for_fixed_int("uint16_t"), Some("u16"));
+        assert_eq!(rust_type_name_for_fixed_int("SInt32"), Some("i32"));
+        assert_eq!(rust_type_name_for_fixed_int("int32_t"), Some("i32"));
+        assert_eq!(rust_type_name_for_fixed_int("UInt32"), Some("u32"));
+        assert_eq!(rust_type_name_for_fixed_int("uint32"), Some("u32"));
+        assert_eq!(rust_type_name_for_fixed_int("uint32_t"), Some("u32"));
+        assert_eq!(rust_type_name_for_fixed_int("uint64_t"), Some("u64"));
     }
 }
