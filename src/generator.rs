@@ -175,19 +175,25 @@ fn rust_type_name_for_enum_underlying(
 struct OutputHandler {
     src_dir: std::path::PathBuf,
     files: HashMap<String, std::fs::File>,
+    main_file: std::fs::File,
 }
 
 impl OutputHandler {
     fn new() -> Self {
-        use std::fs::DirBuilder;
+        use std::fs::{DirBuilder, File};
 
         let generated_dir = std::path::Path::new("generated");
         let src_dir = generated_dir.join("src").to_path_buf();
         let files = HashMap::new();
 
         DirBuilder::new().recursive(true).create(&src_dir).unwrap();
+        let main_file = File::create(src_dir.join("main.rs")).unwrap();
 
-        OutputHandler { src_dir, files }
+        OutputHandler {
+            src_dir,
+            files,
+            main_file,
+        }
     }
 
     fn mod_file(&mut self, module: &str) -> &std::fs::File {
@@ -306,12 +312,8 @@ impl Generator {
             }
         }
 
-        let main = self.output_handler.mod_file("main").try_clone().unwrap();
         for name in self.output_handler.files.keys() {
-            if name == "main" {
-                continue;
-            }
-            write!(&main, "mod {};\n", name).unwrap();
+            write!(&self.output_handler.main_file, "mod {};\n", name).unwrap();
         }
     }
 }
