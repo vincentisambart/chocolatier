@@ -190,20 +190,17 @@ impl OutputHandler {
         OutputHandler { src_dir, files }
     }
 
-    fn mod_file(&mut self, module: &str) -> std::fs::File {
+    fn mod_file(&mut self, module: &str) -> &std::fs::File {
         use std::fs::File;
 
-        if let Some(file) = self.files.get(module) {
-            file.try_clone().unwrap()
-        } else {
+        if !self.files.contains_key(module) {
             let file = File::create(self.src_dir.join(module).with_extension("rs")).unwrap();
-            self.files
-                .insert(module.to_string(), file.try_clone().unwrap());
-            file
+            self.files.insert(module.to_string(), file);
         }
+        &self.files[module]
     }
 
-    fn file_for(&mut self, origin: &ast::Origin) -> std::fs::File {
+    fn file_for(&mut self, origin: &ast::Origin) -> &std::fs::File {
         use ast::Origin;
 
         match origin {
@@ -304,12 +301,12 @@ impl Generator {
             };
             if let Some((origin, code)) = gen {
                 let origin = origin.as_ref().unwrap();
-                let file = self.output_handler.file_for(origin);
-                write!(&file, "{}\n\n", code).unwrap();
+                let mut file = self.output_handler.file_for(origin);
+                write!(file, "{}\n\n", code).unwrap();
             }
         }
 
-        let main = self.output_handler.mod_file("main");
+        let main = self.output_handler.mod_file("main").try_clone().unwrap();
         for name in self.output_handler.files.keys() {
             if name == "main" {
                 continue;
