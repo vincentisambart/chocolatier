@@ -313,7 +313,7 @@ impl Generator {
         }
 
         for name in self.output_handler.files.keys() {
-            write!(&self.output_handler.main_file, "mod {};\n", name).unwrap();
+            writeln!(&self.output_handler.main_file, "mod {};", name).unwrap();
         }
     }
 }
