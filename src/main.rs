@@ -156,22 +156,23 @@ fn rust_type_name_for_enum_underlying(
                 rust_type_name_for_enum_underlying(&objc_type, index)
             }
         },
-        // There are platforms the following is not true (long is 32-bit on Windows), but that should be true on all Apple platforms.
-        ObjCType::Num(kind) => {
-            match kind {
-                NumKind::SChar => "i8",
-                NumKind::UChar => "u8",
-                NumKind::Int => "i32",
-                NumKind::UInt => "u32",
-                NumKind::Long => "isize",
-                NumKind::ULong => "usize",
-                NumKind::Short => "i16",
-                NumKind::UShort => "u16",
-                NumKind::LongLong => "i64",
-                NumKind::ULongLong => "u64",
-                kind => unimplemented!("unsupported numeric type {:?}", kind),
+        // There are platforms the following is not true (long is 32-bit on Windows),
+        // but that should be true on all Apple platforms.
+        ObjCType::Num(kind) => match kind {
+            NumKind::SChar => "i8",
+            NumKind::UChar => "u8",
+            NumKind::Int => "i32",
+            NumKind::UInt => "u32",
+            NumKind::Long => "isize",
+            NumKind::ULong => "usize",
+            NumKind::Short => "i16",
+            NumKind::UShort => "u16",
+            NumKind::LongLong => "i64",
+            NumKind::ULongLong => "u64",
+            NumKind::Float | NumKind::Double | NumKind::LongDouble => {
+                panic!("enums should not use floating point as underlying type")
             }
-        }
+        },
         _ => unimplemented!("unsupported type {:#?}", underlying),
     }
 }
