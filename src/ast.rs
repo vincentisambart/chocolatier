@@ -568,6 +568,7 @@ struct Param {
 bitflags! {
     struct CallableAttrs: u8 {
         const RETURNS_RETAINED = 0b0000_0001;
+        const UNAVAILABLE = 0b0000_0010;
     }
 }
 
@@ -577,6 +578,14 @@ impl CallableAttrs {
         for child in decl.get_children() {
             match child.get_kind() {
                 EntityKind::NSReturnsRetained => attrs.insert(Self::RETURNS_RETAINED),
+                EntityKind::UnexposedAttr => {
+                    if let Some(range) = child.get_range() {
+                        let tokens = range.tokenize();
+                        if tokens[0].get_spelling() == "unavailable" {
+                            attrs.insert(Self::UNAVAILABLE);
+                        }
+                    }
+                }
                 _ => (),
             }
         }
@@ -2939,12 +2948,13 @@ mod tests {
     #[test]
     fn test_return_attributes() {
         // NSLog seems to be already known by the compiler so handled a bit differently by it.
-        let source = "
+        let source = r#"
             @interface I
             - (id)methodWithRetainedReturn __attribute__((__ns_returns_retained__));
+            - (void)unavailableMethod __attribute__((unavailable("not available in automatic reference counting mode")));
             @end
             __attribute__((ns_returns_retained)) id function_with_retained_return(void);
-        ";
+        "#;
 
         let expected_decls = vec![
             Decl::InterfaceDef(InterfaceDef {
@@ -2952,16 +2962,25 @@ mod tests {
                 superclass: None,
                 adopted_protocols: vec![],
                 template_params: vec![],
-                methods: vec![ObjCMethod {
-                    name: "methodWithRetainedReturn".to_string(),
-                    kind: ObjCMethodKind::Instance,
-                    params: vec![],
-                    result: ObjCType::ObjPtr(ObjPtr {
-                        kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
-                        nullability: Nullability::Unspecified,
-                    }),
-                    attrs: CallableAttrs::RETURNS_RETAINED,
-                }],
+                methods: vec![
+                    ObjCMethod {
+                        name: "methodWithRetainedReturn".to_string(),
+                        kind: ObjCMethodKind::Instance,
+                        params: vec![],
+                        result: ObjCType::ObjPtr(ObjPtr {
+                            kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
+                            nullability: Nullability::Unspecified,
+                        }),
+                        attrs: CallableAttrs::RETURNS_RETAINED,
+                    },
+                    ObjCMethod {
+                        name: "unavailableMethod".to_string(),
+                        kind: ObjCMethodKind::Instance,
+                        params: vec![],
+                        result: ObjCType::Void,
+                        attrs: CallableAttrs::UNAVAILABLE,
+                    },
+                ],
                 properties: vec![],
                 origin: None,
             }),

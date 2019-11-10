@@ -141,7 +141,7 @@ fn rust_type_name_for_fixed_int(name: &str) -> Option<&'static str> {
     }
 }
 
-// TODO: Special handling for CFStringEncoding, NSStringEncoding...
+// TODO: Special handling for CFStringEncoding, NSStringEncoding, SSLCipherSuite, ExtAudioFilePropertyID, NSTextCheckingTypes...
 fn rust_type_name_for_enum_underlying(
     underlying: &ast::ObjCType,
     index: &TypeIndex,
@@ -185,6 +185,8 @@ fn generate(decls: &Vec<ast::Decl>, index: &TypeIndex) {
         // let streams = Vec::new();
         match decl {
             Decl::EnumDef(def) => {
+                // TODO: We should only generate code for enums that are used in the generated code.
+
                 let enum_name = match def.id {
                     TagId::Named(ref name) => name,
                     TagId::Unnamed(_) => continue,
