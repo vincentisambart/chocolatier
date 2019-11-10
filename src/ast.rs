@@ -36,7 +36,7 @@ impl Origin {
 
         lazy_static! {
             static ref FRAMEWORK_PATH_RE: Regex =
-                Regex::new(r"/([^./]+)\.framework/Headers/[^./]+.h\z").unwrap();
+                Regex::new(r"/([^./]+)\.framework/Headers/.+.h\z").unwrap();
         }
         if let Some(caps) = FRAMEWORK_PATH_RE.captures(path) {
             let framework = caps.get(1).unwrap().as_str().to_owned();
@@ -1887,6 +1887,10 @@ mod tests {
         assert_eq!(
             Origin::from_path("/usr/include/sys/_types/_wchar_t.h"),
             Some(Origin::System)
+        );
+        assert_eq!(
+            Origin::from_path("/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/IOKit.framework/Headers/graphics/IOGraphicsTypes.h"),
+            Some(Origin::Framework("IOKit".to_owned())),
         );
 
         let source = r#"

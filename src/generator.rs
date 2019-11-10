@@ -172,40 +172,81 @@ fn rust_type_name_for_enum_underlying(
     }
 }
 
+struct OutputHandler {
+    src_dir: std::path::PathBuf,
+    files: HashMap<String, std::fs::File>,
+}
+
+impl OutputHandler {
+    fn new() -> Self {
+        use std::fs::DirBuilder;
+
+        let generated_dir = std::path::Path::new("generated");
+        let src_dir = generated_dir.join("src").to_path_buf();
+        let files = HashMap::new();
+
+        DirBuilder::new().recursive(true).create(&src_dir).unwrap();
+
+        OutputHandler { src_dir, files }
+    }
+
+    fn mod_file(&mut self, module: &str) -> std::fs::File {
+        use std::fs::File;
+
+        if let Some(file) = self.files.get(module) {
+            file.try_clone().unwrap()
+        } else {
+            let file = File::create(self.src_dir.join(module).with_extension("rs")).unwrap();
+            self.files
+                .insert(module.to_string(), file.try_clone().unwrap());
+            file
+        }
+    }
+
+    fn file_for(&mut self, origin: &ast::Origin) -> std::fs::File {
+        use ast::Origin;
+
+        match origin {
+            Origin::ObjCCore | Origin::System => self.mod_file("core"),
+            Origin::Framework(framework) => {
+                let mod_name = snake_case_split(framework).join("_").to_ascii_lowercase();
+                self.mod_file(&mod_name)
+            }
+            Origin::Library(lib) => self.mod_file(&lib.trim_start_matches("lib")),
+        }
+    }
+}
+
 pub(crate) struct Generator {
     index: TypeIndex,
     decls: Vec<ast::Decl>,
-    files: HashMap<String, std::fs::File>,
-    src_dir: std::path::PathBuf,
+    output_handler: OutputHandler,
 }
 
 impl Generator {
     pub(crate) fn new(decls: Vec<ast::Decl>) -> Self {
         let index = TypeIndex::from(&decls);
-        let files = HashMap::new();
-        let generated_dir = std::path::Path::new("generated");
-        let src_dir = generated_dir.join("src").to_path_buf();
+        let output_handler = OutputHandler::new();
         Generator {
             index,
             decls,
-            files,
-            src_dir,
+            output_handler,
         }
     }
 
-    fn generate_enum(&self, def: &ast::EnumDef) {
+    fn generate_enum(&self, def: &ast::EnumDef) -> Option<String> {
         use ast::TagId;
 
         // TODO: We should only generate code for enums that are used in the generated code.
 
         let enum_name = match def.id {
             TagId::Named(ref name) => name,
-            TagId::Unnamed(_) => return,
+            TagId::Unnamed(_) => return None,
         };
 
         // Enums with names starting with an underscore are probably private.
         if enum_name.starts_with('_') {
-            return;
+            return None;
         }
 
         let struct_ident = format_ident!("{}", enum_name);
@@ -246,40 +287,34 @@ impl Generator {
             }
         };
 
-        println!("{}", code.to_string());
-    }
-
-    fn mod_file(&mut self, module: &str) -> std::fs::File {
-        use std::fs::File;
-
-        if let Some(file) = self.files.get(module) {
-            file.try_clone().unwrap()
-        } else {
-            let file = File::create(self.src_dir.join(module).with_extension("rs")).unwrap();
-            self.files
-                .insert(module.to_string(), file.try_clone().unwrap());
-            file
-        }
+        Some(code.to_string())
     }
 
     pub(crate) fn generate(&mut self) {
         use ast::Decl;
-        use std::fs::DirBuilder;
+        use std::io::Write;
 
-        DirBuilder::new()
-            .recursive(true)
-            .create(&self.src_dir)
-            .unwrap();
-
-        self.mod_file("main");
-        self.mod_file("core");
+        self.output_handler.mod_file("core");
 
         for decl in &self.decls {
             // let streams = Vec::new();
-            match decl {
-                Decl::EnumDef(def) => self.generate_enum(&def),
-                _ => {}
+            let gen = match decl {
+                Decl::EnumDef(def) => self.generate_enum(&def).map(|code| (&def.origin, code)),
+                _ => None,
+            };
+            if let Some((origin, code)) = gen {
+                let origin = origin.as_ref().unwrap();
+                let file = self.output_handler.file_for(origin);
+                write!(&file, "{}\n\n", code).unwrap();
             }
+        }
+
+        let main = self.output_handler.mod_file("main");
+        for name in self.output_handler.files.keys() {
+            if name == "main" {
+                continue;
+            }
+            write!(&main, "mod {};\n", name).unwrap();
         }
     }
 }
