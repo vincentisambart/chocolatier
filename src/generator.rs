@@ -15,7 +15,7 @@ struct TypeIndex {
 }
 
 impl TypeIndex {
-    fn from(decls: &Vec<ast::Decl>) -> Self {
+    fn from(decls: &[ast::Decl]) -> Self {
         use ast::{Decl, RecordKind};
 
         let mut enums = HashMap::new();
@@ -36,9 +36,7 @@ impl TypeIndex {
                     interfaces.insert(def.name.clone(), def.clone());
                 }
                 Decl::CategoryDef(def) => {
-                    let vec = categories
-                        .entry(def.class.clone())
-                        .or_insert_with(|| Vec::new());
+                    let vec = categories.entry(def.class.clone()).or_insert_with(Vec::new);
                     vec.push(def.clone());
                 }
                 Decl::RecordDef(def) => match def.kind {
@@ -177,12 +175,22 @@ fn rust_type_name_for_enum_underlying(
 pub(crate) struct Generator {
     index: TypeIndex,
     decls: Vec<ast::Decl>,
+    files: HashMap<String, std::fs::File>,
+    src_dir: std::path::PathBuf,
 }
 
 impl Generator {
     pub(crate) fn new(decls: Vec<ast::Decl>) -> Self {
         let index = TypeIndex::from(&decls);
-        Generator { index, decls }
+        let files = HashMap::new();
+        let generated_dir = std::path::Path::new("generated");
+        let src_dir = generated_dir.join("src").to_path_buf();
+        Generator {
+            index,
+            decls,
+            files,
+            src_dir,
+        }
     }
 
     fn generate_enum(&self, def: &ast::EnumDef) {
@@ -241,8 +249,30 @@ impl Generator {
         println!("{}", code.to_string());
     }
 
-    pub(crate) fn generate(&self) {
+    fn mod_file(&mut self, module: &str) -> std::fs::File {
+        use std::fs::File;
+
+        if let Some(file) = self.files.get(module) {
+            file.try_clone().unwrap()
+        } else {
+            let file = File::create(self.src_dir.join(module).with_extension("rs")).unwrap();
+            self.files
+                .insert(module.to_string(), file.try_clone().unwrap());
+            file
+        }
+    }
+
+    pub(crate) fn generate(&mut self) {
         use ast::Decl;
+        use std::fs::DirBuilder;
+
+        DirBuilder::new()
+            .recursive(true)
+            .create(&self.src_dir)
+            .unwrap();
+
+        self.mod_file("main");
+        self.mod_file("core");
 
         for decl in &self.decls {
             // let streams = Vec::new();

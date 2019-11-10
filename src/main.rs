@@ -40,6 +40,6 @@ fn main() {
     // ast::print_full_clang_ast(source);
     // println!("{:#?}", decls);
     // println!("{:#?}", index);
-    let generator = generator::Generator::new(decls);
+    let mut generator = generator::Generator::new(decls);
     generator.generate();
 }
