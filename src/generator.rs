@@ -1,6 +1,28 @@
 use crate::ast;
 use quote::{format_ident, quote};
+use std::borrow::Cow;
 use std::collections::HashMap;
+
+const BASE_OBJC_TRAIT: &'static str = "ObjCPtr";
+const CORE_MODULE: &'static str = "core";
+
+trait OriginExt {
+    fn module_name(&self) -> Cow<str>;
+}
+
+impl OriginExt for ast::Origin {
+    fn module_name(&self) -> Cow<str> {
+        use ast::Origin;
+        match self {
+            Origin::ObjCCore | Origin::System => CORE_MODULE.into(),
+            Origin::Framework(framework) => snake_case_split(framework)
+                .join("_")
+                .to_ascii_lowercase()
+                .into(),
+            Origin::Library(lib) => lib.trim_start_matches("lib").into(),
+        }
+    }
+}
 
 #[derive(Debug)]
 struct TypeIndex {
@@ -69,6 +91,22 @@ impl TypeIndex {
             categories,
             functions,
         }
+    }
+
+    fn protocol_mod(&self, protocol: &str) -> Cow<str> {
+        self.protocols[protocol]
+            .origin
+            .as_ref()
+            .unwrap()
+            .module_name()
+    }
+
+    fn interface_mod(&self, protocol: &str) -> Cow<str> {
+        self.interfaces[protocol]
+            .origin
+            .as_ref()
+            .unwrap()
+            .module_name()
     }
 }
 
@@ -188,7 +226,7 @@ impl OutputHandler {
 
         DirBuilder::new().recursive(true).create(&src_dir).unwrap();
         let main_file = File::create(src_dir.join("lib.rs")).unwrap();
-        Self::write_header(&main_file);
+        Self::write_start_comment(&main_file);
 
         OutputHandler {
             src_dir,
@@ -197,7 +235,7 @@ impl OutputHandler {
         }
     }
 
-    fn write_header(file: &std::fs::File) {
+    fn write_start_comment(file: &std::fs::File) {
         use std::io::Write;
         writeln!(
             &*file,
@@ -210,26 +248,23 @@ impl OutputHandler {
 
     fn mod_file(&mut self, module: &str) -> &std::fs::File {
         use std::fs::File;
+        use std::io::Write;
 
         if !self.files.contains_key(module) {
             let file = File::create(self.src_dir.join(module).with_extension("rs")).unwrap();
-            Self::write_header(&file);
+            Self::write_start_comment(&file);
+
+            if module != CORE_MODULE {
+                writeln!(&file, "use crate::core::Object;").unwrap();
+            }
+            writeln!(&file).unwrap();
             self.files.insert(module.to_string(), file);
         }
         &self.files[module]
     }
 
     fn file_for(&mut self, origin: &ast::Origin) -> &std::fs::File {
-        use ast::Origin;
-
-        match origin {
-            Origin::ObjCCore | Origin::System => self.mod_file("core"),
-            Origin::Framework(framework) => {
-                let mod_name = snake_case_split(framework).join("_").to_ascii_lowercase();
-                self.mod_file(&mod_name)
-            }
-            Origin::Library(lib) => self.mod_file(&lib.trim_start_matches("lib")),
-        }
+        self.mod_file(&origin.module_name())
     }
 }
 
@@ -237,6 +272,26 @@ pub(crate) struct Generator {
     index: TypeIndex,
     decls: Vec<ast::Decl>,
     output_handler: OutputHandler,
+}
+
+fn make_ident(name: &str) -> proc_macro2::Ident {
+    format_ident!("{}", name)
+}
+
+fn protocol_trait_name(protocol_name: &str) -> String {
+    format!("{}Protocol", protocol_name)
+}
+
+fn protocol_trait_ident(protocol_name: &str) -> proc_macro2::Ident {
+    format_ident!("{}Protocol", protocol_name)
+}
+
+fn interface_trait_name(class_name: &str) -> String {
+    format!("{}Interface", class_name)
+}
+
+fn interface_trait_ident(class_name: &str) -> proc_macro2::Ident {
+    format_ident!("{}Interface", class_name)
 }
 
 impl Generator {
@@ -248,6 +303,123 @@ impl Generator {
             decls,
             output_handler,
         }
+    }
+
+    fn generate_protocol(&self, def: &ast::ProtocolDef) -> Option<String> {
+        let trait_ident = protocol_trait_ident(&def.name);
+        let mut inherited_trait_idents: Vec<_> = def
+            .inherited_protocols
+            .iter()
+            .map(|name| protocol_trait_ident(name))
+            .collect();
+        let mut inherited_trait_mod_idents: Vec<_> = def
+            .inherited_protocols
+            .iter()
+            .map(|name| self.index.protocol_mod(name))
+            .map(|protoc| make_ident(&protoc))
+            .collect();
+
+        if inherited_trait_idents.is_empty() {
+            inherited_trait_idents.push(make_ident(BASE_OBJC_TRAIT));
+            inherited_trait_mod_idents.push(make_ident(CORE_MODULE));
+        }
+
+        let code = quote! {
+            pub trait #trait_ident: #(crate::#inherited_trait_mod_idents::#inherited_trait_idents)+* {}
+        };
+        Some(code.to_string())
+    }
+
+    fn generate_class(&self, def: &ast::InterfaceDef) -> Option<String> {
+        let base_objc_trait_ident = make_ident(BASE_OBJC_TRAIT);
+        let core_mod_ident = make_ident(CORE_MODULE);
+        let struct_ident = make_ident(&def.name);
+        let trait_ident = interface_trait_ident(&def.name);
+        let mut inherited_trait_idents = Vec::new();
+        let mut inherited_trait_mod_idents = Vec::new();
+        if let Some(ref superclass) = def.superclass {
+            inherited_trait_idents.push(interface_trait_ident(&superclass));
+            inherited_trait_mod_idents.push(make_ident(&self.index.interface_mod(&superclass)));
+        }
+        for protocol in &def.adopted_protocols {
+            inherited_trait_idents.push(protocol_trait_ident(&protocol));
+            inherited_trait_mod_idents.push(make_ident(&self.index.protocol_mod(&protocol)));
+        }
+        if inherited_trait_idents.is_empty() {
+            inherited_trait_idents.push(make_ident(BASE_OBJC_TRAIT));
+            inherited_trait_mod_idents.push(make_ident(CORE_MODULE));
+        }
+
+        let mut code = quote! {};
+
+        code.extend(quote! {
+            pub trait #trait_ident: #(crate::#inherited_trait_mod_idents::#inherited_trait_idents)+* {}
+
+            pub struct #struct_ident {
+                raw: std::ptr::NonNull<Object>,
+            }
+
+            impl crate::#core_mod_ident::#base_objc_trait_ident for #struct_ident {
+                unsafe fn from_raw_unchecked(raw: std::ptr::NonNull<Object>) -> Self {
+                    #struct_ident { raw }
+                }
+
+                fn as_raw(&self) -> std::ptr::NonNull<Object> {
+                    self.raw
+                }
+            }
+        });
+
+        let mut unprocessed_adopted_protocols: Vec<&str> = Vec::new();
+        Extend::<&str>::extend(
+            &mut unprocessed_adopted_protocols,
+            def.adopted_protocols.iter().map(|name| name.as_ref()),
+        );
+
+        {
+            let mut current_def = def;
+            while let Some(ref superclass) = current_def.superclass {
+                let superclass_trait_ident = interface_trait_ident(superclass);
+                let superclass_mod_ident = make_ident(&self.index.interface_mod(superclass));
+                code.extend(quote! {
+                    impl crate::#superclass_mod_ident::#superclass_trait_ident for #struct_ident {}
+                });
+                current_def = &self.index.interfaces[superclass];
+                Extend::<&str>::extend(
+                    &mut unprocessed_adopted_protocols,
+                    current_def
+                        .adopted_protocols
+                        .iter()
+                        .map(|name| name.as_ref()),
+                );
+            }
+        }
+
+        let mut adopted_protocols: Vec<&str> = Vec::new();
+        while let Some(protocol_name) = unprocessed_adopted_protocols.pop() {
+            if adopted_protocols.contains(&protocol_name) {
+                continue;
+            }
+            adopted_protocols.push(protocol_name);
+            let protocol_def = &self.index.protocols[protocol_name];
+            Extend::<&str>::extend(
+                &mut unprocessed_adopted_protocols,
+                protocol_def
+                    .inherited_protocols
+                    .iter()
+                    .map(|name| name.as_ref()),
+            );
+        }
+        for protocol in adopted_protocols {
+            let trait_ident = protocol_trait_ident(protocol);
+            let mod_ident = make_ident(&self.index.protocol_mod(protocol));
+
+            code.extend(quote! {
+                impl crate::#mod_ident::#trait_ident for #struct_ident {}
+            });
+        }
+
+        Some(code.to_string())
     }
 
     fn generate_enum(&self, def: &ast::EnumDef) -> Option<String> {
@@ -287,7 +459,7 @@ impl Generator {
         let code = quote! {
             #[repr(transparent)]
             #[derive(Copy, Clone, PartialEq, Eq)]
-            struct #struct_ident(#underlying);
+            pub struct #struct_ident(#underlying);
 
             impl #struct_ident {
                 #(#[doc = #original_value_names] const #value_name_idents: Self = #struct_ident(#values);)*
@@ -306,16 +478,51 @@ impl Generator {
         Some(code.to_string())
     }
 
+    fn generate_core_base_code(&mut self) {
+        use std::io::Write;
+
+        let core = self.output_handler.mod_file(CORE_MODULE);
+
+        let base_objc_trait_ident = format_ident!("{}", BASE_OBJC_TRAIT);
+        let code = quote! {
+            #[repr(C)]
+            pub struct Object {
+                _private: [u8; 0],
+            }
+
+            #[doc = "ARC runtime support - https://clang.llvm.org/docs/AutomaticReferenceCounting.html#runtime-support"]
+            #[link(name = "objc", kind = "dylib")]
+            extern "C" {
+                fn objc_autoreleasePoolPush() -> *const std::ffi::c_void;
+                fn objc_autoreleasePoolPop(pool: *const std::ffi::c_void);
+                fn objc_release(value: *mut Object);
+                fn objc_retain(value: *mut Object) -> *mut Object;
+            }
+
+            pub trait #base_objc_trait_ident: Sized {
+                unsafe fn from_raw_unchecked(ptr: std::ptr::NonNull<Object>) -> Self;
+                fn as_raw(&self) -> std::ptr::NonNull<Object>;
+            }
+        };
+        writeln!(&*core, "{}", code.to_string()).unwrap();
+    }
+
     pub(crate) fn generate(&mut self) {
         use ast::Decl;
         use std::io::Write;
 
-        self.output_handler.mod_file("core");
+        self.generate_core_base_code();
 
         for decl in &self.decls {
-            // let streams = Vec::new();
             let gen = match decl {
                 Decl::EnumDef(def) => self.generate_enum(&def).map(|code| (&def.origin, code)),
+                Decl::ProtocolDef(def) => {
+                    self.generate_protocol(&def).map(|code| (&def.origin, code))
+                }
+                Decl::InterfaceDef(def) => {
+                    self.generate_class(&def).map(|code| (&def.origin, code))
+                }
+
                 _ => None,
             };
             if let Some((origin, code)) = gen {

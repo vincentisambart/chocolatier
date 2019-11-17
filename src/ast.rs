@@ -527,7 +527,7 @@ impl TagRef {
 }
 
 bitflags! {
-    struct ParamAttrs: u8 {
+    pub(crate) struct ParamAttrs: u8 {
         const CONSUMED = 0b0000_0001;
         // noescape should really be for function and block pointers
         // (or typedefs of those), but with the AST libclang provides,
@@ -566,7 +566,7 @@ struct Param {
 }
 
 bitflags! {
-    struct CallableAttrs: u8 {
+    pub(crate) struct CallableAttrs: u8 {
         const RETURNS_RETAINED = 0b0000_0001;
         const UNAVAILABLE = 0b0000_0010;
     }
@@ -1033,10 +1033,10 @@ impl Location {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct ObjCParam {
-    name: String,
-    objc_type: ObjCType,
-    attrs: ParamAttrs,
+pub(crate) struct ObjCParam {
+    pub(crate) name: String,
+    pub(crate) objc_type: ObjCType,
+    pub(crate) attrs: ParamAttrs,
 }
 
 impl ObjCParam {
@@ -1058,18 +1058,18 @@ impl ObjCParam {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
-enum ObjCMethodKind {
+pub(crate) enum ObjCMethodKind {
     Class,
     Instance,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct ObjCMethod {
-    name: String,
-    kind: ObjCMethodKind,
-    params: Vec<ObjCParam>,
-    result: ObjCType,
-    attrs: CallableAttrs,
+pub(crate) struct ObjCMethod {
+    pub(crate) name: String,
+    pub(crate) kind: ObjCMethodKind,
+    pub(crate) params: Vec<ObjCParam>,
+    pub(crate) result: ObjCType,
+    pub(crate) attrs: CallableAttrs,
 }
 
 impl ObjCMethod {
@@ -1127,7 +1127,7 @@ fn is_generated_from_property(method_entity: &clang::Entity) -> bool {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
-enum PropOwnership {
+pub(crate) enum PropOwnership {
     Strong,
     Weak,
     Copy,
@@ -1137,15 +1137,15 @@ enum PropOwnership {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct Property {
-    name: String,
-    value: ObjCType,
-    is_atomic: bool,
-    is_writable: bool,
-    is_class: bool,
-    ownership: PropOwnership,
-    getter: Option<String>,
-    setter: Option<String>,
+pub(crate) struct Property {
+    pub(crate) name: String,
+    pub(crate) value: ObjCType,
+    pub(crate) is_atomic: bool,
+    pub(crate) is_writable: bool,
+    pub(crate) is_class: bool,
+    pub(crate) ownership: PropOwnership,
+    pub(crate) getter: Option<String>,
+    pub(crate) setter: Option<String>,
 }
 
 impl Property {
@@ -1283,12 +1283,12 @@ impl Property {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct InterfaceDef {
     pub(crate) name: String,
-    superclass: Option<String>,
-    adopted_protocols: Vec<String>,
-    template_params: Vec<String>,
-    methods: Vec<ObjCMethod>,
-    properties: Vec<Property>,
-    origin: Option<Origin>,
+    pub(crate) superclass: Option<String>,
+    pub(crate) adopted_protocols: Vec<String>,
+    pub(crate) template_params: Vec<String>,
+    pub(crate) methods: Vec<ObjCMethod>,
+    pub(crate) properties: Vec<Property>,
+    pub(crate) origin: Option<Origin>,
 }
 
 impl InterfaceDef {
@@ -1409,24 +1409,24 @@ impl CategoryDef {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct ProtocolMethod {
-    method: ObjCMethod,
-    is_optional: bool,
+pub(crate) struct ProtocolMethod {
+    pub(crate) method: ObjCMethod,
+    pub(crate) is_optional: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct ProtocolProperty {
-    property: Property,
-    is_optional: bool,
+pub(crate) struct ProtocolProperty {
+    pub(crate) property: Property,
+    pub(crate) is_optional: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ProtocolDef {
     pub(crate) name: String,
-    inherited_protocols: Vec<String>,
-    methods: Vec<ProtocolMethod>,
-    properties: Vec<ProtocolProperty>,
-    origin: Option<Origin>,
+    pub(crate) inherited_protocols: Vec<String>,
+    pub(crate) methods: Vec<ProtocolMethod>,
+    pub(crate) properties: Vec<ProtocolProperty>,
+    pub(crate) origin: Option<Origin>,
 }
 
 impl ProtocolDef {
