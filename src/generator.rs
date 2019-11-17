@@ -187,7 +187,7 @@ impl OutputHandler {
         let files = HashMap::new();
 
         DirBuilder::new().recursive(true).create(&src_dir).unwrap();
-        let main_file = File::create(src_dir.join("main.rs")).unwrap();
+        let main_file = File::create(src_dir.join("lib.rs")).unwrap();
         Self::write_header(&main_file);
 
         OutputHandler {
