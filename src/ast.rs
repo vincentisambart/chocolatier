@@ -713,6 +713,15 @@ pub(crate) enum SignedOrNotInt {
     Unsigned(u64),
 }
 
+impl std::fmt::Display for SignedOrNotInt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SignedOrNotInt::Signed(i) => i.fmt(f),
+            SignedOrNotInt::Unsigned(u) => u.fmt(f),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct EnumValue {
     pub(crate) name: String,

@@ -1,20 +1,21 @@
 use crate::ast;
-use quote::{format_ident, quote};
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::fmt::Write;
 
 const BASE_OBJC_TRAIT: &'static str = "ObjCPtr";
-const CORE_MODULE: &'static str = "core";
+const CORE_MOD: &'static str = "core";
+const BASE_OBJC_TRAIT_FULL_PATH: &'static str = "crate::core::ObjCPtr";
 
 trait OriginExt {
-    fn module_name(&self) -> Cow<str>;
+    fn mod_name(&self) -> Cow<str>;
 }
 
 impl OriginExt for ast::Origin {
-    fn module_name(&self) -> Cow<str> {
+    fn mod_name(&self) -> Cow<str> {
         use ast::Origin;
         match self {
-            Origin::ObjCCore | Origin::System => CORE_MODULE.into(),
+            Origin::ObjCCore | Origin::System => CORE_MOD.into(),
             Origin::Framework(framework) => snake_case_split(framework)
                 .join("_")
                 .to_ascii_lowercase()
@@ -93,34 +94,16 @@ impl TypeIndex {
         }
     }
 
-    fn protocol_mod(&self, protocol: &str) -> Cow<str> {
-        self.protocols[protocol]
-            .origin
-            .as_ref()
-            .unwrap()
-            .module_name()
+    fn protoc_mod(&self, protocol: &str) -> Cow<str> {
+        self.protocols[protocol].origin.as_ref().unwrap().mod_name()
     }
 
-    fn interface_mod(&self, protocol: &str) -> Cow<str> {
+    fn interf_mod(&self, protocol: &str) -> Cow<str> {
         self.interfaces[protocol]
             .origin
             .as_ref()
             .unwrap()
-            .module_name()
-    }
-}
-
-impl quote::ToTokens for ast::SignedOrNotInt {
-    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
-        use ast::SignedOrNotInt;
-        use proc_macro2::Literal;
-        use quote::TokenStreamExt;
-
-        // Use unsuffixed values before SignedOrNotInt stores everything as 64-bit values even if the enum's underlying type is smaller.
-        match self {
-            SignedOrNotInt::Signed(i) => tokens.append(Literal::i64_unsuffixed(*i)),
-            SignedOrNotInt::Unsigned(u) => tokens.append(Literal::u64_unsuffixed(*u)),
-        }
+            .mod_name()
     }
 }
 
@@ -254,7 +237,7 @@ impl OutputHandler {
             let file = File::create(self.src_dir.join(module).with_extension("rs")).unwrap();
             Self::write_start_comment(&file);
 
-            if module != CORE_MODULE {
+            if module != CORE_MOD {
                 writeln!(&file, "use crate::core::Object;").unwrap();
             }
             writeln!(&file).unwrap();
@@ -264,7 +247,7 @@ impl OutputHandler {
     }
 
     fn file_for(&mut self, origin: &ast::Origin) -> &std::fs::File {
-        self.mod_file(&origin.module_name())
+        self.mod_file(&origin.mod_name())
     }
 }
 
@@ -274,24 +257,12 @@ pub(crate) struct Generator {
     output_handler: OutputHandler,
 }
 
-fn make_ident(name: &str) -> proc_macro2::Ident {
-    format_ident!("{}", name)
-}
-
 fn protocol_trait_name(protocol_name: &str) -> String {
     format!("{}Protocol", protocol_name)
 }
 
-fn protocol_trait_ident(protocol_name: &str) -> proc_macro2::Ident {
-    format_ident!("{}Protocol", protocol_name)
-}
-
 fn interface_trait_name(class_name: &str) -> String {
     format!("{}Interface", class_name)
-}
-
-fn interface_trait_ident(class_name: &str) -> proc_macro2::Ident {
-    format_ident!("{}Interface", class_name)
 }
 
 impl Generator {
@@ -305,70 +276,98 @@ impl Generator {
         }
     }
 
+    fn protoc_rel_path(&self, name: &str, current_mod: &str) -> Cow<str> {
+        let mod_name = self.index.protoc_mod(&name);
+        let trait_name = protocol_trait_name(name);
+        if current_mod == mod_name {
+            trait_name.into()
+        } else {
+            format!("crate::{}::{}", mod_name, trait_name).into()
+        }
+    }
+
     fn generate_protocol(&self, def: &ast::ProtocolDef) -> Option<String> {
-        let trait_ident = protocol_trait_ident(&def.name);
-        let mut inherited_trait_idents: Vec<_> = def
+        let current_mod = self.index.protoc_mod(&def.name);
+        let mut inherited_traits: Vec<_> = def
             .inherited_protocols
             .iter()
-            .map(|name| protocol_trait_ident(name))
-            .collect();
-        let mut inherited_trait_mod_idents: Vec<_> = def
-            .inherited_protocols
-            .iter()
-            .map(|name| self.index.protocol_mod(name))
-            .map(|protoc| make_ident(&protoc))
+            .map(|name| self.protoc_rel_path(&name, &current_mod))
             .collect();
 
-        if inherited_trait_idents.is_empty() {
-            inherited_trait_idents.push(make_ident(BASE_OBJC_TRAIT));
-            inherited_trait_mod_idents.push(make_ident(CORE_MODULE));
+        if inherited_traits.is_empty() {
+            if current_mod == CORE_MOD {
+                inherited_traits.push(BASE_OBJC_TRAIT.into());
+            } else {
+                inherited_traits.push(BASE_OBJC_TRAIT_FULL_PATH.into());
+            }
         }
 
-        let code = quote! {
-            pub trait #trait_ident: #(crate::#inherited_trait_mod_idents::#inherited_trait_idents)+* {}
-        };
-        Some(code.to_string())
+        let code = format!(
+            "pub trait {protocol_trait}: {inherited_traits} {{}}",
+            protocol_trait = protocol_trait_name(&def.name),
+            inherited_traits = inherited_traits.join(" + "),
+        );
+        Some(code)
+    }
+
+    fn interf_rel_path(&self, name: &str, current_mod: &str) -> Cow<str> {
+        let mod_name = self.index.interf_mod(&name);
+        let trait_name = interface_trait_name(name);
+        if current_mod == mod_name {
+            trait_name.into()
+        } else {
+            format!("crate::{}::{}", mod_name, trait_name).into()
+        }
     }
 
     fn generate_class(&self, def: &ast::InterfaceDef) -> Option<String> {
-        let base_objc_trait_ident = make_ident(BASE_OBJC_TRAIT);
-        let core_mod_ident = make_ident(CORE_MODULE);
-        let struct_ident = make_ident(&def.name);
-        let trait_ident = interface_trait_ident(&def.name);
-        let mut inherited_trait_idents = Vec::new();
-        let mut inherited_trait_mod_idents = Vec::new();
+        let current_mod = self.index.interf_mod(&def.name);
+        let struct_name = &def.name;
+        let trait_name = interface_trait_name(struct_name);
+        let base_objc_trait = if current_mod == CORE_MOD {
+            BASE_OBJC_TRAIT
+        } else {
+            BASE_OBJC_TRAIT_FULL_PATH
+        };
+
+        let mut inherited_traits = Vec::new();
         if let Some(ref superclass) = def.superclass {
-            inherited_trait_idents.push(interface_trait_ident(&superclass));
-            inherited_trait_mod_idents.push(make_ident(&self.index.interface_mod(&superclass)));
+            inherited_traits.push(self.interf_rel_path(&superclass, &current_mod));
         }
         for protocol in &def.adopted_protocols {
-            inherited_trait_idents.push(protocol_trait_ident(&protocol));
-            inherited_trait_mod_idents.push(make_ident(&self.index.protocol_mod(&protocol)));
+            inherited_traits.push(self.protoc_rel_path(&protocol, &current_mod));
         }
-        if inherited_trait_idents.is_empty() {
-            inherited_trait_idents.push(make_ident(BASE_OBJC_TRAIT));
-            inherited_trait_mod_idents.push(make_ident(CORE_MODULE));
+        if inherited_traits.is_empty() {
+            inherited_traits.push(base_objc_trait.into());
         }
 
-        let mut code = quote! {};
+        let mut code = String::new();
 
-        code.extend(quote! {
-            pub trait #trait_ident: #(crate::#inherited_trait_mod_idents::#inherited_trait_idents)+* {}
+        writeln!(
+            &mut code,
+            "\
+pub trait {trait_name}: {inherited_traits} {{}}
 
-            pub struct #struct_ident {
-                raw: std::ptr::NonNull<Object>,
-            }
+pub struct {struct_name} {{
+    raw: std::ptr::NonNull<Object>,
+}}
 
-            impl crate::#core_mod_ident::#base_objc_trait_ident for #struct_ident {
-                unsafe fn from_raw_unchecked(raw: std::ptr::NonNull<Object>) -> Self {
-                    #struct_ident { raw }
-                }
+impl {base_objc_trait} for {struct_name} {{
+    unsafe fn from_raw_unchecked(raw: std::ptr::NonNull<Object>) -> Self {{
+        Self {{ raw }}
+    }}
 
-                fn as_raw(&self) -> std::ptr::NonNull<Object> {
-                    self.raw
-                }
-            }
-        });
+    fn as_raw(&self) -> std::ptr::NonNull<Object> {{
+        self.raw
+    }}
+}}
+",
+            struct_name = struct_name,
+            trait_name = trait_name,
+            inherited_traits = inherited_traits.join(" + "),
+            base_objc_trait = base_objc_trait,
+        )
+        .unwrap();
 
         let mut unprocessed_adopted_protocols: Vec<&str> = Vec::new();
         Extend::<&str>::extend(
@@ -379,11 +378,15 @@ impl Generator {
         {
             let mut current_def = def;
             while let Some(ref superclass) = current_def.superclass {
-                let superclass_trait_ident = interface_trait_ident(superclass);
-                let superclass_mod_ident = make_ident(&self.index.interface_mod(superclass));
-                code.extend(quote! {
-                    impl crate::#superclass_mod_ident::#superclass_trait_ident for #struct_ident {}
-                });
+                let superclass_path = self.interf_rel_path(superclass, &current_mod);
+                writeln!(
+                    &mut code,
+                    "impl {superclass_path} for {struct_name} {{}}",
+                    superclass_path = superclass_path,
+                    struct_name = struct_name,
+                )
+                .unwrap();
+
                 current_def = &self.index.interfaces[superclass];
                 Extend::<&str>::extend(
                     &mut unprocessed_adopted_protocols,
@@ -410,16 +413,18 @@ impl Generator {
                     .map(|name| name.as_ref()),
             );
         }
-        for protocol in adopted_protocols {
-            let trait_ident = protocol_trait_ident(protocol);
-            let mod_ident = make_ident(&self.index.protocol_mod(protocol));
-
-            code.extend(quote! {
-                impl crate::#mod_ident::#trait_ident for #struct_ident {}
-            });
+        for protoc in adopted_protocols {
+            let protoc_trait_path = self.protoc_rel_path(protoc, &current_mod);
+            writeln!(
+                &mut code,
+                "impl {protoc_trait_path} for {struct_name} {{}}",
+                protoc_trait_path = protoc_trait_path,
+                struct_name = struct_name,
+            )
+            .unwrap();
         }
 
-        Some(code.to_string())
+        Some(code)
     }
 
     fn generate_enum(&self, def: &ast::EnumDef) -> Option<String> {
@@ -437,74 +442,107 @@ impl Generator {
             return None;
         }
 
-        let struct_ident = format_ident!("{}", enum_name);
-
         let value_names =
             cleanup_enum_value_names(enum_name, def.values.iter().map(|value| &value.name));
 
-        let value_name_idents: Vec<_> = value_names
-            .iter()
-            .map(|value_name| format_ident!("{}", value_name))
-            .collect();
+        let underlying = rust_type_name_for_enum_underlying(&def.underlying, &self.index);
+        let mut code = String::new();
 
-        let original_value_names = def.values.iter().map(|value| &value.name);
+        write!(
+            &mut code,
+            "\
+#[repr(transparent)]
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub struct {struct_name}({underlying});
 
-        let values = def.values.iter().map(|value| value.value);
+impl {struct_name} {{
+",
+            struct_name = enum_name,
+            underlying = underlying,
+        )
+        .unwrap();
 
-        let underlying = format_ident!(
-            "{}",
-            rust_type_name_for_enum_underlying(&def.underlying, &self.index)
-        );
-        let debug_default = format!("{}({{}})", enum_name);
-        let code = quote! {
-            #[repr(transparent)]
-            #[derive(Copy, Clone, PartialEq, Eq)]
-            pub struct #struct_ident(#underlying);
+        for (cleaned_up_name, value) in value_names.iter().zip(def.values.iter()) {
+            let original_value_name = &value.name;
+            write!(
+                &mut code,
+                "    /// {original_value_name}
+    const {cleaned_up_name}: Self = {struct_name}({num_val});
+",
+                original_value_name = original_value_name,
+                cleaned_up_name = cleaned_up_name,
+                struct_name = enum_name,
+                num_val = value.value
+            )
+            .unwrap();
+        }
 
-            impl #struct_ident {
-                #(#[doc = #original_value_names] const #value_name_idents: Self = #struct_ident(#values);)*
-            }
+        write!(
+            &mut code,
+            "\
+}}
+impl std::fmt::Debug for {struct_name} {{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{
+        match *self {{
+",
+            struct_name = enum_name,
+        )
+        .unwrap();
 
-            impl std::fmt::Debug for #struct_ident {
-                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                    match *self {
-                        #(#struct_ident::#value_name_idents => f.write_str(#value_names),)*
-                        _ => write!(f, #debug_default, self.0),
-                    }
-                }
-            }
-        };
+        for cleaned_up_name in value_names.iter() {
+            writeln!(
+                &mut code,
+                "            {struct_name}::{cleaned_up_name} => f.write_str({cleaned_up_name:?}),",
+                struct_name = enum_name,
+                cleaned_up_name = cleaned_up_name,
+            )
+            .unwrap();
+        }
 
-        Some(code.to_string())
+        write!(
+            &mut code,
+            "            _ => write!(f, \"{struct_name}({{}})\", self.0),
+        }}
+    }}
+}}
+",
+            struct_name = enum_name,
+        )
+        .unwrap();
+
+        Some(code)
     }
 
     fn generate_core_base_code(&mut self) {
         use std::io::Write;
 
-        let core = self.output_handler.mod_file(CORE_MODULE);
+        let core = self.output_handler.mod_file(CORE_MOD);
 
-        let base_objc_trait_ident = format_ident!("{}", BASE_OBJC_TRAIT);
-        let code = quote! {
-            #[repr(C)]
-            pub struct Object {
-                _private: [u8; 0],
-            }
+        writeln!(
+            &*core,
+            r#"
+#[repr(C)]
+pub struct Object {{
+    _private: [u8; 0],
+}}
 
-            #[doc = "ARC runtime support - https://clang.llvm.org/docs/AutomaticReferenceCounting.html#runtime-support"]
-            #[link(name = "objc", kind = "dylib")]
-            extern "C" {
-                fn objc_autoreleasePoolPush() -> *const std::ffi::c_void;
-                fn objc_autoreleasePoolPop(pool: *const std::ffi::c_void);
-                fn objc_release(value: *mut Object);
-                fn objc_retain(value: *mut Object) -> *mut Object;
-            }
+// ARC runtime support - https://clang.llvm.org/docs/AutomaticReferenceCounting.html#runtime-support
+#[link(name = "objc", kind = "dylib")]
+extern "C" {{
+    fn objc_autoreleasePoolPush() -> *const std::ffi::c_void;
+    fn objc_autoreleasePoolPop(pool: *const std::ffi::c_void);
+    fn objc_release(value: *mut Object);
+    fn objc_retain(value: *mut Object) -> *mut Object;
+}}
 
-            pub trait #base_objc_trait_ident: Sized {
-                unsafe fn from_raw_unchecked(ptr: std::ptr::NonNull<Object>) -> Self;
-                fn as_raw(&self) -> std::ptr::NonNull<Object>;
-            }
-        };
-        writeln!(&*core, "{}", code.to_string()).unwrap();
+pub trait {base_objc_trait}: Sized {{
+    unsafe fn from_raw_unchecked(ptr: std::ptr::NonNull<Object>) -> Self;
+    fn as_raw(&self) -> std::ptr::NonNull<Object>;
+}}
+"#,
+            base_objc_trait = BASE_OBJC_TRAIT,
+        )
+        .unwrap();
     }
 
     pub(crate) fn generate(&mut self) {
