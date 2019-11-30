@@ -40,6 +40,20 @@ extern "C" {
 
     fn chocolat_Foundation_FooInterface_class_new() -> *mut Object;
     fn chocolat_Foundation_FooInterface_instance_bar(self_: *mut Object) -> *mut Object;
+
+    fn chocolat_Foundation_NSArrayInterface_class_new() -> *mut Object;
+    fn chocolat_Foundation_NSArrayInterface_instance_count(self_: *mut Object) -> usize;
+    fn chocolat_Foundation_NSArrayInterface_instance_firstObject(self_: *mut Object)
+        -> *mut Object;
+    fn chocolat_Foundation_NSArrayInterface_instance_lastObject(self_: *mut Object) -> *mut Object;
+    fn chocolat_Foundation_NSArrayInterface_instance_objectAtIndex(
+        self_: *mut Object,
+        index: usize,
+    ) -> *mut Object;
+    fn chocolat_Foundation_NSArrayInterface_instance_arrayByAddingObject(
+        self_: *mut Object,
+        index: *mut Object,
+    ) -> *mut Object;
 }
 
 extern "C" {
@@ -100,7 +114,7 @@ impl NSObjectInterface for NSObject {}
 
 impl ObjCPtr for NSObject {
     unsafe fn from_raw_unchecked(raw: NonNull<Object>) -> Self {
-        NSObject { raw }
+        Self { raw }
     }
 
     fn as_raw(&self) -> NonNull<Object> {
@@ -157,7 +171,7 @@ impl NSStringInterface for NSString {}
 
 impl ObjCPtr for NSString {
     unsafe fn from_raw_unchecked(raw: NonNull<Object>) -> Self {
-        NSString { raw }
+        Self { raw }
     }
 
     fn as_raw(&self) -> NonNull<Object> {
@@ -190,6 +204,11 @@ impl Drop for NSString {
     }
 }
 
+impl Into<NSObject> for NSString {
+    fn into(self) -> NSObject {
+        unsafe { NSObject::from_raw_unchecked(self.as_raw()) }
+    }
+}
 trait FooInterface: ObjCPtr {
     fn bar(&self) -> NSObject {
         let raw_self = self.as_raw().as_ptr();
@@ -242,6 +261,87 @@ impl Drop for Foo {
     }
 }
 
+trait NSArrayInterface<T: ObjCPtr>: NSObjectInterface {
+    fn first(&self) -> Option<T> {
+        let raw_self = self.as_raw().as_ptr();
+        let raw_ptr =
+            unsafe { chocolat_Foundation_NSArrayInterface_instance_firstObject(raw_self) };
+        NonNull::new(raw_ptr).map(|raw| unsafe { T::from_raw_unchecked(raw) })
+    }
+    fn last(&self) -> Option<T> {
+        let raw_self = self.as_raw().as_ptr();
+        let raw_ptr = unsafe { chocolat_Foundation_NSArrayInterface_instance_lastObject(raw_self) };
+        NonNull::new(raw_ptr).map(|raw| unsafe { T::from_raw_unchecked(raw) })
+    }
+    fn object_at_index(&self, index: usize) -> T {
+        let raw_self = self.as_raw().as_ptr();
+        let raw_ptr =
+            unsafe { chocolat_Foundation_NSArrayInterface_instance_objectAtIndex(raw_self, index) };
+        let raw = NonNull::new(raw_ptr).expect("expecting non-null");
+        unsafe { T::from_raw_unchecked(raw) }
+    }
+    fn count(&self) -> usize {
+        let raw_self = self.as_raw().as_ptr();
+        unsafe { chocolat_Foundation_NSArrayInterface_instance_count(raw_self) }
+    }
+    fn adding<X: Into<T>>(&self, object: X) -> NSArray<T> {
+        let raw_self = self.as_raw().as_ptr();
+        let raw_object = object.into().as_raw().as_ptr();
+        let raw_ptr = unsafe {
+            chocolat_Foundation_NSArrayInterface_instance_arrayByAddingObject(raw_self, raw_object)
+        };
+        let raw = NonNull::new(raw_ptr).expect("expecting non-null");
+        unsafe { NSArray::from_raw_unchecked(raw) }
+    }
+}
+
+struct NSArray<T: ObjCPtr> {
+    raw: NonNull<Object>,
+    _marker: std::marker::PhantomData<T>,
+}
+
+impl<T: ObjCPtr> NSObjectProtocol for NSArray<T> {}
+impl<T: ObjCPtr> NSObjectInterface for NSArray<T> {}
+impl<T: ObjCPtr> NSArrayInterface<T> for NSArray<T> {}
+
+impl<T: ObjCPtr> ObjCPtr for NSArray<T> {
+    unsafe fn from_raw_unchecked(raw: NonNull<Object>) -> Self {
+        Self {
+            raw,
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    fn as_raw(&self) -> NonNull<Object> {
+        self.raw
+    }
+}
+
+impl<T: ObjCPtr> NSArray<T> {
+    fn new() -> Self {
+        let raw_ptr = unsafe { chocolat_Foundation_NSArrayInterface_class_new() };
+        let raw =
+            NonNull::new(raw_ptr).expect("Expecting +[NSArray new] to return a non null pointer.");
+        unsafe { Self::from_raw_unchecked(raw) }
+    }
+
+    fn retain(&self) -> Self {
+        let raw_self = self.as_raw().as_ptr();
+        let raw_ptr = unsafe { objc_retain(raw_self) };
+        debug_assert_eq!(raw_ptr, raw_self);
+        let raw = NonNull::new(raw_ptr).expect("objc_retain should not return a null pointer");
+        unsafe { Self::from_raw_unchecked(raw) }
+    }
+}
+
+impl<T: ObjCPtr> Drop for NSArray<T> {
+    fn drop(&mut self) {
+        unsafe {
+            objc_release(self.as_raw().as_ptr());
+        }
+    }
+}
+
 fn main() {
     // let pool = unsafe { objc_autoreleasePoolPush() };
     let bar;
@@ -276,5 +376,15 @@ fn main() {
         println!("----5 - {} - {}", foo.retain_count(), bar.retain_count());
     }
     println!("----6 - {}", bar.retain_count());
+
+    let array: NSArray<NSObject> = NSArray::new();
+    println!("array count - {}", array.count());
+    let array = array.adding(NSObject::new());
+    println!("array count - {}", array.count());
+    let array = array.adding(NSString::new_with_str("bonjour"));
+    println!("array count - {}", array.count());
+
+    // let _first = array.object_at_index(0);
+
     // unsafe { objc_autoreleasePoolPop(pool) };
 }

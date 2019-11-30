@@ -74,6 +74,60 @@ __attribute__((ns_returns_retained)) NSString *chocolat_Foundation_NSStringInter
     }
 }
 
+__attribute__((ns_returns_retained)) id chocolat_Foundation_NSArrayInterface_class_new(void) {
+    @try {
+        return [NSArray new];
+    }
+    @catch (NSException *exception) {
+        abort_on_exception(exception);
+    }
+}
+
+NSUInteger chocolat_Foundation_NSArrayInterface_instance_count(__unsafe_unretained NSArray *self_) {
+    @try {
+        return self_.count;
+    }
+    @catch (NSException *exception) {
+        abort_on_exception(exception);
+    }
+}
+
+__attribute__((ns_returns_retained)) id chocolat_Foundation_NSArrayInterface_instance_firstObject(__unsafe_unretained NSArray *self_) {
+    @try {
+        return [self_ firstObject];
+    }
+    @catch (NSException *exception) {
+        abort_on_exception(exception);
+    }
+}
+
+__attribute__((ns_returns_retained)) id chocolat_Foundation_NSArrayInterface_instance_lastObject(__unsafe_unretained NSArray *self_) {
+    @try {
+        return [self_ lastObject];
+    }
+    @catch (NSException *exception) {
+        abort_on_exception(exception);
+    }
+}
+
+__attribute__((ns_returns_retained)) id chocolat_Foundation_NSArrayInterface_instance_objectAtIndex(__unsafe_unretained NSArray *self_, NSUInteger index) {
+    @try {
+        return [self_ objectAtIndex:index];
+    }
+    @catch (NSException *exception) {
+        abort_on_exception(exception);
+    }
+}
+
+__attribute__((ns_returns_retained)) NSArray *chocolat_Foundation_NSArrayInterface_instance_arrayByAddingObject(__unsafe_unretained NSArray *self_, __unsafe_unretained id object) {
+    @try {
+        return [self_ arrayByAddingObject:object];
+    }
+    @catch (NSException *exception) {
+        abort_on_exception(exception);
+    }
+}
+
 @interface Bar: NSObject
 @property (nonatomic) Bar *bar;
 @end
