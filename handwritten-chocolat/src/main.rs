@@ -74,6 +74,28 @@ trait ObjCPtr: Sized {
     fn as_raw(&self) -> NonNull<Object>;
 }
 
+struct UntypedObjCPtr {
+    raw: NonNull<Object>,
+}
+
+impl ObjCPtr for UntypedObjCPtr {
+    unsafe fn from_raw_unchecked(raw: NonNull<Object>) -> Self {
+        Self { raw }
+    }
+
+    fn as_raw(&self) -> NonNull<Object> {
+        self.raw
+    }
+}
+
+impl Drop for UntypedObjCPtr {
+    fn drop(&mut self) {
+        unsafe {
+            objc_release(self.as_raw().as_ptr());
+        }
+    }
+}
+
 trait NSObjectProtocol: ObjCPtr {
     fn hash(&self) -> usize {
         unsafe { chocolat_Foundation_NSObjectProtocol_instance_hash(self.as_raw().as_ptr()) }
@@ -106,7 +128,7 @@ trait NSObjectProtocol: ObjCPtr {
 trait NSObjectInterface: NSObjectProtocol {}
 
 struct NSObject {
-    raw: NonNull<Object>,
+    ptr: UntypedObjCPtr,
 }
 
 impl NSObjectProtocol for NSObject {}
@@ -114,11 +136,12 @@ impl NSObjectInterface for NSObject {}
 
 impl ObjCPtr for NSObject {
     unsafe fn from_raw_unchecked(raw: NonNull<Object>) -> Self {
-        Self { raw }
+        let ptr = UntypedObjCPtr::from_raw_unchecked(raw);
+        Self { ptr }
     }
 
     fn as_raw(&self) -> NonNull<Object> {
-        self.raw
+        self.ptr.as_raw()
     }
 }
 
@@ -128,14 +151,6 @@ impl NSObject {
         let raw =
             NonNull::new(raw_ptr).expect("Expecting +[NSObject new] to return a non null pointer.");
         unsafe { Self::from_raw_unchecked(raw) }
-    }
-}
-
-impl Drop for NSObject {
-    fn drop(&mut self) {
-        unsafe {
-            objc_release(self.as_raw().as_ptr());
-        }
     }
 }
 
@@ -162,7 +177,7 @@ trait NSStringInterface: NSObjectInterface {
 }
 
 struct NSString {
-    raw: NonNull<Object>,
+    ptr: UntypedObjCPtr,
 }
 
 impl NSObjectProtocol for NSString {}
@@ -171,11 +186,12 @@ impl NSStringInterface for NSString {}
 
 impl ObjCPtr for NSString {
     unsafe fn from_raw_unchecked(raw: NonNull<Object>) -> Self {
-        Self { raw }
+        let ptr = UntypedObjCPtr::from_raw_unchecked(raw);
+        Self { ptr }
     }
 
     fn as_raw(&self) -> NonNull<Object> {
-        self.raw
+        self.ptr.as_raw()
     }
 }
 
@@ -196,14 +212,6 @@ impl NSString {
     }
 }
 
-impl Drop for NSString {
-    fn drop(&mut self) {
-        unsafe {
-            objc_release(self.as_raw().as_ptr());
-        }
-    }
-}
-
 impl Into<NSObject> for NSString {
     fn into(self) -> NSObject {
         unsafe { NSObject::from_raw_unchecked(self.as_raw()) }
@@ -219,7 +227,7 @@ trait FooInterface: ObjCPtr {
 }
 
 struct Foo {
-    raw: NonNull<Object>,
+    ptr: UntypedObjCPtr,
 }
 
 impl NSObjectProtocol for Foo {}
@@ -228,11 +236,12 @@ impl FooInterface for Foo {}
 
 impl ObjCPtr for Foo {
     unsafe fn from_raw_unchecked(raw: NonNull<Object>) -> Self {
-        Foo { raw }
+        let ptr = UntypedObjCPtr::from_raw_unchecked(raw);
+        Self { ptr }
     }
 
     fn as_raw(&self) -> NonNull<Object> {
-        self.raw
+        self.ptr.as_raw()
     }
 }
 
@@ -250,14 +259,6 @@ impl Foo {
         debug_assert_eq!(raw_ptr, raw_self);
         let raw = NonNull::new(raw_ptr).expect("objc_retain should not return a null pointer");
         unsafe { Self::from_raw_unchecked(raw) }
-    }
-}
-
-impl Drop for Foo {
-    fn drop(&mut self) {
-        unsafe {
-            objc_release(self.as_raw().as_ptr());
-        }
     }
 }
 
@@ -296,7 +297,7 @@ trait NSArrayInterface<T: ObjCPtr>: NSObjectInterface {
 }
 
 struct NSArray<T: ObjCPtr> {
-    raw: NonNull<Object>,
+    ptr: UntypedObjCPtr,
     _marker: std::marker::PhantomData<T>,
 }
 
@@ -306,14 +307,15 @@ impl<T: ObjCPtr> NSArrayInterface<T> for NSArray<T> {}
 
 impl<T: ObjCPtr> ObjCPtr for NSArray<T> {
     unsafe fn from_raw_unchecked(raw: NonNull<Object>) -> Self {
+        let ptr = UntypedObjCPtr::from_raw_unchecked(raw);
         Self {
-            raw,
+            ptr,
             _marker: std::marker::PhantomData,
         }
     }
 
     fn as_raw(&self) -> NonNull<Object> {
-        self.raw
+        self.ptr.as_raw()
     }
 }
 
@@ -331,14 +333,6 @@ impl<T: ObjCPtr> NSArray<T> {
         debug_assert_eq!(raw_ptr, raw_self);
         let raw = NonNull::new(raw_ptr).expect("objc_retain should not return a null pointer");
         unsafe { Self::from_raw_unchecked(raw) }
-    }
-}
-
-impl<T: ObjCPtr> Drop for NSArray<T> {
-    fn drop(&mut self) {
-        unsafe {
-            objc_release(self.as_raw().as_ptr());
-        }
     }
 }
 
