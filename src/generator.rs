@@ -108,12 +108,11 @@ impl TypeIndex {
 }
 
 fn rust_type_name_for_fixed_int(name: &str) -> Option<&'static str> {
-    use lazy_static::lazy_static;
+    use once_cell::sync::Lazy;
     use regex::Regex;
 
-    lazy_static! {
-        static ref FIXED_SIZE_INT_RE: Regex = Regex::new(r"(?i)\A([us]?)int([0-9]+)").unwrap();
-    }
+    static FIXED_SIZE_INT_RE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?i)\A([us]?)int([0-9]+)").unwrap());
     match FIXED_SIZE_INT_RE.captures(name) {
         Some(cap) => {
             let signed = match &cap[1] {
@@ -577,13 +576,12 @@ pub trait {base_objc_trait}: Sized {{
 }
 
 fn snake_case_split(text: &str) -> Vec<String> {
-    use lazy_static::lazy_static;
+    use once_cell::sync::Lazy;
     use regex::Regex;
 
-    lazy_static! {
-        static ref LOWER_TO_UPPER_RE: Regex = Regex::new(r"([a-z])([A-Z])").unwrap();
-        static ref UPPER_TO_LOWER_RE: Regex = Regex::new(r"([A-Z])([A-Z][a-z])").unwrap();
-    }
+    static LOWER_TO_UPPER_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"([a-z])([A-Z])").unwrap());
+    static UPPER_TO_LOWER_RE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"([A-Z])([A-Z][a-z])").unwrap());
 
     let text = &LOWER_TO_UPPER_RE.replace_all(text, "${1}_${2}");
     let text = UPPER_TO_LOWER_RE.replace_all(text, "${1}_${2}");

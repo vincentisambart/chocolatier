@@ -31,23 +31,20 @@ pub(crate) enum Origin {
 
 impl Origin {
     fn from_path(path: &str) -> Option<Self> {
-        use lazy_static::lazy_static;
+        use once_cell::sync::Lazy;
         use regex::Regex;
 
-        lazy_static! {
-            static ref FRAMEWORK_PATH_RE: Regex =
-                Regex::new(r"/([^./]+)\.framework/Headers/.+.h\z").unwrap();
-        }
+        static FRAMEWORK_PATH_RE: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"/([^./]+)\.framework/Headers/.+.h\z").unwrap());
+
         if let Some(caps) = FRAMEWORK_PATH_RE.captures(path) {
             let framework = caps.get(1).unwrap().as_str().to_owned();
             return Some(Origin::Framework(framework));
         }
 
         if path.contains("/usr/include/") {
-            lazy_static! {
-                static ref LIBRARY_PATH_RE: Regex =
-                    Regex::new(r"/usr/include/([^./]+)/.+.h\z").unwrap();
-            }
+            static LIBRARY_PATH_RE: Lazy<Regex> =
+                Lazy::new(|| Regex::new(r"/usr/include/([^./]+)/.+.h\z").unwrap());
             if let Some(caps) = LIBRARY_PATH_RE.captures(path) {
                 let library = caps.get(1).unwrap().as_str();
                 if library == "objc" {
