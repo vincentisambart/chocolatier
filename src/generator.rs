@@ -466,11 +466,10 @@ impl {struct_name} {{
             write!(
                 &mut code,
                 "    /// {original_value_name}
-    const {cleaned_up_name}: Self = {struct_name}({num_val});
+    const {cleaned_up_name}: Self = Self({num_val});
 ",
                 original_value_name = original_value_name,
                 cleaned_up_name = cleaned_up_name,
-                struct_name = enum_name,
                 num_val = value.value
             )
             .unwrap();
@@ -491,8 +490,7 @@ impl std::fmt::Debug for {struct_name} {{
         for cleaned_up_name in value_names.iter() {
             writeln!(
                 &mut code,
-                "            {struct_name}::{cleaned_up_name} => f.write_str({cleaned_up_name:?}),",
-                struct_name = enum_name,
+                "            Self::{cleaned_up_name} => f.write_str({cleaned_up_name:?}),",
                 cleaned_up_name = cleaned_up_name,
             )
             .unwrap();
