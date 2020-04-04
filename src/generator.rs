@@ -4,8 +4,10 @@ use std::collections::HashMap;
 use std::fmt::Write;
 
 const BASE_OBJC_TRAIT: &'static str = "ObjCPtr";
+const UNTYPED_OBJC_PTR: &'static str = "UntypedObjCPtr";
 const CORE_MOD: &'static str = "core";
 const BASE_OBJC_TRAIT_FULL_PATH: &'static str = "crate::core::ObjCPtr";
+const UNTYPED_OBJC_PTR_FULL_PATH: &'static str = "crate::core::UntypedObjCPtr";
 
 trait OriginExt {
     fn mod_name(&self) -> Cow<str>;
@@ -236,9 +238,6 @@ impl OutputHandler {
             let file = File::create(self.src_dir.join(module).with_extension("rs")).unwrap();
             Self::write_start_comment(&file);
 
-            if module != CORE_MOD {
-                writeln!(&file, "use crate::core::Object;").unwrap();
-            }
             writeln!(&file).unwrap();
             self.files.insert(module.to_string(), file);
         }
@@ -328,6 +327,16 @@ impl Generator {
         } else {
             BASE_OBJC_TRAIT_FULL_PATH
         };
+        let untyped_objc_ptr = if current_mod == CORE_MOD {
+            UNTYPED_OBJC_PTR
+        } else {
+            UNTYPED_OBJC_PTR_FULL_PATH
+        };
+        let object = if current_mod == CORE_MOD {
+            "Object"
+        } else {
+            "crate::core::Object"
+        };
 
         let mut inherited_traits = Vec::new();
         if let Some(ref superclass) = def.superclass {
@@ -348,23 +357,26 @@ impl Generator {
 pub trait {trait_name}: {inherited_traits} {{}}
 
 pub struct {struct_name} {{
-    raw: std::ptr::NonNull<Object>,
+    ptr: {untyped_objc_ptr},
 }}
 
 impl {base_objc_trait} for {struct_name} {{
-    unsafe fn from_raw_unchecked(raw: std::ptr::NonNull<Object>) -> Self {{
-        Self {{ raw }}
+    unsafe fn from_raw_unchecked(raw: std::ptr::NonNull<{object}>) -> Self {{
+        let ptr = {untyped_objc_ptr}::from_raw_unchecked(raw);
+        Self {{ ptr }}
     }}
 
-    fn as_raw(&self) -> std::ptr::NonNull<Object> {{
-        self.raw
+    fn as_raw(&self) -> std::ptr::NonNull<{object}> {{
+        self.ptr.as_raw()
     }}
 }}
 ",
+            object = object,
             struct_name = struct_name,
             trait_name = trait_name,
             inherited_traits = inherited_traits.join(" + "),
             base_objc_trait = base_objc_trait,
+            untyped_objc_ptr = untyped_objc_ptr,
         )
         .unwrap();
 
@@ -536,8 +548,31 @@ pub trait {base_objc_trait}: Sized {{
     unsafe fn from_raw_unchecked(ptr: std::ptr::NonNull<Object>) -> Self;
     fn as_raw(&self) -> std::ptr::NonNull<Object>;
 }}
+
+pub struct {untyped_objc_ptr} {{
+    raw: std::ptr::NonNull<Object>,
+}}
+
+impl {base_objc_trait} for {untyped_objc_ptr} {{
+    unsafe fn from_raw_unchecked(raw: std::ptr::NonNull<Object>) -> Self {{
+        Self {{ raw }}
+    }}
+
+    fn as_raw(&self) -> std::ptr::NonNull<Object> {{
+        self.raw
+    }}
+}}
+
+impl Drop for {untyped_objc_ptr} {{
+    fn drop(&mut self) {{
+        unsafe {{
+            objc_release(self.as_raw().as_ptr());
+        }}
+    }}
+}}
 "#,
             base_objc_trait = BASE_OBJC_TRAIT,
+            untyped_objc_ptr = UNTYPED_OBJC_PTR,
         )
         .unwrap();
     }
