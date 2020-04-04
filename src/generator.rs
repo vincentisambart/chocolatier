@@ -684,7 +684,7 @@ mod tests {
                     "NSQualityOfServiceBackground",
                     "NSQualityOfServiceDefault",
                 ]
-                .into_iter()
+                .iter()
             ),
             [
                 "USER_INTERACTIVE",
@@ -698,7 +698,7 @@ mod tests {
         assert_eq!(
             cleanup_enum_value_names(
                 "CFSocketError",
-                ["kCFSocketSuccess", "kCFSocketError", "kCFSocketTimeout"].into_iter()
+                ["kCFSocketSuccess", "kCFSocketError", "kCFSocketTimeout"].iter()
             ),
             ["SUCCESS", "ERROR", "TIMEOUT"],
         );
@@ -716,7 +716,7 @@ mod tests {
                     "kCGTornOffMenuWindowLevelKey",
                     "kCGDockWindowLevelKey",
                 ]
-                .into_iter()
+                .iter()
             ),
             [
                 "BASE_WINDOW",
@@ -740,7 +740,7 @@ mod tests {
                     "kCMSCertificateChainWithRoot",
                     "kCMSCertificateChainWithRootOrFail",
                 ]
-                .into_iter()
+                .iter()
             ),
             [
                 "NONE",
@@ -763,7 +763,7 @@ mod tests {
                     "NSDateComponentsFormatterZeroFormattingBehaviorDropAll",
                     "NSDateComponentsFormatterZeroFormattingBehaviorPad",
                 ]
-                .into_iter()
+                .iter()
             ),
             [
                 "NONE",
@@ -788,7 +788,7 @@ mod tests {
                     "kCFStringEncodingMacGreek",
                     "kCFStringEncodingMacCyrillic",
                 ]
-                .into_iter()
+                .iter()
             ),
             [
                 "MAC_JAPANESE",
