@@ -37,6 +37,11 @@ extern "C" {
         encoding: NSStringEncoding,
     ) -> usize;
     fn chocolat_Foundation_NSStringInterface_instance_UTF8String(self_: *mut Object) -> *const i8;
+    fn chocolat_Foundation_NSStringInterface_instance_charAtIndex(
+        self_: *mut Object,
+        index: usize,
+    ) -> u16;
+    fn chocolat_Foundation_NSStringInterface_instance_length(self_: *mut Object) -> usize;
 
     fn chocolat_Foundation_FooInterface_class_new() -> *mut Object;
     fn chocolat_Foundation_FooInterface_instance_bar(self_: *mut Object) -> *mut Object;
@@ -158,11 +163,28 @@ impl NSObject {
 struct NSStringEncoding(usize);
 
 impl NSStringEncoding {
-    const ASCII: Self = NSStringEncoding(1);
-    const NEXTSTEP: Self = NSStringEncoding(2);
-    const JAPANESE_EUC: Self = NSStringEncoding(3);
-    const UTF8: Self = NSStringEncoding(4);
-    const ISO_LATIN1: Self = NSStringEncoding(5);
+    const ASCII: Self = Self(1);
+    const UTF8: Self = Self(4);
+    const UTF16: Self = Self(10);
+    const UTF16_BIG_ENDIAN: Self = Self(0x90000100);
+    const UTF16_LITTLE_ENDIAN: Self = Self(0x94000100);
+    const UTF32: Self = Self(0x8c000100);
+    const UTF32_BIG_ENDIAN: Self = Self(0x98000100);
+    const UTF32_LITTLE_ENDIAN: Self = Self(0x9c000100);
+    const NEXTSTEP: Self = Self(2);
+    const JAPANESE_EUC: Self = Self(3);
+    const ISO_LATIN1: Self = Self(5);
+    const SYMBOL: Self = Self(6);
+    const NON_LOSSY_ASCII: Self = Self(7);
+    const SHIFT_JIS: Self = Self(8);
+    const ISO_LATIN2: Self = Self(9);
+    const WINDOWS_CP1251: Self = Self(11);
+    const WINDOWS_CP1252: Self = Self(12);
+    const WINDOWS_CP1253: Self = Self(13);
+    const WINDOWS_CP1254: Self = Self(14);
+    const WINDOWS_CP1250: Self = Self(15);
+    const ISO2022JP: Self = Self(21);
+    const MACOS_ROMAN: Self = Self(30);
 }
 
 trait NSStringInterface: NSObjectInterface {
@@ -173,6 +195,16 @@ trait NSStringInterface: NSObjectInterface {
             ffi::CStr::from_ptr(bytes)
         };
         Ok(cstr.to_str()?.to_string())
+    }
+
+    fn char_at(&self, index: usize) -> u16 {
+        let raw_self = self.as_raw().as_ptr();
+        unsafe { chocolat_Foundation_NSStringInterface_instance_charAtIndex(raw_self, index) }
+    }
+
+    fn len(&self) -> usize {
+        let raw_self = self.as_raw().as_ptr();
+        unsafe { chocolat_Foundation_NSStringInterface_instance_length(raw_self) }
     }
 }
 
