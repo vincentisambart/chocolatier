@@ -719,10 +719,27 @@ impl std::fmt::Display for SignedOrNotInt {
     }
 }
 
+bitflags! {
+    pub(crate) struct ValueAttrs: u8 {
+        const DEPRECATED = 0b0000_0001;
+    }
+}
+
+impl ValueAttrs {
+    fn from_decl(decl: &clang::Entity) -> Self {
+        let mut attrs = Self::empty();
+        if decl.get_availability() == clang::Availability::Deprecated {
+            attrs.insert(Self::DEPRECATED);
+        }
+        attrs
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct EnumValue {
     pub(crate) name: String,
     pub(crate) value: SignedOrNotInt,
+    pub(crate) attrs: ValueAttrs,
 }
 
 fn type_signedness(clang_type: &clang::Type) -> Option<Signedness> {
@@ -1617,6 +1634,7 @@ impl EnumDef {
                         Signedness::Signed => SignedOrNotInt::Signed(values.0),
                         Signedness::Unsigned => SignedOrNotInt::Unsigned(values.1),
                     },
+                    attrs: ValueAttrs::from_decl(&decl),
                 }
             })
             .collect();
