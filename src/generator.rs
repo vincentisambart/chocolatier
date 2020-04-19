@@ -473,14 +473,23 @@ impl {struct_name} {{
         )
         .unwrap();
 
+        let mut non_deprecated_values = Vec::new();
         for (cleaned_up_name, value) in value_names.iter().zip(def.values.iter()) {
             let original_value_name = &value.name;
-            write!(
+            writeln!(
                 &mut code,
-                "    /// {original_value_name}
-    const {cleaned_up_name}: Self = Self({num_val});
-",
+                "    /// {original_value_name}",
                 original_value_name = original_value_name,
+            )
+            .unwrap();
+            if value.attrs.contains(ast::ValueAttrs::DEPRECATED) {
+                writeln!(&mut code, "    #[deprecated]").unwrap();
+            } else {
+                non_deprecated_values.push(value.value);
+            }
+            writeln!(
+                &mut code,
+                "    const {cleaned_up_name}: Self = Self({num_val});",
                 cleaned_up_name = cleaned_up_name,
                 num_val = value.value
             )
@@ -499,7 +508,14 @@ impl std::fmt::Debug for {struct_name} {{
         )
         .unwrap();
 
-        for cleaned_up_name in value_names.iter() {
+        for (cleaned_up_name, value) in value_names.iter().zip(def.values.iter()) {
+            // Ignore deprecated values that are also defined under a non-deprecated name.
+            if value.attrs.contains(ast::ValueAttrs::DEPRECATED) {
+                if non_deprecated_values.contains(&value.value) {
+                    continue;
+                }
+            }
+
             writeln!(
                 &mut code,
                 "            Self::{cleaned_up_name} => f.write_str({cleaned_up_name:?}),",
