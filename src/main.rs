@@ -2,6 +2,7 @@
 #![allow(clippy::cognitive_complexity)]
 
 mod ast;
+mod clang;
 mod generator;
 
 fn main() {
