@@ -38,13 +38,13 @@ impl Index {
         Self::from_ptr(ptr)
     }
 
-    pub fn parse<'idx>(
-        &'idx self,
+    pub fn parse(
+        &self,
         args: &[String],
         file_path: &str,
         unsaved: &[UnsavedFile],
         options: TuOptions,
-    ) -> Result<TranslationUnit<'idx>, ClangError> {
+    ) -> Result<TranslationUnit, ClangError> {
         let c_file_path = CString::new(file_path).unwrap();
 
         let cstr_args: Vec<CString> = args
@@ -165,13 +165,13 @@ fn to_string(clang_str: clang_sys::CXString) -> Option<String> {
     }
 }
 
-pub struct Cursor<'tu, 'idx> {
+pub struct Cursor<'a> {
     raw: clang_sys::CXCursor,
-    tu: &'tu TranslationUnit<'idx>,
+    tu: &'a TranslationUnit<'a>,
 }
 
-impl<'tu, 'idx> Cursor<'tu, 'idx> {
-    fn from_raw(raw: clang_sys::CXCursor, tu: &'tu TranslationUnit<'idx>) -> Option<Self> {
+impl<'a> Cursor<'a> {
+    fn from_raw(raw: clang_sys::CXCursor, tu: &'a TranslationUnit<'a>) -> Option<Self> {
         unsafe {
             let null_cur = clang_sys::clang_getNullCursor();
             if clang_sys::clang_equalCursors(raw, null_cur) == 0
@@ -212,7 +212,7 @@ impl<'tu, 'idx> Cursor<'tu, 'idx> {
         to_string(unsafe { clang_sys::clang_getCursorUSR(self.raw) })
     }
 
-    pub fn arguments<'cu>(&'cu self) -> Arguments<'cu, 'tu, 'idx> {
+    pub fn arguments(&self) -> Arguments {
         Arguments::new(self)
     }
 
@@ -280,69 +280,61 @@ impl<'tu, 'idx> Cursor<'tu, 'idx> {
         }
     }
 
-    pub fn type_(&self) -> Option<Type<'tu, 'idx>> {
+    pub fn type_(&self) -> Option<Type<'a>> {
         Type::from_raw(unsafe { clang_sys::clang_getCursorType(self.raw) }, self.tu)
     }
 
-    pub fn enum_decl_int_type(&self) -> Option<Type<'tu, 'idx>> {
+    pub fn enum_decl_int_type(&self) -> Option<Type<'a>> {
         Type::from_raw(
             unsafe { clang_sys::clang_getEnumDeclIntegerType(self.raw) },
             self.tu,
         )
     }
 
-    pub fn typedef_decl_underlying_type(&self) -> Option<Type<'tu, 'idx>> {
+    pub fn typedef_decl_underlying_type(&self) -> Option<Type<'a>> {
         Type::from_raw(
             unsafe { clang_sys::clang_getTypedefDeclUnderlyingType(self.raw) },
             self.tu,
         )
     }
 
-    pub fn result_type(&self) -> Option<Type<'tu, 'idx>> {
+    pub fn result_type(&self) -> Option<Type<'a>> {
         Type::from_raw(
             unsafe { clang_sys::clang_getCursorResultType(self.raw) },
             self.tu,
         )
     }
 
-    pub fn receiver_type(&self) -> Option<Type<'tu, 'idx>> {
+    pub fn receiver_type(&self) -> Option<Type<'a>> {
         Type::from_raw(
             unsafe { clang_sys::clang_Cursor_getReceiverType(self.raw) },
             self.tu,
         )
     }
 
-    pub fn ib_outlet_collection_type(&self) -> Option<Type<'tu, 'idx>> {
+    pub fn ib_outlet_collection_type(&self) -> Option<Type<'a>> {
         Type::from_raw(
             unsafe { clang_sys::clang_getIBOutletCollectionType(self.raw) },
             self.tu,
         )
     }
 
-    pub fn visit_children<F: FnMut(Cursor<'tu, 'idx>, Cursor<'tu, 'idx>) -> ChildVisitResult>(
+    pub fn visit_children<F: FnMut(Cursor<'a>, Cursor<'a>) -> ChildVisitResult>(
         &self,
         f: F,
     ) -> bool {
-        struct Data<
-            'tu,
-            'idx: 'tu,
-            F: FnMut(Cursor<'tu, 'idx>, Cursor<'tu, 'idx>) -> ChildVisitResult,
-        > {
+        struct Data<'a, F: FnMut(Cursor<'a>, Cursor<'a>) -> ChildVisitResult> {
             f: F,
-            tu: &'tu TranslationUnit<'idx>,
+            tu: &'a TranslationUnit<'a>,
         }
 
-        extern "C" fn visit<
-            'tu,
-            'idx: 'tu,
-            F: FnMut(Cursor<'tu, 'idx>, Cursor<'tu, 'idx>) -> ChildVisitResult,
-        >(
+        extern "C" fn visit<'a, F: FnMut(Cursor<'a>, Cursor<'a>) -> ChildVisitResult>(
             cursor: clang_sys::CXCursor,
             parent: clang_sys::CXCursor,
             data: clang_sys::CXClientData,
         ) -> clang_sys::CXChildVisitResult {
             unsafe {
-                let data: &mut Data<'tu, 'idx, F> = &mut *(data as *mut Data<'tu, 'idx, F>);
+                let data: &mut Data<'a, F> = &mut *(data as *mut Data<'a, F>);
                 let cursor = Cursor::from_raw(cursor, data.tu).expect("invalid cursor");
                 let parent = Cursor::from_raw(parent, data.tu).expect("invalid cursor");
                 (data.f)(cursor, parent).into()
@@ -351,15 +343,12 @@ impl<'tu, 'idx> Cursor<'tu, 'idx> {
 
         let mut data = Data { f, tu: self.tu };
         unsafe {
-            clang_sys::clang_visitChildren(
-                self.raw,
-                visit::<F>,
-                &mut data as *mut Data<'tu, 'idx, F> as _,
-            ) != 0
+            clang_sys::clang_visitChildren(self.raw, visit::<F>, &mut data as *mut Data<'a, F> as _)
+                != 0
         }
     }
 
-    pub fn children(&self) -> Vec<Cursor<'tu, 'idx>> {
+    pub fn children(&self) -> Vec<Cursor<'a>> {
         let mut children = Vec::new();
         self.visit_children(|cursor, _| {
             children.push(cursor);
@@ -369,28 +358,28 @@ impl<'tu, 'idx> Cursor<'tu, 'idx> {
     }
 }
 
-impl<'tu, 'idx> PartialEq for Cursor<'tu, 'idx> {
+impl<'a> PartialEq for Cursor<'a> {
     fn eq(&self, other: &Self) -> bool {
         unsafe { clang_sys::clang_equalCursors(self.raw, other.raw) != 0 }
     }
 }
 
-pub struct Arguments<'cu, 'tu, 'idx> {
-    cursor: &'cu Cursor<'tu, 'idx>,
+pub struct Arguments<'a> {
+    cursor: &'a Cursor<'a>,
     index: u32,
     len: u32,
 }
 
-impl<'cu, 'tu, 'idx> Arguments<'cu, 'tu, 'idx> {
-    fn new(cursor: &'cu Cursor<'tu, 'idx>) -> Self {
+impl<'a> Arguments<'a> {
+    fn new(cursor: &'a Cursor<'a>) -> Self {
         let index = 0;
         let len = unsafe { clang_sys::clang_Cursor_getNumArguments(cursor.raw) as _ };
         Self { cursor, index, len }
     }
 }
 
-impl<'cu, 'tu, 'idx> Iterator for Arguments<'cu, 'tu, 'idx> {
-    type Item = Cursor<'tu, 'idx>;
+impl<'a> Iterator for Arguments<'a> {
+    type Item = Cursor<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.index == self.len {
@@ -412,15 +401,15 @@ impl<'cu, 'tu, 'idx> Iterator for Arguments<'cu, 'tu, 'idx> {
     }
 }
 
-impl<'cu, 'tu, 'idx> ExactSizeIterator for Arguments<'cu, 'tu, 'idx> {}
+impl<'a> ExactSizeIterator for Arguments<'a> {}
 
-pub struct Type<'tu, 'idx> {
+pub struct Type<'a> {
     raw: clang_sys::CXType,
-    tu: &'tu TranslationUnit<'idx>,
+    tu: &'a TranslationUnit<'a>,
 }
 
-impl<'tu, 'idx> Type<'tu, 'idx> {
-    pub fn from_raw(raw: clang_sys::CXType, tu: &'tu TranslationUnit<'idx>) -> Option<Self> {
+impl<'a> Type<'a> {
+    pub fn from_raw(raw: clang_sys::CXType, tu: &'a TranslationUnit<'a>) -> Option<Self> {
         if raw.kind == clang_sys::CXType_Invalid {
             None
         } else {
@@ -432,46 +421,46 @@ impl<'tu, 'idx> Type<'tu, 'idx> {
         self.raw.kind.into()
     }
 
-    pub fn pointee_type(&self) -> Option<Type<'tu, 'idx>> {
+    pub fn pointee_type(&self) -> Option<Type<'a>> {
         Type::from_raw(
             unsafe { clang_sys::clang_getPointeeType(self.raw) },
             self.tu,
         )
     }
 
-    pub fn modified_type(&self) -> Option<Type<'tu, 'idx>> {
+    pub fn modified_type(&self) -> Option<Type<'a>> {
         Type::from_raw(
             unsafe { clang_sys::clang_Type_getModifiedType(self.raw) },
             self.tu,
         )
     }
 
-    pub fn objc_object_base_type(&self) -> Option<Type<'tu, 'idx>> {
+    pub fn objc_object_base_type(&self) -> Option<Type<'a>> {
         Type::from_raw(
             unsafe { clang_sys::clang_Type_getObjCObjectBaseType(self.raw) },
             self.tu,
         )
     }
 
-    pub fn result_type(&self) -> Option<Type<'tu, 'idx>> {
+    pub fn result_type(&self) -> Option<Type<'a>> {
         Type::from_raw(unsafe { clang_sys::clang_getResultType(self.raw) }, self.tu)
     }
 
-    pub fn named_type(&self) -> Option<Type<'tu, 'idx>> {
+    pub fn named_type(&self) -> Option<Type<'a>> {
         Type::from_raw(
             unsafe { clang_sys::clang_Type_getNamedType(self.raw) },
             self.tu,
         )
     }
 
-    pub fn class_type(&self) -> Option<Type<'tu, 'idx>> {
+    pub fn class_type(&self) -> Option<Type<'a>> {
         Type::from_raw(
             unsafe { clang_sys::clang_Type_getClassType(self.raw) },
             self.tu,
         )
     }
 
-    pub fn canonical_type(&self) -> Type<'tu, 'idx> {
+    pub fn canonical_type(&self) -> Type<'a> {
         Type::from_raw(
             unsafe { clang_sys::clang_getCanonicalType(self.raw) },
             self.tu,
@@ -484,7 +473,7 @@ impl<'tu, 'idx> Type<'tu, 'idx> {
             .expect("invalid type spelling")
     }
 
-    pub fn declaration(&self) -> Option<Cursor<'tu, 'idx>> {
+    pub fn declaration(&self) -> Option<Cursor<'a>> {
         Cursor::from_raw(
             unsafe { clang_sys::clang_getTypeDeclaration(self.raw) },
             self.tu,
@@ -499,18 +488,18 @@ impl<'tu, 'idx> Type<'tu, 'idx> {
         Nullability::from_raw(unsafe { clang_sys::clang_Type_getNullability(self.raw) })
     }
 
-    pub fn visit_fields<F: FnMut(Cursor<'tu, 'idx>) -> VisitorResult>(&self, f: F) -> bool {
-        struct Data<'tu, 'idx: 'tu, F: FnMut(Cursor<'tu, 'idx>) -> VisitorResult> {
+    pub fn visit_fields<F: FnMut(Cursor<'a>) -> VisitorResult>(&self, f: F) -> bool {
+        struct Data<'a, F: FnMut(Cursor<'a>) -> VisitorResult> {
             f: F,
-            tu: &'tu TranslationUnit<'idx>,
+            tu: &'a TranslationUnit<'a>,
         }
 
-        extern "C" fn visit<'tu, 'idx: 'tu, F: FnMut(Cursor<'tu, 'idx>) -> VisitorResult>(
+        extern "C" fn visit<'a, F: FnMut(Cursor<'a>) -> VisitorResult>(
             cursor: clang_sys::CXCursor,
             data: clang_sys::CXClientData,
         ) -> clang_sys::CXChildVisitResult {
             unsafe {
-                let data: &mut Data<'tu, 'idx, F> = &mut *(data as *mut Data<'tu, 'idx, F>);
+                let data: &mut Data<'a, F> = &mut *(data as *mut Data<'a, F>);
                 let cursor = Cursor::from_raw(cursor, data.tu).expect("invalid cursor");
                 (data.f)(cursor).into()
             }
@@ -521,12 +510,12 @@ impl<'tu, 'idx> Type<'tu, 'idx> {
             clang_sys::clang_Type_visitFields(
                 self.raw,
                 visit::<F>,
-                &mut data as *mut Data<'tu, 'idx, F> as _,
+                &mut data as *mut Data<'a, F> as _,
             ) != 0
         }
     }
 
-    pub fn fields(&self) -> Option<Vec<Cursor<'tu, 'idx>>> {
+    pub fn fields(&self) -> Option<Vec<Cursor<'a>>> {
         if self.kind() == TypeKind::Record {
             let mut fields = Vec::new();
             self.visit_fields(|cursor| {
@@ -540,7 +529,7 @@ impl<'tu, 'idx> Type<'tu, 'idx> {
     }
 }
 
-impl<'tu, 'idx> PartialEq for Type<'tu, 'idx> {
+impl<'a> PartialEq for Type<'a> {
     fn eq(&self, other: &Self) -> bool {
         unsafe { clang_sys::clang_equalTypes(self.raw, other.raw) != 0 }
     }
@@ -566,22 +555,22 @@ impl Nullability {
     }
 }
 
-pub struct ArgumentTypes<'ty, 'tu, 'idx> {
-    type_: &'ty Type<'tu, 'idx>,
+pub struct ArgumentTypes<'a> {
+    type_: &'a Type<'a>,
     index: u32,
     len: u32,
 }
 
-impl<'ty, 'tu, 'idx> ArgumentTypes<'ty, 'tu, 'idx> {
-    fn new(type_: &'ty Type<'tu, 'idx>) -> Self {
+impl<'a> ArgumentTypes<'a> {
+    fn new(type_: &'a Type<'a>) -> Self {
         let index = 0;
         let len = unsafe { clang_sys::clang_getNumArgTypes(type_.raw) as _ };
         Self { type_, index, len }
     }
 }
 
-impl<'ty, 'tu, 'idx> Iterator for ArgumentTypes<'ty, 'tu, 'idx> {
-    type Item = Type<'tu, 'idx>;
+impl<'a> Iterator for ArgumentTypes<'a> {
+    type Item = Type<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.index == self.len {
@@ -603,7 +592,7 @@ impl<'ty, 'tu, 'idx> Iterator for ArgumentTypes<'ty, 'tu, 'idx> {
     }
 }
 
-impl<'ty, 'tu, 'idx> ExactSizeIterator for ArgumentTypes<'ty, 'tu, 'idx> {}
+impl<'a> ExactSizeIterator for ArgumentTypes<'a> {}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum CursorKind {
