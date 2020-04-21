@@ -200,6 +200,14 @@ impl<'tu, 'idx> Cursor<'tu, 'idx> {
         to_string(unsafe { clang_sys::clang_getCursorDisplayName(self.raw) })
     }
 
+    pub fn mangling(&self) -> Option<String> {
+        to_string(unsafe { clang_sys::clang_Cursor_getMangling(self.raw) })
+    }
+
+    pub fn objc_type_encoding(&self) -> Option<String> {
+        to_string(unsafe { clang_sys::clang_getDeclObjCTypeEncoding(self.raw) })
+    }
+
     pub fn usr(&self) -> Option<String> {
         to_string(unsafe { clang_sys::clang_getCursorUSR(self.raw) })
     }
@@ -210,6 +218,15 @@ impl<'tu, 'idx> Cursor<'tu, 'idx> {
 
     pub fn is_objc_optional(&self) -> bool {
         unsafe { clang_sys::clang_Cursor_isObjCOptional(self.raw) != 0 }
+    }
+
+    pub fn objc_selector_index(&self) -> Option<u32> {
+        let index = unsafe { clang_sys::clang_Cursor_getObjCSelectorIndex(self.raw) };
+        if index < 0 {
+            None
+        } else {
+            Some(index as _)
+        }
     }
 
     pub fn canonical_cursor(&self) -> Cursor {
@@ -241,6 +258,28 @@ impl<'tu, 'idx> Cursor<'tu, 'idx> {
         )
     }
 
+    pub fn referenced(&self) -> Option<Cursor> {
+        Cursor::from_raw(
+            unsafe { clang_sys::clang_getCursorReferenced(self.raw) },
+            self.tu,
+        )
+    }
+
+    pub fn template(&self) -> Option<Cursor> {
+        Cursor::from_raw(
+            unsafe { clang_sys::clang_getSpecializedCursorTemplate(self.raw) },
+            self.tu,
+        )
+    }
+
+    pub fn template_kind(&self) -> Option<CursorKind> {
+        let kind: CursorKind = unsafe { clang_sys::clang_getTemplateCursorKind(self.raw) }.into();
+        match kind {
+            CursorKind::NoDeclFound => None,
+            _ => Some(kind),
+        }
+    }
+
     pub fn type_(&self) -> Option<Type<'tu, 'idx>> {
         Type::from_raw(unsafe { clang_sys::clang_getCursorType(self.raw) }, self.tu)
     }
@@ -262,6 +301,20 @@ impl<'tu, 'idx> Cursor<'tu, 'idx> {
     pub fn result_type(&self) -> Option<Type<'tu, 'idx>> {
         Type::from_raw(
             unsafe { clang_sys::clang_getCursorResultType(self.raw) },
+            self.tu,
+        )
+    }
+
+    pub fn receiver_type(&self) -> Option<Type<'tu, 'idx>> {
+        Type::from_raw(
+            unsafe { clang_sys::clang_Cursor_getReceiverType(self.raw) },
+            self.tu,
+        )
+    }
+
+    pub fn ib_outlet_collection_type(&self) -> Option<Type<'tu, 'idx>> {
+        Type::from_raw(
+            unsafe { clang_sys::clang_getIBOutletCollectionType(self.raw) },
             self.tu,
         )
     }
