@@ -212,6 +212,9 @@ impl OutputHandler {
         let main_file = File::create(src_dir.join("lib.rs")).unwrap();
         Self::write_start_comment(&main_file);
 
+        use std::io::Write;
+        writeln!(&main_file, "#![allow(dead_code)]").unwrap();
+
         OutputHandler {
             src_dir,
             files,
@@ -502,6 +505,7 @@ impl {struct_name} {{
 }}
 impl std::fmt::Debug for {struct_name} {{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{
+        #[allow(deprecated)]
         match *self {{
 ",
             struct_name = enum_name,
