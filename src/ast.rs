@@ -1,5 +1,5 @@
+use crate::clang::{self, CursorKind, TypeKind};
 use bitflags::bitflags;
-use clang::{Clang, EntityKind, TypeKind};
 use std::collections::{HashMap, HashSet};
 
 // TODO: Try to get:
@@ -62,9 +62,9 @@ impl Origin {
         None
     }
 
-    fn from_entity(entity: &clang::Entity) -> Option<Origin> {
-        // As preprocess the file in advance using the system compiler, we have to use get_presumed_location().
-        let (path, _, _) = entity.get_location()?.get_presumed_location();
+    fn from_cursor(cursor: &clang::Cursor) -> Option<Origin> {
+        // As preprocess the file in advance using the system compiler, we have to use presumed_location().
+        let path = cursor.location()?.presumed_location().file;
         Self::from_path(&path)
     }
 }
@@ -113,88 +113,94 @@ fn show_type(desc: &str, clang_type: &clang::Type, indent_level: usize) {
 
     println!("{}{}: {:?}", indent, desc, clang_type);
 
-    if let Some(argument_types) = clang_type.get_argument_types() {
-        if !argument_types.is_empty() {
+    if let Some(argument_types) = clang_type.argument_types() {
+        if argument_types.len() > 0 {
             println!("{}{} arguments types:", indent, desc);
-            for (i, arg_type) in argument_types.iter().enumerate() {
+            for (i, arg_type) in argument_types.enumerate() {
                 let arg_desc = format!("{} argument type {}", desc, i);
                 show_type(&arg_desc, &arg_type, indent_level);
             }
         }
     }
 
-    if let Some(base_type) = clang_type.get_objc_object_base_type() {
+    if let Some(base_type) = clang_type.objc_object_base_type() {
         println!("{}{} ObjC base type types: {:?}", indent, desc, base_type);
     }
 
-    let canonical_type = clang_type.get_canonical_type();
+    let canonical_type = clang_type.canonical_type();
     if &canonical_type != clang_type {
         println!("{}{} canonical type: {:?}", indent, desc, canonical_type);
     }
 
-    if let Some(nullability) = clang_type.get_nullability() {
+    if let Some(nullability) = clang_type.nullability() {
         println!("{}{} nullability: {:?}", indent, desc, nullability);
     }
 
-    if let Some(class_type) = clang_type.get_class_type() {
+    if let Some(class_type) = clang_type.class_type() {
         println!("{}{} class type: {:?}", indent, desc, class_type);
     }
 
-    let objc_protocol_declarations = clang_type.get_objc_protocol_declarations();
-    if !objc_protocol_declarations.is_empty() {
+    let objc_protocol_decls = clang_type.objc_protocol_decls();
+    if objc_protocol_decls.len() > 0 {
         println!(
             "{}{} objc protocol declarations: {:?}",
-            indent, desc, objc_protocol_declarations
+            indent,
+            desc,
+            objc_protocol_decls.collect::<Vec<_>>()
         );
     }
-    let objc_type_arguments = clang_type.get_objc_type_arguments();
-    if !objc_type_arguments.is_empty() {
+    let objc_type_arg_types = clang_type.objc_type_arg_types();
+    if objc_type_arg_types.len() > 0 {
         println!(
             "{}{} objc type arguments: {:?}",
-            indent, desc, objc_type_arguments
+            indent,
+            desc,
+            objc_type_arg_types.collect::<Vec<_>>()
         );
     }
 
-    if let Some(pointee_type) = clang_type.get_pointee_type() {
+    if let Some(pointee_type) = clang_type.pointee_type() {
         let pointee_desc = format!("{} pointee", desc);
         show_type(&pointee_desc, &pointee_type, indent_level);
     }
 
-    if let Some(elaborated_type) = clang_type.get_elaborated_type() {
+    if let Some(elaborated_type) = clang_type.named_type() {
         let pointee_desc = format!("{} elaborated type", desc);
         show_type(&pointee_desc, &elaborated_type, indent_level);
     }
 
-    if let Some(modified_type) = clang_type.get_modified_type() {
+    if let Some(modified_type) = clang_type.modified_type() {
         let modified_desc = format!("{} modified", desc);
         show_type(&modified_desc, &modified_type, indent_level);
     }
 
-    if let Some(decl) = clang_type.get_declaration() {
+    if let Some(decl) = clang_type.declaration() {
         println!("{}{} decl: {:?}", indent, desc, decl);
     }
 
-    if let Ok(alignment) = clang_type.get_alignof() {
+    if let Some(alignment) = clang_type.align_of() {
         println!("{}alignment: {:?}", indent, alignment);
     }
 
-    if let Ok(size) = clang_type.get_sizeof() {
+    if let Some(size) = clang_type.size_of() {
         println!("{}size: {:?}", indent, size);
     }
 
-    if let Some(template_argument_types) = clang_type.get_template_argument_types() {
+    if let Some(template_arguments) = clang_type.template_arguments() {
         println!(
-            "{}{} template argument type: {:?}",
-            indent, desc, template_argument_types
+            "{}{} template arguments: {:?}",
+            indent,
+            desc,
+            template_arguments.collect::<Vec<_>>()
         );
     }
 
-    if let Some(result_type) = clang_type.get_result_type() {
+    if let Some(result_type) = clang_type.result_type() {
         let result_type_desc = format!("{} result type", desc);
         show_type(&result_type_desc, &result_type, indent_level);
     }
 
-    if let Some(fields) = clang_type.get_fields() {
+    if let Some(fields) = clang_type.fields() {
         println!("{}{} fields:", indent, desc);
         for field in fields {
             show_tree(&field, indent_level + 1);
@@ -202,101 +208,89 @@ fn show_type(desc: &str, clang_type: &clang::Type, indent_level: usize) {
     }
 }
 
-fn show_tree(entity: &clang::Entity, indent_level: usize) {
+fn show_tree(cursor: &clang::Cursor, indent_level: usize) {
     let indent = (0..indent_level)
         .map(|_| "   ")
         .collect::<Vec<&str>>()
         .concat();
 
-    if let Some(name) = entity.get_name() {
-        println!("{}*** kind: {:?} - {} ***", indent, entity.get_kind(), name);
+    if let Some(name) = cursor.spelling() {
+        println!("{}*** kind: {:?} - {} ***", indent, cursor.kind(), name);
     } else {
-        println!("{}*** kind: {:?} ***", indent, entity.get_kind());
+        println!("{}*** kind: {:?} ***", indent, cursor.kind());
     }
-    if entity.get_display_name() != entity.get_name() {
-        if let Some(display_name) = entity.get_display_name() {
+    if cursor.display_name() != cursor.spelling() {
+        if let Some(display_name) = cursor.display_name() {
             println!("{}display name: {:?}", indent, display_name);
         }
     }
 
     if [
-        EntityKind::ObjCInstanceMethodDecl,
-        EntityKind::ObjCClassMethodDecl,
-        EntityKind::ObjCPropertyDecl,
+        CursorKind::ObjCInstanceMethodDecl,
+        CursorKind::ObjCClassMethodDecl,
+        CursorKind::ObjCPropertyDecl,
     ]
-    .contains(&entity.get_kind())
+    .contains(&cursor.kind())
     {
-        println!("{}objc optional: {:?}", indent, entity.is_objc_optional());
+        println!("{}objc optional: {:?}", indent, cursor.is_objc_optional());
     }
 
-    if let Some(location) = entity.get_location() {
+    if let Some(location) = cursor.location() {
         println!("{}location: {:?}", indent, location);
     }
 
-    if let Some(range) = entity.get_range() {
+    if let Some(range) = cursor.extent() {
         println!("{}range: {:?}", indent, range);
 
-        if entity.get_kind() == EntityKind::UnexposedAttr {
+        if cursor.kind() == CursorKind::UnexposedAttr {
             println!("{}tokens: {:?}", indent, range.tokenize());
         }
     }
 
-    if let Some(usr) = entity.get_usr() {
-        println!("{}usr: {}", indent, usr.0);
+    if let Some(usr) = cursor.usr() {
+        println!("{}usr: {}", indent, usr);
     }
 
-    if let Some(arguments) = entity.get_arguments() {
-        if !arguments.is_empty() {
-            println!("{}arguments:", indent);
+    if let Some(arguments) = cursor.arguments() {
+        if arguments.len() > 0 {
+            println!("{}arguments ({}):", indent, arguments.len());
             for arg in arguments {
                 show_tree(&arg, indent_level + 1);
             }
         }
     }
 
-    let availability = entity.get_availability();
+    let availability = cursor.availability();
     if availability != clang::Availability::Available {
         println!("{}availability: {:?}", indent, availability);
     }
 
-    let canonical_entity = entity.get_canonical_entity();
-    if &canonical_entity != entity {
-        println!("{}canonical entity: {:?}", indent, canonical_entity);
+    let canonical_cursor = cursor.canonical_cursor();
+    if &canonical_cursor != cursor {
+        println!("{}canonical cursor: {:?}", indent, canonical_cursor);
     }
 
-    if let Some(definition) = entity.get_definition() {
+    if let Some(definition) = cursor.definition() {
         println!("{}definition: {:?}", indent, definition);
     }
 
-    if let Some(external_symbol) = entity.get_external_symbol() {
-        println!("{}external symbol: {:?}", indent, external_symbol);
-    }
-
-    if let Some(module) = entity.get_module() {
-        println!("{}module: {:?}", indent, module);
-    }
-
-    if let Some(template) = entity.get_template() {
+    if let Some(template) = cursor.template() {
         println!("{}template: {:?}", indent, template);
     }
 
-    if let Some(template_kind) = entity.get_template_kind() {
+    if let Some(template_kind) = cursor.template_kind() {
         println!("{}template kind: {:?}", indent, template_kind);
     }
 
-    if let Some(template_arguments) = entity.get_template_arguments() {
-        println!("{}template_arguments: {:?}", indent, template_arguments);
-    }
-
-    if let Some(clang_type) = entity.get_type() {
+    if let Some(clang_type) = cursor.type_() {
         show_type("type", &clang_type, indent_level);
     }
 
-    if let Some(enum_underlying_type) = entity.get_enum_underlying_type() {
+    if let Some(enum_underlying_type) = cursor.enum_decl_int_type() {
         show_type("enum underlying type", &enum_underlying_type, indent_level);
     }
 
-    if let Some(typedef_underlying_type) = entity.get_typedef_underlying_type() {
+    if let Some(typedef_underlying_type) = cursor.typedef_decl_underlying_type() {
         show_type(
             "typedef underlying type",
             &typedef_underlying_type,
@@ -304,77 +298,66 @@ fn show_tree(entity: &clang::Entity, indent_level: usize) {
         );
     }
 
-    if let Some(visibility) = entity.get_visibility() {
-        println!("{}visibility: {:?}", indent, visibility);
-    }
-
-    if let Some(result_type) = entity.get_result_type() {
+    if let Some(result_type) = cursor.result_type() {
         show_type("result type", &result_type, indent_level);
     }
 
-    if let Some(mangled_name) = entity.get_mangled_name() {
-        println!("{}mangled_name: {:?}", indent, mangled_name);
+    if let Some(mangling) = cursor.mangling() {
+        println!("{}mangling: {:?}", indent, mangling);
     }
 
-    if let Some(objc_ib_outlet_collection_type) = entity.get_objc_ib_outlet_collection_type() {
+    if let Some(ib_outlet_collection_type) = cursor.ib_outlet_collection_type() {
         println!(
-            "{}objc_ib_outlet_collection_type: {:?}",
-            indent, objc_ib_outlet_collection_type
+            "{}ib_outlet_collection_type: {:?}",
+            indent, ib_outlet_collection_type
         );
     }
 
-    if let Some(objc_type_encoding) = entity.get_objc_type_encoding() {
+    if let Some(objc_type_encoding) = cursor.objc_type_encoding() {
         println!("{}objc type encoding: {:?}", indent, objc_type_encoding);
     }
 
-    if let Some(objc_selector_index) = entity.get_objc_selector_index() {
+    if let Some(objc_selector_index) = cursor.objc_selector_index() {
         println!("{}objc selector index: {:?}", indent, objc_selector_index);
     }
 
-    if let Some(objc_qualifiers) = entity.get_objc_qualifiers() {
-        println!("{}objc qualifiers: {:?}", indent, objc_qualifiers);
-    }
-
-    if let Some(objc_attributes) = entity.get_objc_attributes() {
+    if let Some(objc_attributes) = cursor.objc_attributes() {
         println!("{}objc attributes: {:?}", indent, objc_attributes);
     }
 
     // Seems to crash...
-    // if let Some(objc_receiver_type) = entity.get_objc_receiver_type() {
+    // if let Some(objc_receiver_type) = cursor.get_objc_receiver_type() {
     //     println!("{}objc receiver type: {:?}", indent, objc_receiver_type);
     // }
 
-    // Getting a "pointer being freed was not allocated" when trying to use it...
-    // if let Some(platform_availability) = entity.get_platform_availability() {
-    //     if !platform_availability.is_empty() {
-    //         println!(
-    //             "{}platform availability: {:?}",
-    //             indent, platform_availability
-    //         );
-    //     }
-    // }
+    if let Some(platform_availability) = cursor.platform_availability() {
+        println!(
+            "{}platform availability: {:?}",
+            indent, platform_availability
+        );
+    }
 
-    if let Some(reference) = entity.get_reference() {
+    if let Some(reference) = cursor.referenced() {
         println!("{}reference: {:?}", indent, reference);
     }
 
-    if let Some(storage_class) = entity.get_storage_class() {
+    if let Some(storage_class) = cursor.storage_class() {
         println!("{}storage class: {:?}", indent, storage_class);
     }
 
-    if let Ok(offset_of_field) = entity.get_offset_of_field() {
+    if let Some(offset_of_field) = cursor.offset_of_field() {
         println!("{}offset of field: {:?}", indent, offset_of_field);
     }
 
-    // if let Some(semantic_parent) = entity.get_semantic_parent() {
+    // if let Some(semantic_parent) = cursor.semantic_parent() {
     //     println!("{}semantic parent: {:?}", indent, semantic_parent);
     // }
 
-    // if let Some(lexical_parent) = entity.get_lexical_parent() {
+    // if let Some(lexical_parent) = cursor.get_lexical_parent() {
     //     println!("{}lexical parent: {:?}", indent, lexical_parent);
     // }
 
-    let children = entity.get_children();
+    let children = cursor.children();
     if !children.is_empty() {
         println!("{}children:", indent);
         for child in children {
@@ -436,11 +419,11 @@ impl ObjPtr {
     }
 }
 
-fn parm_decl_children<'a>(entity: &clang::Entity<'a>) -> impl Iterator<Item = clang::Entity<'a>> {
-    entity
-        .get_children()
+fn parm_decl_children<'a>(cursor: &clang::Cursor<'a>) -> impl Iterator<Item = clang::Cursor<'a>> {
+    cursor
+        .children()
         .into_iter()
-        .filter(|child| child.get_kind() == EntityKind::ParmDecl)
+        .filter(|child| child.kind() == CursorKind::ParmDecl)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -450,13 +433,13 @@ struct Field {
 }
 
 impl Field {
-    fn from_entity(entity: &clang::Entity, unnamed_tag_ids: &TagIdMap) -> Self {
-        assert_eq!(entity.get_kind(), EntityKind::FieldDecl);
+    fn from_cursor(cursor: &clang::Cursor, unnamed_tag_ids: &TagIdMap) -> Self {
+        assert_eq!(cursor.kind(), CursorKind::FieldDecl);
         Field {
-            name: entity.get_name(),
+            name: cursor.spelling(),
             objc_type: ObjCType::from_type(
-                &entity.get_type().unwrap(),
-                &mut parm_decl_children(entity),
+                &cursor.type_().unwrap(),
+                &mut parm_decl_children(cursor),
                 unnamed_tag_ids,
             ),
         }
@@ -470,20 +453,20 @@ pub(crate) enum TagId {
 }
 
 impl TagId {
-    fn from_entity(decl: &clang::Entity, unnamed_tag_ids: &TagIdMap) -> Self {
+    fn from_cursor(decl: &clang::Cursor, unnamed_tag_ids: &TagIdMap) -> Self {
         assert!([
-            EntityKind::StructDecl,
-            EntityKind::UnionDecl,
-            EntityKind::EnumDecl,
+            CursorKind::StructDecl,
+            CursorKind::UnionDecl,
+            CursorKind::EnumDecl,
         ]
-        .contains(&decl.get_kind()));
+        .contains(&decl.kind()));
 
-        if let Some(name) = decl.get_name() {
+        if let Some(name) = decl.spelling() {
             TagId::Named(name)
         } else {
             TagId::Unnamed(
                 *unnamed_tag_ids
-                    .get(&decl.get_usr().unwrap())
+                    .get(&decl.usr().unwrap())
                     .expect("all unnamed tag should have an id assigned"),
             )
         }
@@ -505,19 +488,19 @@ pub(crate) struct TagRef {
 
 impl TagRef {
     fn from_type(clang_type: &clang::Type, unnamed_tag_ids: &TagIdMap) -> Self {
-        let decl = clang_type.get_declaration().unwrap();
+        let decl = clang_type.declaration().unwrap();
 
-        let kind = match decl.get_kind() {
-            EntityKind::StructDecl => TagKind::Struct,
-            EntityKind::UnionDecl => TagKind::Union,
-            EntityKind::EnumDecl => TagKind::Enum,
+        let kind = match decl.kind() {
+            CursorKind::StructDecl => TagKind::Struct,
+            CursorKind::UnionDecl => TagKind::Union,
+            CursorKind::EnumDecl => TagKind::Enum,
             unexpected_kind => panic!(
                 "Unexpected kind for tag declaration {:?}: {:?}",
                 unexpected_kind, clang_type
             ),
         };
 
-        let id = TagId::from_entity(&decl, unnamed_tag_ids);
+        let id = TagId::from_cursor(&decl, unnamed_tag_ids);
 
         TagRef { id, kind }
     }
@@ -534,16 +517,16 @@ bitflags! {
 }
 
 impl ParamAttrs {
-    fn from_decl(decl: &clang::Entity) -> Self {
-        assert_eq!(decl.get_kind(), EntityKind::ParmDecl);
+    fn from_decl(decl: &clang::Cursor) -> Self {
+        assert_eq!(decl.kind(), CursorKind::ParmDecl);
         let mut attrs = Self::empty();
-        for child in decl.get_children() {
-            match child.get_kind() {
-                EntityKind::NSConsumed => attrs.insert(Self::CONSUMED),
-                EntityKind::UnexposedAttr => {
-                    if let Some(range) = child.get_range() {
+        for child in decl.children() {
+            match child.kind() {
+                CursorKind::NSConsumed => attrs.insert(Self::CONSUMED),
+                CursorKind::UnexposedAttr => {
+                    if let Some(range) = child.extent() {
                         let tokens = range.tokenize();
-                        if tokens.len() == 1 && tokens[0].get_spelling() == "noescape" {
+                        if tokens.len() == 1 && tokens[0].spelling() == "noescape" {
                             attrs.insert(Self::NOESCAPE);
                         }
                     }
@@ -570,15 +553,15 @@ bitflags! {
 }
 
 impl CallableAttrs {
-    fn from_decl(decl: &clang::Entity) -> Self {
+    fn from_decl(decl: &clang::Cursor) -> Self {
         let mut attrs = Self::empty();
-        for child in decl.get_children() {
-            match child.get_kind() {
-                EntityKind::NSReturnsRetained => attrs.insert(Self::RETURNS_RETAINED),
-                EntityKind::UnexposedAttr => {
-                    if let Some(range) = child.get_range() {
+        for child in decl.children() {
+            match child.kind() {
+                CursorKind::NSReturnsRetained => attrs.insert(Self::RETURNS_RETAINED),
+                CursorKind::UnexposedAttr => {
+                    if let Some(range) = child.extent() {
                         let tokens = range.tokenize();
-                        if tokens[0].get_spelling() == "unavailable" {
+                        if tokens[0].spelling() == "unavailable" {
                             attrs.insert(Self::UNAVAILABLE);
                         }
                     }
@@ -601,18 +584,18 @@ pub(crate) struct CallableDesc {
 impl CallableDesc {
     fn from_type<'a>(
         clang_type: &clang::Type,
-        base_parm_decls: &mut impl Iterator<Item = clang::Entity<'a>>,
+        base_parm_decls: &mut impl Iterator<Item = clang::Cursor<'a>>,
         unnamed_tag_ids: &TagIdMap,
     ) -> Self {
-        if clang_type.get_kind() == TypeKind::Attributed {
+        if clang_type.kind() == TypeKind::Attributed {
             let mut callable = Self::from_type(
-                &clang_type.get_modified_type().unwrap(),
+                &clang_type.modified_type().unwrap(),
                 base_parm_decls,
                 unnamed_tag_ids,
             );
-            let display_name = clang_type.get_display_name();
+            let spelling = clang_type.spelling();
             // Yes, that is very ugly but I could not find a better way.
-            if display_name.contains("__attribute__((ns_returns_retained))") {
+            if spelling.contains("__attribute__((ns_returns_retained))") {
                 callable.attrs.insert(CallableAttrs::RETURNS_RETAINED);
             } else {
                 panic!(
@@ -625,30 +608,29 @@ impl CallableDesc {
 
         // result must be processed before parameters due to the order the entities are in base_parm_decls.
         let result = Box::new(ObjCType::from_type(
-            &clang_type.get_result_type().unwrap(),
+            &clang_type.result_type().unwrap(),
             base_parm_decls,
             unnamed_tag_ids,
         ));
 
-        let params = match clang_type.get_kind() {
-            TypeKind::FunctionNoPrototype => None,
-            TypeKind::FunctionPrototype => Some({
+        let params = match clang_type.kind() {
+            TypeKind::FunctionNoProto => None,
+            TypeKind::FunctionProto => Some({
                 clang_type
-                    .get_argument_types()
+                    .argument_types()
                     .unwrap()
-                    .iter()
                     .map(|_| {
                         // Not using the value of argument types, only their count.
-                        // The param decl taken from the entity seems to always have better information.
+                        // The param decl taken from the cursor seems to always have better information.
                         let parm_decl = base_parm_decls.next().unwrap();
                         let objc_type = ObjCType::from_type(
-                            &parm_decl.get_type().unwrap(),
+                            &parm_decl.type_().unwrap(),
                             &mut parm_decl_children(&parm_decl),
                             unnamed_tag_ids,
                         );
                         let attrs = ParamAttrs::from_decl(&parm_decl);
                         Param {
-                            name: parm_decl.get_name(),
+                            name: parm_decl.spelling(),
                             objc_type,
                             attrs,
                         }
@@ -664,7 +646,7 @@ impl CallableDesc {
         CallableDesc {
             result,
             params,
-            is_variadic: clang_type.is_variadic(),
+            is_variadic: clang_type.is_variadic_function(),
             attrs: CallableAttrs::empty(),
         }
     }
@@ -677,8 +659,8 @@ pub(crate) struct TypedefRef {
 
 impl TypedefRef {
     fn from_type(clang_type: &clang::Type) -> Self {
-        assert_eq!(clang_type.get_kind(), TypeKind::Typedef);
-        let name = clang_type.get_display_name();
+        assert_eq!(clang_type.kind(), TypeKind::Typedef);
+        let name = clang_type.spelling();
         TypedefRef { name }
     }
 }
@@ -726,9 +708,9 @@ bitflags! {
 }
 
 impl ValueAttrs {
-    fn from_decl(decl: &clang::Entity) -> Self {
+    fn from_decl(decl: &clang::Cursor) -> Self {
         let mut attrs = Self::empty();
-        if decl.get_availability() == clang::Availability::Deprecated {
+        if decl.availability() == clang::Availability::Deprecated {
             attrs.insert(Self::DEPRECATED);
         }
         attrs
@@ -743,7 +725,7 @@ pub(crate) struct EnumValue {
 }
 
 fn type_signedness(clang_type: &clang::Type) -> Option<Signedness> {
-    match clang_type.get_kind() {
+    match clang_type.kind() {
         TypeKind::SChar
         | TypeKind::CharS
         | TypeKind::Short
@@ -759,15 +741,15 @@ fn type_signedness(clang_type: &clang::Type) -> Option<Signedness> {
         | TypeKind::UInt
         | TypeKind::ULong
         | TypeKind::ULongLong => Some(Signedness::Unsigned),
-        TypeKind::Attributed => type_signedness(&clang_type.get_modified_type().unwrap()),
+        TypeKind::Attributed => type_signedness(&clang_type.modified_type().unwrap()),
         TypeKind::Typedef => type_signedness(
             &clang_type
-                .get_declaration()
+                .declaration()
                 .unwrap()
-                .get_typedef_underlying_type()
+                .typedef_decl_underlying_type()
                 .unwrap(),
         ),
-        TypeKind::Elaborated => type_signedness(&clang_type.get_elaborated_type().unwrap()),
+        TypeKind::Elaborated => type_signedness(&clang_type.named_type().unwrap()),
         _ => None,
     }
 }
@@ -826,10 +808,10 @@ pub(crate) enum ObjCType {
 impl ObjCType {
     fn from_type<'a>(
         clang_type: &clang::Type,
-        base_parm_decls: &mut impl Iterator<Item = clang::Entity<'a>>,
+        base_parm_decls: &mut impl Iterator<Item = clang::Cursor<'a>>,
         unnamed_tag_ids: &TagIdMap,
     ) -> Self {
-        match clang_type.get_kind() {
+        match clang_type.kind() {
             TypeKind::Void => Self::Void,
             // SChar is "signed char", CharS is "char" when it is signed by default.
             TypeKind::SChar | TypeKind::CharS => Self::Num(NumKind::SChar),
@@ -847,7 +829,7 @@ impl ObjCType {
             TypeKind::Double => Self::Num(NumKind::Double),
             TypeKind::LongDouble => Self::Num(NumKind::LongDouble),
             TypeKind::Pointer => {
-                let pointee_type = clang_type.get_pointee_type().unwrap();
+                let pointee_type = clang_type.pointee_type().unwrap();
                 Self::Pointer(Pointer {
                     pointee: Box::new(Self::from_type(
                         &pointee_type,
@@ -859,14 +841,14 @@ impl ObjCType {
             }
             TypeKind::ObjCObjectPointer => {
                 let pointee_type = {
-                    let mut pointee = clang_type.get_pointee_type().unwrap();
+                    let mut pointee = clang_type.pointee_type().unwrap();
                     loop {
-                        match pointee.get_kind() {
+                        match pointee.kind() {
                             // TODO: Check what's the difference between ObjCObject and ObjCInterface
                             TypeKind::ObjCObject | TypeKind::ObjCInterface => break pointee,
                             // Attributed is for example when __kindof is used.
                             TypeKind::Attributed => {
-                                pointee = pointee.get_modified_type().unwrap();
+                                pointee = pointee.modified_type().unwrap();
                             }
                             unexpected_kind => {
                                 panic!("unexpected pointee kind {:?}", unexpected_kind)
@@ -875,19 +857,17 @@ impl ObjCType {
                     }
                 };
                 let protocols = pointee_type
-                    .get_objc_protocol_declarations()
-                    .iter()
+                    .objc_protocol_decls()
                     .map(|decl| {
-                        assert_eq!(decl.get_kind(), EntityKind::ObjCProtocolDecl);
-                        decl.get_name().unwrap()
+                        assert_eq!(decl.kind(), CursorKind::ObjCProtocolDecl);
+                        decl.spelling().unwrap()
                     })
                     .collect();
 
                 let type_args: Vec<ObjCTypeArg> = pointee_type
-                    .get_objc_type_arguments()
-                    .iter()
+                    .objc_type_arg_types()
                     .map(|arg| {
-                        match Self::from_type(arg, &mut Vec::new().into_iter(), unnamed_tag_ids) {
+                        match Self::from_type(&arg, &mut Vec::new().into_iter(), unnamed_tag_ids) {
                             Self::ObjPtr(ptr) => ObjCTypeArg::ObjPtr(ptr),
                             Self::Typedef(typedef) => ObjCTypeArg::Typedef(typedef),
                             unexpected => {
@@ -897,11 +877,11 @@ impl ObjCType {
                     })
                     .collect();
 
-                let base_type = pointee_type.get_objc_object_base_type().unwrap();
+                let base_type = pointee_type.objc_object_base_type().unwrap();
 
-                if base_type.get_kind() == TypeKind::ObjCId {
+                if base_type.kind() == TypeKind::ObjCId {
                     assert!(type_args.is_empty());
-                    assert_eq!(base_type.get_display_name(), "id");
+                    assert_eq!(base_type.spelling(), "id");
                     Self::ObjPtr(ObjPtr {
                         kind: ObjPtrKind::Id(IdObjPtr { protocols }),
                         nullability: Nullability::Unspecified,
@@ -909,7 +889,7 @@ impl ObjCType {
                 } else {
                     Self::ObjPtr(ObjPtr {
                         kind: ObjPtrKind::SomeInstance(SomeInstanceObjPtr {
-                            interface: base_type.get_display_name(),
+                            interface: base_type.spelling(),
                             protocols,
                             type_args,
                         }),
@@ -919,11 +899,11 @@ impl ObjCType {
             }
             TypeKind::Attributed => {
                 let modified = Self::from_type(
-                    &clang_type.get_modified_type().unwrap(),
+                    &clang_type.modified_type().unwrap(),
                     base_parm_decls,
                     unnamed_tag_ids,
                 );
-                if let Some(nullability) = clang_type.get_nullability() {
+                if let Some(nullability) = clang_type.nullability() {
                     let nullability = nullability.into();
                     match modified {
                         Self::Pointer(ptr) => Self::Pointer(ptr.with_nullability(nullability)),
@@ -936,7 +916,7 @@ impl ObjCType {
                 }
             }
             TypeKind::ObjCTypeParam => Self::ObjPtr(ObjPtr {
-                kind: ObjPtrKind::TypeParam(clang_type.get_display_name()),
+                kind: ObjPtrKind::TypeParam(clang_type.spelling()),
                 nullability: Nullability::Unspecified,
             }),
             TypeKind::ObjCId => Self::ObjPtr(ObjPtr {
@@ -951,10 +931,10 @@ impl ObjCType {
                 nullability: Nullability::Unspecified,
             }),
             TypeKind::Typedef => {
-                let decl = clang_type.get_declaration().unwrap();
-                if decl.get_kind() == EntityKind::TemplateTypeParameter {
+                let decl = clang_type.declaration().unwrap();
+                if decl.kind() == CursorKind::TemplateTypeParameter {
                     Self::ObjPtr(ObjPtr {
-                        kind: ObjPtrKind::TypeParam(clang_type.get_display_name()),
+                        kind: ObjPtrKind::TypeParam(clang_type.spelling()),
                         nullability: Nullability::Unspecified,
                     })
                 } else {
@@ -962,18 +942,18 @@ impl ObjCType {
                 }
             }
             TypeKind::Elaborated => Self::from_type(
-                &clang_type.get_elaborated_type().unwrap(),
+                &clang_type.named_type().unwrap(),
                 base_parm_decls,
                 unnamed_tag_ids,
             ),
             TypeKind::Record | TypeKind::Enum => {
                 Self::Tag(TagRef::from_type(&clang_type, unnamed_tag_ids))
             }
-            TypeKind::FunctionNoPrototype | TypeKind::FunctionPrototype => Self::Function(
+            TypeKind::FunctionNoProto | TypeKind::FunctionProto => Self::Function(
                 CallableDesc::from_type(&clang_type, base_parm_decls, unnamed_tag_ids),
             ),
             TypeKind::ConstantArray => Self::Array(Array {
-                size: Some(clang_type.get_size().unwrap()),
+                size: Some(clang_type.num_elements().unwrap()),
                 element: Box::new(Self::from_type(
                     &clang_type.get_element_type().unwrap(),
                     base_parm_decls,
@@ -990,7 +970,7 @@ impl ObjCType {
             }),
             TypeKind::BlockPointer => Self::ObjPtr(ObjPtr {
                 kind: ObjPtrKind::Block(CallableDesc::from_type(
-                    &clang_type.get_pointee_type().unwrap(),
+                    &clang_type.pointee_type().unwrap(),
                     base_parm_decls,
                     unnamed_tag_ids,
                 )),
@@ -1019,26 +999,26 @@ struct Location {
 }
 
 impl Location {
-    fn from_entity(entity: &clang::Entity) -> Self {
-        let source_location = entity.get_location().unwrap();
+    fn from_cursor(cursor: &clang::Cursor) -> Self {
+        let source_location = cursor.location().unwrap();
         // let location = source_location.get_file_location();
-        let location = source_location.get_spelling_location();
+        let location = source_location.spelling_location();
 
         let file_kind = if let Some(file) = location.file {
             // For some reason, source_location.is_in_main_file() doesn't seem to work properly so do it ourselves.
-            let tu_file = entity
-                .get_translation_unit()
-                .get_entity()
-                .get_range()
+            let tu_file = cursor
+                .tu()
+                .cursor()
+                .extent()
                 .unwrap()
-                .get_start()
-                .get_file_location()
+                .start()
+                .file_location()
                 .file
                 .unwrap();
             if tu_file == file {
                 FileKind::Main
             } else {
-                FileKind::Some(file.get_path().to_str().unwrap().to_string())
+                FileKind::Some(file.file_name())
             }
         } else {
             FileKind::None
@@ -1063,11 +1043,11 @@ pub(crate) struct ObjCParam {
 }
 
 impl ObjCParam {
-    fn from_entity(decl: &clang::Entity, unnamed_tag_ids: &TagIdMap) -> Self {
-        assert_eq!(decl.get_kind(), EntityKind::ParmDecl);
-        let name = decl.get_name().unwrap();
+    fn from_cursor(decl: &clang::Cursor, unnamed_tag_ids: &TagIdMap) -> Self {
+        assert_eq!(decl.kind(), CursorKind::ParmDecl);
+        let name = decl.spelling().unwrap();
         let objc_type = ObjCType::from_type(
-            &decl.get_type().unwrap(),
+            &decl.type_().unwrap(),
             &mut parm_decl_children(decl),
             unnamed_tag_ids,
         );
@@ -1096,30 +1076,29 @@ pub(crate) struct ObjCMethod {
 }
 
 impl ObjCMethod {
-    fn from_entity(entity: &clang::Entity, unnamed_tag_ids: &TagIdMap) -> Self {
-        let kind = match entity.get_kind() {
-            EntityKind::ObjCClassMethodDecl => ObjCMethodKind::Class,
-            EntityKind::ObjCInstanceMethodDecl => ObjCMethodKind::Instance,
-            _ => panic!("entity should be either a class or instance method"),
+    fn from_cursor(cursor: &clang::Cursor, unnamed_tag_ids: &TagIdMap) -> Self {
+        let kind = match cursor.kind() {
+            CursorKind::ObjCClassMethodDecl => ObjCMethodKind::Class,
+            CursorKind::ObjCInstanceMethodDecl => ObjCMethodKind::Instance,
+            _ => panic!("cursor should be either a class or instance method"),
         };
 
-        let params = entity
-            .get_arguments()
+        let params = cursor
+            .arguments()
             .unwrap()
-            .iter()
-            .map(|arg| ObjCParam::from_entity(arg, unnamed_tag_ids))
+            .map(|arg| ObjCParam::from_cursor(&arg, unnamed_tag_ids))
             .collect();
 
         let result = ObjCType::from_type(
-            &entity.get_result_type().unwrap(),
-            &mut parm_decl_children(entity),
+            &cursor.result_type().unwrap(),
+            &mut parm_decl_children(cursor),
             unnamed_tag_ids,
         );
 
-        let attrs = CallableAttrs::from_decl(entity);
+        let attrs = CallableAttrs::from_decl(cursor);
 
         ObjCMethod {
-            name: entity.get_name().unwrap(),
+            name: cursor.spelling().unwrap(),
             kind,
             params,
             result,
@@ -1128,25 +1107,25 @@ impl ObjCMethod {
     }
 }
 
-fn is_generated_from_property(method_entity: &clang::Entity) -> bool {
+fn is_generated_from_property(method_cursor: &clang::Cursor) -> bool {
     assert!([
-        EntityKind::ObjCInstanceMethodDecl,
-        EntityKind::ObjCClassMethodDecl,
+        CursorKind::ObjCInstanceMethodDecl,
+        CursorKind::ObjCClassMethodDecl,
     ]
-    .contains(&method_entity.get_kind()));
-    let parent = method_entity.get_semantic_parent().unwrap();
+    .contains(&method_cursor.kind()));
+    let parent = method_cursor.semantic_parent().unwrap();
     assert!([
-        EntityKind::ObjCInterfaceDecl,
-        EntityKind::ObjCProtocolDecl,
-        EntityKind::ObjCCategoryDecl,
+        CursorKind::ObjCInterfaceDecl,
+        CursorKind::ObjCProtocolDecl,
+        CursorKind::ObjCCategoryDecl,
     ]
-    .contains(&parent.get_kind()));
-    let method_location = method_entity.get_location().unwrap();
+    .contains(&parent.kind()));
+    let method_location = method_cursor.location().unwrap();
     parent
-        .get_children()
+        .children()
         .into_iter()
-        .filter(|sibling| sibling.get_kind() == EntityKind::ObjCPropertyDecl)
-        .any(|sibling| sibling.get_location().unwrap() == method_location)
+        .filter(|sibling| sibling.kind() == CursorKind::ObjCPropertyDecl)
+        .any(|sibling| sibling.location().unwrap() == method_location)
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -1172,73 +1151,60 @@ pub(crate) struct Property {
 }
 
 impl Property {
-    fn from_entity(entity: &clang::Entity, unnamed_tag_ids: &TagIdMap) -> Self {
-        assert_eq!(entity.get_kind(), EntityKind::ObjCPropertyDecl);
+    fn from_cursor(cursor: &clang::Cursor, unnamed_tag_ids: &TagIdMap) -> Self {
+        assert_eq!(cursor.kind(), CursorKind::ObjCPropertyDecl);
 
-        let name = entity.get_name().unwrap();
+        let name = cursor.spelling().unwrap();
         let value = ObjCType::from_type(
-            &entity.get_type().unwrap(),
-            &mut parm_decl_children(&entity),
+            &cursor.type_().unwrap(),
+            &mut parm_decl_children(&cursor),
             unnamed_tag_ids,
         );
-        let attributes = entity
-            .get_objc_attributes()
-            .unwrap_or_else(|| clang::ObjCAttributes {
-                readonly: false,
-                getter: false,
-                assign: false,
-                readwrite: false,
-                retain: false,
-                copy: false,
-                nonatomic: false,
-                setter: false,
-                atomic: false,
-                weak: false,
-                strong: false,
-                unsafe_retained: false,
-                class: false,
-            });
+
+        use clang::ObjCAttributes;
+        let attributes = cursor
+            .objc_attributes()
+            .unwrap_or_else(|| ObjCAttributes::empty());
         let is_atomic = {
-            if attributes.atomic {
-                assert!(!attributes.nonatomic);
+            if attributes.contains(ObjCAttributes::ATOMIC) {
+                assert!(!attributes.contains(ObjCAttributes::NONATOMIC));
                 true
             } else {
-                !attributes.nonatomic
+                !attributes.contains(ObjCAttributes::NONATOMIC)
             }
         };
-        let is_writable = attributes.readwrite;
+        let is_writable = attributes.contains(ObjCAttributes::READWRITE);
         if is_writable {
-            assert!(!attributes.readonly);
+            assert!(!attributes.contains(ObjCAttributes::READONLY));
         }
-        let is_class = attributes.class;
+        let is_class = attributes.contains(ObjCAttributes::CLASS);
         let ownership = {
-            if attributes.strong {
-                assert!(!attributes.weak);
-                assert!(!attributes.copy);
-                assert!(!attributes.assign);
-                assert!(!attributes.retain);
-                assert!(!attributes.unsafe_retained);
+            if attributes.contains(ObjCAttributes::STRONG) {
+                assert!(!attributes.contains(ObjCAttributes::WEAK));
+                assert!(!attributes.contains(ObjCAttributes::COPY));
+                assert!(!attributes.contains(ObjCAttributes::ASSIGN));
+                assert!(!attributes.contains(ObjCAttributes::RETAIN));
+                assert!(!attributes.contains(ObjCAttributes::UNSAFE_UNRETAINED));
                 PropOwnership::Strong
-            } else if attributes.weak {
-                assert!(!attributes.copy);
-                assert!(!attributes.assign);
-                assert!(!attributes.retain);
-                assert!(!attributes.unsafe_retained);
+            } else if attributes.contains(ObjCAttributes::WEAK) {
+                assert!(!attributes.contains(ObjCAttributes::COPY));
+                assert!(!attributes.contains(ObjCAttributes::ASSIGN));
+                assert!(!attributes.contains(ObjCAttributes::RETAIN));
+                assert!(!attributes.contains(ObjCAttributes::UNSAFE_UNRETAINED));
                 PropOwnership::Weak
-            } else if attributes.copy {
-                assert!(!attributes.assign);
-                assert!(!attributes.retain);
-                assert!(!attributes.unsafe_retained);
+            } else if attributes.contains(ObjCAttributes::COPY) {
+                assert!(!attributes.contains(ObjCAttributes::ASSIGN));
+                assert!(!attributes.contains(ObjCAttributes::RETAIN));
+                assert!(!attributes.contains(ObjCAttributes::UNSAFE_UNRETAINED));
                 PropOwnership::Copy
-            } else if attributes.assign {
-                assert!(!attributes.retain);
-                assert!(!attributes.unsafe_retained);
+            } else if attributes.contains(ObjCAttributes::ASSIGN) {
+                assert!(!attributes.contains(ObjCAttributes::RETAIN));
+                assert!(!attributes.contains(ObjCAttributes::UNSAFE_UNRETAINED));
                 PropOwnership::Assign
-            } else if attributes.retain {
-                assert!(!attributes.unsafe_retained);
+            } else if attributes.contains(ObjCAttributes::RETAIN) {
+                assert!(!attributes.contains(ObjCAttributes::UNSAFE_UNRETAINED));
                 PropOwnership::Retain
-            } else if attributes.unsafe_retained {
-                // TODO: The name in the clang crate has to be fixed (it's unsafe_unretained, not unsafe_retained)
+            } else if attributes.contains(ObjCAttributes::UNSAFE_UNRETAINED) {
                 PropOwnership::UnsafeUnretained
             } else {
                 PropOwnership::Strong
@@ -1246,40 +1212,42 @@ impl Property {
         };
         let getter;
         let setter;
-        if attributes.getter || attributes.setter {
-            let parent = entity.get_semantic_parent().unwrap();
-            let property_location = entity.get_location().unwrap();
-            let methods_at_same_location: Vec<clang::Entity> = parent
-                .get_children()
+        if attributes.contains(ObjCAttributes::GETTER)
+            || attributes.contains(ObjCAttributes::SETTER)
+        {
+            let parent = cursor.semantic_parent().unwrap();
+            let property_location = cursor.location().unwrap();
+            let methods_at_same_location: Vec<clang::Cursor> = parent
+                .children()
                 .into_iter()
                 .filter(|sibling| {
                     [
-                        EntityKind::ObjCInstanceMethodDecl,
-                        EntityKind::ObjCClassMethodDecl,
+                        CursorKind::ObjCInstanceMethodDecl,
+                        CursorKind::ObjCClassMethodDecl,
                     ]
-                    .contains(&sibling.get_kind())
-                        && sibling.get_location().unwrap() == property_location
+                    .contains(&sibling.kind())
+                        && sibling.location().unwrap() == property_location
                 })
                 .collect();
-            if attributes.getter {
+            if attributes.contains(ObjCAttributes::GETTER) {
                 getter = Some(
                     methods_at_same_location
                         .iter()
-                        .find(|method| method.get_arguments().unwrap().is_empty())
+                        .find(|method| method.arguments().unwrap().len() == 0)
                         .unwrap()
-                        .get_name()
+                        .spelling()
                         .unwrap(),
                 );
             } else {
                 getter = None;
             }
-            if attributes.setter {
+            if attributes.contains(ObjCAttributes::SETTER) {
                 setter = Some(
                     methods_at_same_location
                         .iter()
-                        .find(|method| !method.get_arguments().unwrap().is_empty())
+                        .find(|method| method.arguments().unwrap().len() > 0)
                         .unwrap()
-                        .get_name()
+                        .spelling()
                         .unwrap(),
                 );
             } else {
@@ -1315,45 +1283,45 @@ pub(crate) struct InterfaceDef {
 }
 
 impl InterfaceDef {
-    fn from_entity(entity: &clang::Entity, unnamed_tag_ids: &TagIdMap) -> Self {
-        assert_eq!(entity.get_kind(), EntityKind::ObjCInterfaceDecl);
-        let name = entity.get_name().unwrap();
-        let children = entity.get_children();
+    fn from_cursor(cursor: &clang::Cursor, unnamed_tag_ids: &TagIdMap) -> Self {
+        assert_eq!(cursor.kind(), CursorKind::ObjCInterfaceDecl);
+        let name = cursor.spelling().unwrap();
+        let children = cursor.children();
 
         let superclass = children
             .iter()
-            .find(|child| child.get_kind() == EntityKind::ObjCSuperClassRef)
-            .map(|child| child.get_name().unwrap());
+            .find(|child| child.kind() == CursorKind::ObjCSuperClassRef)
+            .map(|child| child.spelling().unwrap());
         let adopted_protocols = children
             .iter()
-            .filter(|child| child.get_kind() == EntityKind::ObjCProtocolRef)
-            .map(|child| child.get_name().unwrap())
+            .filter(|child| child.kind() == CursorKind::ObjCProtocolRef)
+            .map(|child| child.spelling().unwrap())
             .collect();
         let template_params = children
             .iter()
-            .filter(|child| child.get_kind() == EntityKind::TemplateTypeParameter)
-            .map(|child| child.get_name().unwrap())
+            .filter(|child| child.kind() == CursorKind::TemplateTypeParameter)
+            .map(|child| child.spelling().unwrap())
             .collect();
         let methods = children
             .iter()
             .filter(|child| {
                 [
-                    EntityKind::ObjCInstanceMethodDecl,
-                    EntityKind::ObjCClassMethodDecl,
+                    CursorKind::ObjCInstanceMethodDecl,
+                    CursorKind::ObjCClassMethodDecl,
                 ]
-                .contains(&child.get_kind())
+                .contains(&child.kind())
             })
             // Methods generated from property don't have children with the type info we want
             // so for the time being just ignore them.
             .filter(|method| !is_generated_from_property(method))
-            .map(|method| ObjCMethod::from_entity(method, unnamed_tag_ids))
+            .map(|method| ObjCMethod::from_cursor(method, unnamed_tag_ids))
             .collect();
         let properties = children
             .iter()
-            .filter(|child| child.get_kind() == EntityKind::ObjCPropertyDecl)
-            .map(|prop| Property::from_entity(prop, unnamed_tag_ids))
+            .filter(|child| child.kind() == CursorKind::ObjCPropertyDecl)
+            .map(|prop| Property::from_cursor(prop, unnamed_tag_ids))
             .collect();
-        let origin = Origin::from_entity(entity);
+        let origin = Origin::from_cursor(cursor);
 
         InterfaceDef {
             name,
@@ -1378,47 +1346,47 @@ pub(crate) struct CategoryDef {
 }
 
 impl CategoryDef {
-    fn from_entity(entity: &clang::Entity, unnamed_tag_ids: &TagIdMap) -> Self {
-        assert_eq!(entity.get_kind(), EntityKind::ObjCCategoryDecl);
-        let children = entity.get_children();
+    fn from_cursor(cursor: &clang::Cursor, unnamed_tag_ids: &TagIdMap) -> Self {
+        assert_eq!(cursor.kind(), CursorKind::ObjCCategoryDecl);
+        let children = cursor.children();
 
-        let name = entity.get_name();
+        let name = cursor.spelling();
 
         let class = children
             .iter()
-            .find(|child| child.get_kind() == EntityKind::ObjCClassRef)
+            .find(|child| child.kind() == CursorKind::ObjCClassRef)
             .unwrap()
-            .get_name()
+            .spelling()
             .unwrap();
 
         let adopted_protocols = children
             .iter()
-            .filter(|child| child.get_kind() == EntityKind::ObjCProtocolRef)
-            .map(|child| child.get_name().unwrap())
+            .filter(|child| child.kind() == CursorKind::ObjCProtocolRef)
+            .map(|child| child.spelling().unwrap())
             .collect();
 
         let methods = children
             .iter()
             .filter(|child| {
                 [
-                    EntityKind::ObjCInstanceMethodDecl,
-                    EntityKind::ObjCClassMethodDecl,
+                    CursorKind::ObjCInstanceMethodDecl,
+                    CursorKind::ObjCClassMethodDecl,
                 ]
-                .contains(&child.get_kind())
+                .contains(&child.kind())
             })
             // Methods generated from property don't have children with the type info we want
             // so for the time being just ignore them.
             .filter(|method| !is_generated_from_property(method))
-            .map(|method| ObjCMethod::from_entity(method, unnamed_tag_ids))
+            .map(|method| ObjCMethod::from_cursor(method, unnamed_tag_ids))
             .collect();
 
         let properties = children
             .iter()
-            .filter(|child| child.get_kind() == EntityKind::ObjCPropertyDecl)
-            .map(|prop| Property::from_entity(prop, unnamed_tag_ids))
+            .filter(|child| child.kind() == CursorKind::ObjCPropertyDecl)
+            .map(|prop| Property::from_cursor(prop, unnamed_tag_ids))
             .collect();
 
-        let origin = Origin::from_entity(entity);
+        let origin = Origin::from_cursor(cursor);
 
         CategoryDef {
             name,
@@ -1453,47 +1421,47 @@ pub(crate) struct ProtocolDef {
 }
 
 impl ProtocolDef {
-    fn from_entity(entity: &clang::Entity, unnamed_tag_ids: &TagIdMap) -> Self {
-        assert_eq!(entity.get_kind(), EntityKind::ObjCProtocolDecl);
-        let children = entity.get_children();
+    fn from_cursor(cursor: &clang::Cursor, unnamed_tag_ids: &TagIdMap) -> Self {
+        assert_eq!(cursor.kind(), CursorKind::ObjCProtocolDecl);
+        let children = cursor.children();
 
         let inherited_protocols = children
             .iter()
-            .filter(|child| child.get_kind() == EntityKind::ObjCProtocolRef)
-            .map(|child| child.get_name().unwrap())
+            .filter(|child| child.kind() == CursorKind::ObjCProtocolRef)
+            .map(|child| child.spelling().unwrap())
             .collect();
 
         let methods = children
             .iter()
             .filter(|child| {
                 [
-                    EntityKind::ObjCInstanceMethodDecl,
-                    EntityKind::ObjCClassMethodDecl,
+                    CursorKind::ObjCInstanceMethodDecl,
+                    CursorKind::ObjCClassMethodDecl,
                 ]
-                .contains(&child.get_kind())
+                .contains(&child.kind())
             })
             // Methods generated from property don't have children with the type info we want
             // so for the time being just ignore them.
             .filter(|child| !is_generated_from_property(child))
             .map(|child| ProtocolMethod {
-                method: ObjCMethod::from_entity(child, unnamed_tag_ids),
+                method: ObjCMethod::from_cursor(child, unnamed_tag_ids),
                 is_optional: child.is_objc_optional(),
             })
             .collect();
 
         let properties = children
             .iter()
-            .filter(|child| child.get_kind() == EntityKind::ObjCPropertyDecl)
+            .filter(|child| child.kind() == CursorKind::ObjCPropertyDecl)
             .map(|child| ProtocolProperty {
-                property: Property::from_entity(child, unnamed_tag_ids),
+                property: Property::from_cursor(child, unnamed_tag_ids),
                 is_optional: child.is_objc_optional(),
             })
             .collect();
 
-        let origin = Origin::from_entity(entity);
+        let origin = Origin::from_cursor(cursor);
 
         ProtocolDef {
-            name: entity.get_name().unwrap(),
+            name: cursor.spelling().unwrap(),
             inherited_protocols,
             methods,
             properties,
@@ -1510,16 +1478,16 @@ pub(crate) struct TypedefDecl {
 }
 
 impl TypedefDecl {
-    fn from_entity(decl: &clang::Entity, unnamed_tag_ids: &TagIdMap) -> Self {
-        assert_eq!(decl.get_kind(), EntityKind::TypedefDecl);
+    fn from_cursor(decl: &clang::Cursor, unnamed_tag_ids: &TagIdMap) -> Self {
+        assert_eq!(decl.kind(), CursorKind::TypedefDecl);
 
-        let name = decl.get_name().unwrap();
+        let name = decl.spelling().unwrap();
         let underlying = ObjCType::from_type(
-            &decl.get_typedef_underlying_type().unwrap(),
+            &decl.typedef_decl_underlying_type().unwrap(),
             &mut parm_decl_children(&decl),
             unnamed_tag_ids,
         );
-        let origin = Origin::from_entity(decl);
+        let origin = Origin::from_cursor(decl);
 
         TypedefDecl {
             name,
@@ -1544,29 +1512,29 @@ pub(crate) struct RecordDef {
 }
 
 impl RecordDef {
-    fn from_entity(decl: &clang::Entity, unnamed_tag_ids: &TagIdMap) -> Self {
-        let id = TagId::from_entity(decl, unnamed_tag_ids);
+    fn from_cursor(decl: &clang::Cursor, unnamed_tag_ids: &TagIdMap) -> Self {
+        let id = TagId::from_cursor(decl, unnamed_tag_ids);
 
-        let kind = match decl.get_kind() {
-            EntityKind::StructDecl => RecordKind::Struct,
-            EntityKind::UnionDecl => RecordKind::Union,
+        let kind = match decl.kind() {
+            CursorKind::StructDecl => RecordKind::Struct,
+            CursorKind::UnionDecl => RecordKind::Union,
             unexpected => panic!("Record declaration is not expected to be {:?}", unexpected),
         };
 
         assert!(
-            decl.get_definition().is_some(),
+            decl.definition().is_some(),
             "An record definition should have fields definition"
         );
         let fields = decl
-            .get_type()
+            .type_()
             .unwrap()
-            .get_fields()
+            .fields()
             .unwrap()
             .iter()
-            .map(|field| Field::from_entity(field, unnamed_tag_ids))
+            .map(|field| Field::from_cursor(field, unnamed_tag_ids))
             .collect();
 
-        let origin = Origin::from_entity(decl);
+        let origin = Origin::from_cursor(decl);
 
         RecordDef {
             id,
@@ -1585,14 +1553,14 @@ pub(crate) struct FuncDecl {
 }
 
 impl FuncDecl {
-    fn from_entity(decl: &clang::Entity, unnamed_tag_ids: &TagIdMap) -> Self {
-        assert_eq!(decl.get_kind(), EntityKind::FunctionDecl);
-        let clang_type = decl.get_type().unwrap();
+    fn from_cursor(decl: &clang::Cursor, unnamed_tag_ids: &TagIdMap) -> Self {
+        assert_eq!(decl.kind(), CursorKind::FunctionDecl);
+        let clang_type = decl.type_().unwrap();
 
-        let name = decl.get_name().unwrap();
+        let name = decl.spelling().unwrap();
         let desc =
             CallableDesc::from_type(&clang_type, &mut parm_decl_children(&decl), unnamed_tag_ids);
-        let origin = Origin::from_entity(decl);
+        let origin = Origin::from_cursor(decl);
 
         FuncDecl { name, desc, origin }
     }
@@ -1607,29 +1575,29 @@ pub(crate) struct EnumDef {
 }
 
 impl EnumDef {
-    fn from_entity(decl: &clang::Entity, unnamed_tag_ids: &TagIdMap) -> Self {
-        assert_eq!(decl.get_kind(), EntityKind::EnumDecl);
+    fn from_cursor(decl: &clang::Cursor, unnamed_tag_ids: &TagIdMap) -> Self {
+        assert_eq!(decl.kind(), CursorKind::EnumDecl);
 
-        let id = TagId::from_entity(decl, unnamed_tag_ids);
+        let id = TagId::from_cursor(decl, unnamed_tag_ids);
 
         let underlying = ObjCType::from_type(
-            &decl.get_enum_underlying_type().unwrap(),
+            &decl.enum_decl_int_type().unwrap(),
             &mut parm_decl_children(&decl),
             unnamed_tag_ids,
         );
 
-        assert!(decl.get_definition().is_some());
-        let signedness = type_signedness(&decl.get_enum_underlying_type().unwrap())
+        assert!(decl.definition().is_some());
+        let signedness = type_signedness(&decl.enum_decl_int_type().unwrap())
             .expect("The underlying type of an enum should have a signedness");
         let values = decl
-            .get_children()
+            .children()
             .into_iter()
-            .filter(|child| child.get_kind() == EntityKind::EnumConstantDecl)
+            .filter(|child| child.kind() == CursorKind::EnumConstantDecl)
             .map(|decl| {
-                let values = decl.get_enum_constant_value().unwrap();
+                let values = decl.enum_constant_value().unwrap();
 
                 EnumValue {
-                    name: decl.get_name().unwrap(),
+                    name: decl.spelling().unwrap(),
                     value: match signedness {
                         Signedness::Signed => SignedOrNotInt::Signed(values.0),
                         Signedness::Unsigned => SignedOrNotInt::Unsigned(values.1),
@@ -1638,7 +1606,7 @@ impl EnumDef {
                 }
             })
             .collect();
-        let origin = Origin::from_entity(decl);
+        let origin = Origin::from_cursor(decl);
 
         EnumDef {
             id,
@@ -1663,17 +1631,17 @@ pub(crate) enum Decl {
 
 #[derive(Debug)]
 pub(crate) enum ParseError {
-    SourceError(clang::SourceError),
+    ClangError(clang::ClangError),
     CompilationError(String),
 }
 
-impl From<clang::SourceError> for ParseError {
-    fn from(err: clang::SourceError) -> Self {
-        ParseError::SourceError(err)
+impl From<clang::ClangError> for ParseError {
+    fn from(err: clang::ClangError) -> Self {
+        ParseError::ClangError(err)
     }
 }
 
-type TagIdMap = HashMap<clang::Usr, u32>;
+type TagIdMap = HashMap<String, u32>;
 
 fn preprocess_objc(source: &str) -> String {
     use std::io::Write;
@@ -1711,130 +1679,140 @@ fn preprocess_objc(source: &str) -> String {
 ///
 /// Should only be used for debugging purpose. Definitions with cycles can end up in a stack overflow.
 pub(crate) fn print_full_clang_ast(source: &str) {
-    let clang = Clang::new().expect("Could not load libclang");
-
     // Preprocess before to get more easily interesting tokens coming from #defines.
     let source: &str = &preprocess_objc(source);
 
     // The documentation says that files specified as unsaved must exist so create a dummy temporary empty file
     let file = tempfile::NamedTempFile::new().unwrap();
-    let index = clang::Index::new(&clang, false, true);
-    let mut parser = index.parser(file.path());
-    configure_parser(&mut parser);
+    let index = clang::Index::new(false, true);
+    let (args, options) = parser_configuration();
 
-    parser.unsaved(&[clang::Unsaved::new(file.path(), source)]);
-    let tu = parser.parse().expect("source should build cleanly");
-    show_tree(&tu.get_entity(), 0);
+    let tu = index
+        .parse(
+            &args,
+            file.path(),
+            &[clang::UnsavedFile::new(file.path(), source)],
+            options,
+        )
+        .expect("source should build cleanly");
+    show_tree(&tu.cursor(), 0);
 }
 
-fn configure_parser(parser: &mut clang::Parser) {
-    parser.arguments(&[
-        "-x",
-        "objective-c", // The file doesn't have an Objective-C extension so set the language explicitely (for some reason -ObjC doesn't work properly)
-        "-fobjc-arc",
-        "-isysroot",
-        &sdk_path(AppleSdk::MacOs),
-    ]);
-    parser.skip_function_bodies(true);
-    parser.include_attributed_types(true); // Needed to get nullability
-    parser.visit_implicit_attributes(true); // TODO: Check if needed
+fn parser_configuration() -> (Vec<String>, clang::TuOptions) {
+    use clang::TuOptions;
+    (
+        vec![
+            "-x".to_string(),
+            "objective-c".to_string(), // The file doesn't have an Objective-C extension so set the language explicitely (for some reason -ObjC doesn't work properly)
+            "-fobjc-arc".to_string(),
+            "-isysroot".to_string(),
+            sdk_path(AppleSdk::MacOs),
+        ],
+        TuOptions::SKIP_FUNCTION_BODIES
+            | TuOptions::INCLUDE_ATTRIBUTED_TYPES // Needed to get nullability
+            | TuOptions::VISIT_IMPLICIT_ATTRIBUTES, // TODO: Check if needed
+    )
 }
 
 pub(crate) fn ast_from_str(source: &str) -> Result<Vec<Decl>, ParseError> {
-    use clang::diagnostic::Severity;
-
-    let clang = Clang::new().expect("Could not load libclang");
-
     // Preprocess before to get more easily interesting tokens coming from #defines.
     let source: &str = &preprocess_objc(source);
 
     // The documentation says that files specified as unsaved must exist so create a dummy temporary empty file
     let file = tempfile::NamedTempFile::new().unwrap();
-    let index = clang::Index::new(&clang, false, true);
-    let mut parser = index.parser(file.path());
-    configure_parser(&mut parser);
+    let index = clang::Index::new(false, true);
+    let (args, options) = parser_configuration();
 
-    parser.unsaved(&[clang::Unsaved::new(file.path(), source)]);
-    let tu = parser.parse()?;
+    let tu = index.parse(
+        &args,
+        file.path(),
+        &[clang::UnsavedFile::new(file.path(), source)],
+        options,
+    )?;
+
     // The parser will try to parse as much as possible, even with errors.
     // In that case, we still want fail because some information will be missing anyway.
-    let diagnostics = tu.get_diagnostics();
-    let mut errors = diagnostics.iter().filter(|diagnostic| {
-        let severity = diagnostic.get_severity();
-        [Severity::Error, Severity::Fatal].contains(&severity)
+    let diagnostics = tu.diagnostics();
+    let mut errors = diagnostics.filter(|diagnostic| {
+        let severity = diagnostic.severity();
+        [
+            clang::DiagnosticSeverity::Error,
+            clang::DiagnosticSeverity::Fatal,
+        ]
+        .contains(&severity)
     });
     if let Some(error) = errors.next() {
-        return Err(ParseError::CompilationError(error.get_text()));
+        return Err(ParseError::CompilationError(error.spelling()));
     }
 
     let mut decls: Vec<Decl> = Vec::new();
 
-    let tu_entity = tu.get_entity();
+    let tu_cursor = tu.cursor();
 
     let mut next_unique_id: u32 = 1;
     let mut unnamed_tag_ids = TagIdMap::new();
     // Make unique identifiers for tags (struct/union/enum) that have no name.
     // Not using USRs as I'm not sure they are supposed to be stable between different clang versions.
     // Also not using locations as due to the the preprocessor they might not be unique.
-    tu_entity.visit_children(|entity, _| {
-        match entity.get_kind() {
-            EntityKind::StructDecl | EntityKind::UnionDecl | EntityKind::EnumDecl
-                if entity.get_name().is_none() => {}
-            _ => return clang::EntityVisitResult::Recurse,
+    tu_cursor.visit_children(|cursor, _| {
+        match cursor.kind() {
+            CursorKind::StructDecl | CursorKind::UnionDecl | CursorKind::EnumDecl
+                if cursor.spelling().is_none() => {}
+            _ => return clang::ChildVisitResult::Recurse,
         }
 
-        if entity.get_definition().unwrap() != entity {
-            return clang::EntityVisitResult::Recurse;
+        if cursor.definition().unwrap() != cursor {
+            return clang::ChildVisitResult::Recurse;
         }
 
-        let usr = entity.get_usr().unwrap();
+        let usr = cursor.usr().unwrap();
         if unnamed_tag_ids.contains_key(&usr) {
-            return clang::EntityVisitResult::Recurse;
+            return clang::ChildVisitResult::Recurse;
         }
         unnamed_tag_ids.insert(usr, next_unique_id);
 
         next_unique_id += 1;
 
-        clang::EntityVisitResult::Recurse
+        clang::ChildVisitResult::Recurse
     });
     let unnamed_tag_ids = unnamed_tag_ids;
 
-    let mut visited: HashSet<clang::Usr> = HashSet::new();
-    tu_entity.visit_children(|entity, _| {
-        let usr = entity.get_usr();
-        if let Some(usr) = entity.get_usr() {
+    let mut visited: HashSet<String> = HashSet::new();
+    tu_cursor.visit_children(|cursor, _| {
+        let usr = cursor.usr();
+        if let Some(usr) = cursor.usr() {
             if visited.contains(&usr) {
-                return clang::EntityVisitResult::Recurse;
+                return clang::ChildVisitResult::Recurse;
             }
         }
-        let decl = match entity.get_kind() {
-            EntityKind::ObjCInterfaceDecl => Some(Decl::InterfaceDef(InterfaceDef::from_entity(
-                &entity,
+        let decl = match cursor.kind() {
+            CursorKind::ObjCInterfaceDecl => Some(Decl::InterfaceDef(InterfaceDef::from_cursor(
+                &cursor,
                 &unnamed_tag_ids,
             ))),
-            EntityKind::ObjCProtocolDecl => Some(Decl::ProtocolDef(ProtocolDef::from_entity(
-                &entity,
+            CursorKind::ObjCProtocolDecl => Some(Decl::ProtocolDef(ProtocolDef::from_cursor(
+                &cursor,
                 &unnamed_tag_ids,
             ))),
-            EntityKind::ObjCCategoryDecl => Some(Decl::CategoryDef(CategoryDef::from_entity(
-                &entity,
+            CursorKind::ObjCCategoryDecl => Some(Decl::CategoryDef(CategoryDef::from_cursor(
+                &cursor,
                 &unnamed_tag_ids,
             ))),
-            EntityKind::TypedefDecl => Some(Decl::TypedefDecl(TypedefDecl::from_entity(
-                &entity,
+            CursorKind::TypedefDecl => Some(Decl::TypedefDecl(TypedefDecl::from_cursor(
+                &cursor,
                 &unnamed_tag_ids,
             ))),
-            EntityKind::FunctionDecl => Some(Decl::FuncDecl(FuncDecl::from_entity(
-                &entity,
+            CursorKind::FunctionDecl => Some(Decl::FuncDecl(FuncDecl::from_cursor(
+                &cursor,
                 &unnamed_tag_ids,
             ))),
-            EntityKind::StructDecl | EntityKind::UnionDecl => {
+            CursorKind::StructDecl | CursorKind::UnionDecl => {
                 // We only care about definition of structs or unions, not their declaration.
                 // (details of unnamed ones are included directly in the types that include them)
-                if let Some(def) = entity.get_definition() {
-                    if def == entity {
-                        Some(Decl::RecordDef(RecordDef::from_entity(
-                            &entity,
+                if let Some(def) = cursor.definition() {
+                    if def == cursor {
+                        Some(Decl::RecordDef(RecordDef::from_cursor(
+                            &cursor,
                             &unnamed_tag_ids,
                         )))
                     } else {
@@ -1844,13 +1822,13 @@ pub(crate) fn ast_from_str(source: &str) -> Result<Vec<Decl>, ParseError> {
                     None
                 }
             }
-            EntityKind::EnumDecl => {
+            CursorKind::EnumDecl => {
                 // We only care about definition of enums, not their declaration.
                 // But contrarily to struct and enums, we do care about unnamed ones as they are used to declare constants.
-                if let Some(def) = entity.get_definition() {
-                    if def == entity {
-                        Some(Decl::EnumDef(EnumDef::from_entity(
-                            &entity,
+                if let Some(def) = cursor.definition() {
+                    if def == cursor {
+                        Some(Decl::EnumDef(EnumDef::from_cursor(
+                            &cursor,
                             &unnamed_tag_ids,
                         )))
                     } else {
@@ -1868,7 +1846,7 @@ pub(crate) fn ast_from_str(source: &str) -> Result<Vec<Decl>, ParseError> {
             visited.insert(usr.unwrap());
         }
 
-        clang::EntityVisitResult::Recurse
+        clang::ChildVisitResult::Recurse
     });
     Ok(decls)
 }

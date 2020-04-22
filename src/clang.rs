@@ -3,6 +3,7 @@
 use bitflags::bitflags;
 use clang_sys;
 use once_cell;
+use std::convert::TryInto;
 use std::ffi::{CStr, CString};
 use std::marker::PhantomData;
 
@@ -46,11 +47,12 @@ impl Index {
     pub fn parse(
         &self,
         args: &[String],
-        file_path: &str,
+        file_path: &std::path::Path,
         unsaved: &[UnsavedFile],
         options: TuOptions,
     ) -> Result<TranslationUnit, ClangError> {
-        let c_file_path = CString::new(file_path).unwrap();
+        let c_file_path =
+            CString::new(file_path.as_os_str().to_str().expect("invalid C string")).unwrap();
 
         let cstr_args: Vec<CString> = args
             .iter()
@@ -95,7 +97,7 @@ pub struct UnsavedFile {
 }
 
 impl UnsavedFile {
-    fn new(path: &std::path::Path, contents: &str) -> Self {
+    pub fn new(path: &std::path::Path, contents: &str) -> Self {
         let path = CString::new(path.as_os_str().to_str().expect("invalid C string")).unwrap();
         let contents = CString::new(contents).unwrap();
         Self { path, contents }
@@ -132,9 +134,14 @@ impl<'idx> TranslationUnit<'idx> {
         }
     }
 
-    fn cursor(&self) -> Cursor {
+    pub fn cursor(&self) -> Cursor {
         let raw = unsafe { clang_sys::clang_getTranslationUnitCursor(self.ptr) };
         Cursor::from_raw(raw, self).expect("invalid cursor")
+    }
+
+    pub fn diagnostics(&self) -> impl ExactSizeIterator<Item = Diagnostic> {
+        let num = unsafe { clang_sys::clang_getNumDiagnostics(self.ptr) };
+        PropertyIter::new(self, num, clang_sys::clang_getDiagnostic)
     }
 }
 
@@ -179,6 +186,13 @@ fn into_string(clang_str: clang_sys::CXString) -> Option<String> {
     }
 }
 
+fn none_if_empty(str: Option<String>) -> Option<String> {
+    match str {
+        Some(str) if !str.is_empty() => Some(str),
+        _ => None,
+    }
+}
+
 pub struct Cursor<'a> {
     raw: clang_sys::CXCursor,
     tu: &'a TranslationUnit<'a>,
@@ -202,7 +216,7 @@ impl<'a> Cursor<'a> {
         self.raw.kind.into()
     }
 
-    pub fn tu(&self) -> &TranslationUnit {
+    pub fn tu(&self) -> &'a TranslationUnit<'a> {
         self.tu
     }
 
@@ -211,28 +225,46 @@ impl<'a> Cursor<'a> {
     }
 
     pub fn spelling(&self) -> Option<String> {
-        into_string(unsafe { clang_sys::clang_getCursorSpelling(self.raw) })
+        none_if_empty(into_string(unsafe {
+            clang_sys::clang_getCursorSpelling(self.raw)
+        }))
     }
 
     pub fn display_name(&self) -> Option<String> {
-        into_string(unsafe { clang_sys::clang_getCursorDisplayName(self.raw) })
+        none_if_empty(into_string(unsafe {
+            clang_sys::clang_getCursorDisplayName(self.raw)
+        }))
     }
 
     pub fn mangling(&self) -> Option<String> {
-        into_string(unsafe { clang_sys::clang_Cursor_getMangling(self.raw) })
+        none_if_empty(into_string(unsafe {
+            clang_sys::clang_Cursor_getMangling(self.raw)
+        }))
     }
 
     pub fn objc_type_encoding(&self) -> Option<String> {
-        into_string(unsafe { clang_sys::clang_getDeclObjCTypeEncoding(self.raw) })
+        none_if_empty(into_string(unsafe {
+            clang_sys::clang_getDeclObjCTypeEncoding(self.raw)
+        }))
     }
 
     pub fn usr(&self) -> Option<String> {
-        into_string(unsafe { clang_sys::clang_getCursorUSR(self.raw) })
+        none_if_empty(into_string(unsafe {
+            clang_sys::clang_getCursorUSR(self.raw)
+        }))
     }
 
-    pub fn arguments(&self) -> impl ExactSizeIterator<Item = Cursor> {
-        let len = unsafe { clang_sys::clang_Cursor_getNumArguments(self.raw) as _ };
-        PropertyIter::new(self, len, clang_sys::clang_Cursor_getArgument)
+    pub fn arguments(&self) -> Option<impl ExactSizeIterator<Item = Cursor>> {
+        let num = unsafe { clang_sys::clang_Cursor_getNumArguments(self.raw) };
+        if num < 0 {
+            None
+        } else {
+            Some(PropertyIter::new(
+                self,
+                num as _,
+                clang_sys::clang_Cursor_getArgument,
+            ))
+        }
     }
 
     pub fn is_objc_optional(&self) -> bool {
@@ -261,14 +293,14 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    pub fn location(&self) -> Option<SourceLocation> {
+    pub fn location(&self) -> Option<SourceLocation<'a>> {
         SourceLocation::from_raw(
             unsafe { clang_sys::clang_getCursorLocation(self.raw) },
             self.tu,
         )
     }
 
-    pub fn extent(&self) -> Option<SourceRange> {
+    pub fn extent(&self) -> Option<SourceRange<'a>> {
         SourceRange::from_raw(
             unsafe { clang_sys::clang_getCursorExtent(self.raw) },
             self.tu,
@@ -332,7 +364,19 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    pub fn canonical_cursor(&self) -> Cursor {
+    pub fn enum_constant_value(&self) -> Option<(i64, u64)> {
+        if self.kind() == CursorKind::EnumConstantDecl {
+            unsafe {
+                let signed = clang_sys::clang_getEnumConstantDeclValue(self.raw);
+                let unsigned = clang_sys::clang_getEnumConstantDeclUnsignedValue(self.raw);
+                Some((signed, unsigned))
+            }
+        } else {
+            None
+        }
+    }
+
+    pub fn canonical_cursor(&self) -> Cursor<'a> {
         Cursor::from_raw(
             unsafe { clang_sys::clang_getCanonicalCursor(self.raw) },
             self.tu,
@@ -340,35 +384,35 @@ impl<'a> Cursor<'a> {
         .expect("invalid cursor")
     }
 
-    pub fn semantic_parent(&self) -> Option<Cursor> {
+    pub fn semantic_parent(&self) -> Option<Cursor<'a>> {
         Cursor::from_raw(
             unsafe { clang_sys::clang_getCursorSemanticParent(self.raw) },
             self.tu,
         )
     }
 
-    pub fn lexical_parent(&self) -> Option<Cursor> {
+    pub fn lexical_parent(&self) -> Option<Cursor<'a>> {
         Cursor::from_raw(
             unsafe { clang_sys::clang_getCursorLexicalParent(self.raw) },
             self.tu,
         )
     }
 
-    pub fn definition(&self) -> Option<Cursor> {
+    pub fn definition(&self) -> Option<Cursor<'a>> {
         Cursor::from_raw(
             unsafe { clang_sys::clang_getCursorDefinition(self.raw) },
             self.tu,
         )
     }
 
-    pub fn referenced(&self) -> Option<Cursor> {
+    pub fn referenced(&self) -> Option<Cursor<'a>> {
         Cursor::from_raw(
             unsafe { clang_sys::clang_getCursorReferenced(self.raw) },
             self.tu,
         )
     }
 
-    pub fn template(&self) -> Option<Cursor> {
+    pub fn template(&self) -> Option<Cursor<'a>> {
         Cursor::from_raw(
             unsafe { clang_sys::clang_getSpecializedCursorTemplate(self.raw) },
             self.tu,
@@ -481,7 +525,7 @@ impl<'a> std::fmt::Debug for Cursor<'a> {
 trait PropertyIterOwner<'a> {
     type Raw;
     fn raw(&self) -> Self::Raw;
-    fn tu(&self) -> &'a TranslationUnit<'a>;
+    fn tu(&'a self) -> &'a TranslationUnit<'a>;
 }
 
 impl<'a> PropertyIterOwner<'a> for Cursor<'a> {
@@ -491,7 +535,7 @@ impl<'a> PropertyIterOwner<'a> for Cursor<'a> {
         self.raw
     }
 
-    fn tu(&self) -> &'a TranslationUnit<'a> {
+    fn tu(&'a self) -> &'a TranslationUnit<'a> {
         self.tu
     }
 }
@@ -503,8 +547,20 @@ impl<'a> PropertyIterOwner<'a> for Type<'a> {
         self.raw
     }
 
-    fn tu(&self) -> &'a TranslationUnit<'a> {
+    fn tu(&'a self) -> &'a TranslationUnit<'a> {
         self.tu
+    }
+}
+
+impl<'a> PropertyIterOwner<'a> for TranslationUnit<'a> {
+    type Raw = clang_sys::CXTranslationUnit;
+
+    fn raw(&self) -> Self::Raw {
+        self.ptr
+    }
+
+    fn tu(&'a self) -> &'a TranslationUnit<'a> {
+        self
     }
 }
 
@@ -526,6 +582,14 @@ impl<'a> PropertyIterItem<'a> for Type<'a> {
 
     fn from_raw(raw: Self::Raw, tu: &'a TranslationUnit<'a>) -> Self {
         Self::from_raw(raw, tu).expect("invalid type")
+    }
+}
+
+impl<'a> PropertyIterItem<'a> for Diagnostic<'a> {
+    type Raw = clang_sys::CXDiagnostic;
+
+    fn from_raw(ptr: Self::Raw, tu: &'a TranslationUnit<'a>) -> Self {
+        Self::from_ptr(ptr, tu).expect("invalid diagnostic")
     }
 }
 
@@ -606,7 +670,7 @@ impl<'a> Type<'a> {
         self.raw.kind.into()
     }
 
-    pub fn pointee_type(&self) -> Option<Type<'a>> {
+    pub fn pointee_type(&self) -> Option<Type> {
         Type::from_raw(
             unsafe { clang_sys::clang_getPointeeType(self.raw) },
             self.tu,
@@ -653,24 +717,47 @@ impl<'a> Type<'a> {
         .expect("a type should have a canonical version")
     }
 
-    pub fn argument_types(&self) -> impl ExactSizeIterator<Item = Type> {
-        let len = unsafe { clang_sys::clang_getNumArgTypes(self.raw) as _ };
-        PropertyIter::new(self, len, clang_sys::clang_getArgType)
+    pub fn get_element_type(&self) -> Option<Type<'a>> {
+        Type::from_raw(
+            unsafe { clang_sys::clang_getElementType(self.raw) },
+            self.tu,
+        )
     }
 
-    pub fn template_arguments(&self) -> impl ExactSizeIterator<Item = Type> {
-        let len = unsafe { clang_sys::clang_Type_getNumTemplateArguments(self.raw) as _ };
-        PropertyIter::new(self, len, clang_sys::clang_Type_getTemplateArgumentAsType)
+    pub fn argument_types(&self) -> Option<impl ExactSizeIterator<Item = Type>> {
+        let num = unsafe { clang_sys::clang_getNumArgTypes(self.raw) };
+        if num < 0 {
+            None
+        } else {
+            Some(PropertyIter::new(
+                self,
+                num as _,
+                clang_sys::clang_getArgType,
+            ))
+        }
+    }
+
+    pub fn template_arguments(&self) -> Option<impl ExactSizeIterator<Item = Type>> {
+        let num = unsafe { clang_sys::clang_Type_getNumTemplateArguments(self.raw) };
+        if num < 0 {
+            None
+        } else {
+            Some(PropertyIter::new(
+                self,
+                num as _,
+                clang_sys::clang_Type_getTemplateArgumentAsType,
+            ))
+        }
     }
 
     pub fn objc_type_arg_types(&self) -> impl ExactSizeIterator<Item = Type> {
-        let len = unsafe { clang_sys::clang_Type_getNumObjCTypeArgs(self.raw) as _ };
-        PropertyIter::new(self, len, clang_sys::clang_Type_getObjCTypeArg)
+        let num = unsafe { clang_sys::clang_Type_getNumObjCTypeArgs(self.raw) };
+        PropertyIter::new(self, num, clang_sys::clang_Type_getObjCTypeArg)
     }
 
     pub fn objc_protocol_decls(&self) -> impl ExactSizeIterator<Item = Cursor> {
-        let len = unsafe { clang_sys::clang_Type_getNumObjCProtocolRefs(self.raw) as _ };
-        PropertyIter::new(self, len, clang_sys::clang_Type_getObjCProtocolDecl)
+        let num = unsafe { clang_sys::clang_Type_getNumObjCProtocolRefs(self.raw) };
+        PropertyIter::new(self, num, clang_sys::clang_Type_getObjCProtocolDecl)
     }
 
     pub fn spelling(&self) -> String {
@@ -708,6 +795,15 @@ impl<'a> Type<'a> {
             None
         } else {
             Some(size as _)
+        }
+    }
+
+    pub fn num_elements(&self) -> Option<usize> {
+        let size = unsafe { clang_sys::clang_getNumElements(self.raw) };
+        if size >= 0 {
+            Some(size as _)
+        } else {
+            None
         }
     }
 
@@ -1523,13 +1619,14 @@ impl StorageClass {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlatformAvailability {
     pub platform: String,
-    pub introduced: Version,
-    pub deprecated: Version,
-    pub obsoleted: Version,
+    pub introduced: Option<Version>,
+    pub deprecated: Option<Version>,
+    pub obsoleted: Option<Version>,
     pub unavailable: bool,
-    pub message: String,
+    pub message: Option<String>,
 }
 
 impl PlatformAvailability {
@@ -1540,7 +1637,7 @@ impl PlatformAvailability {
             deprecated: Version::from_raw(raw.Deprecated),
             obsoleted: Version::from_raw(raw.Obsoleted),
             unavailable: raw.Unavailable != 0,
-            message: to_string(raw.Message).expect("invalid string"),
+            message: none_if_empty(to_string(raw.Message)),
         };
         unsafe {
             clang_sys::clang_disposeCXPlatformAvailability(&mut raw);
@@ -1549,19 +1646,44 @@ impl PlatformAvailability {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Version {
-    pub major: i32,
-    pub minor: i32,
-    pub subminor: i32,
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Version {
+    Major {
+        major: u32,
+    },
+    Minor {
+        major: u32,
+        minor: u32,
+    },
+    Subminor {
+        major: u32,
+        minor: u32,
+        subminor: u32,
+    },
 }
 
 impl Version {
-    fn from_raw(raw: clang_sys::CXVersion) -> Self {
-        Version {
-            major: raw.Major,
-            minor: raw.Minor,
-            subminor: raw.Subminor,
+    fn from_raw(raw: clang_sys::CXVersion) -> Option<Self> {
+        if raw.Major == -1 {
+            assert_eq!(raw.Minor, -1);
+            assert_eq!(raw.Subminor, -1);
+            None
+        } else if raw.Minor == -1 {
+            assert_eq!(raw.Subminor, -1);
+            Some(Version::Major {
+                major: raw.Major.try_into().unwrap(),
+            })
+        } else if raw.Subminor == -1 {
+            Some(Version::Minor {
+                major: raw.Major.try_into().unwrap(),
+                minor: raw.Minor.try_into().unwrap(),
+            })
+        } else {
+            Some(Version::Subminor {
+                major: raw.Major.try_into().unwrap(),
+                minor: raw.Minor.try_into().unwrap(),
+                subminor: raw.Subminor.try_into().unwrap(),
+            })
         }
     }
 }
@@ -1582,7 +1704,7 @@ impl<'a> SourceLocation<'a> {
         }
     }
 
-    pub fn file_location(&self) -> Location {
+    pub fn file_location(&self) -> Location<'a> {
         let mut file: clang_sys::CXFile = std::ptr::null_mut();
         let mut line: u32 = 0;
         let mut column: u32 = 0;
@@ -1605,7 +1727,7 @@ impl<'a> SourceLocation<'a> {
         }
     }
 
-    pub fn presumed_location(&self) -> PartialLocation {
+    pub fn presumed_location(&self) -> PresumedLocation {
         let mut file: clang_sys::CXString = clang_sys::CXString::default();
         let mut line: u32 = 0;
         let mut column: u32 = 0;
@@ -1613,7 +1735,7 @@ impl<'a> SourceLocation<'a> {
             clang_sys::clang_getPresumedLocation(self.raw, &mut file, &mut line, &mut column);
         }
         let file = into_string(file).expect("invalid file name");
-        PartialLocation { file, line, column }
+        PresumedLocation { file, line, column }
     }
 
     pub fn spelling_location(&self) -> Location {
@@ -1675,12 +1797,12 @@ impl<'a> SourceRange<'a> {
         }
     }
 
-    pub fn start(&self) -> SourceLocation {
+    pub fn start(&self) -> SourceLocation<'a> {
         SourceLocation::from_raw(unsafe { clang_sys::clang_getRangeStart(self.raw) }, self.tu)
             .expect("unexpected null location")
     }
 
-    pub fn end(&self) -> SourceLocation {
+    pub fn end(&self) -> SourceLocation<'a> {
         SourceLocation::from_raw(unsafe { clang_sys::clang_getRangeEnd(self.raw) }, self.tu)
             .expect("unexpected null location")
     }
@@ -1724,7 +1846,7 @@ pub struct Location<'a> {
     pub offset: u32,
 }
 
-pub struct PartialLocation {
+pub struct PresumedLocation {
     pub file: String,
     pub line: u32,
     pub column: u32,
@@ -1746,6 +1868,20 @@ impl<'a> File<'a> {
 
     pub fn file_name(&self) -> String {
         into_string(unsafe { clang_sys::clang_getFileName(self.ptr) }).expect("invalid string")
+    }
+
+    pub fn id(&self) -> (u64, u64, u64) {
+        unsafe {
+            let mut id = clang_sys::CXFileUniqueID::default();
+            clang_sys::clang_getFileUniqueID(self.ptr, &mut id);
+            (id.data[0] as u64, id.data[1] as u64, id.data[2] as u64)
+        }
+    }
+}
+
+impl<'a> std::cmp::PartialEq for File<'a> {
+    fn eq(&self, other: &File<'a>) -> bool {
+        self.id() == other.id()
     }
 }
 
@@ -1825,6 +1961,54 @@ impl TokenKind {
             CXToken_Literal => TokenKind::Literal,
             CXToken_Comment => TokenKind::Comment,
             _ => panic!("invalid token kind {:?}", raw),
+        }
+    }
+}
+
+pub struct Diagnostic<'a> {
+    ptr: clang_sys::CXDiagnostic,
+    tu: &'a TranslationUnit<'a>,
+}
+
+impl<'a> Diagnostic<'a> {
+    fn from_ptr(ptr: clang_sys::CXDiagnostic, tu: &'a TranslationUnit<'a>) -> Option<Self> {
+        if ptr.is_null() {
+            None
+        } else {
+            Some(Diagnostic { ptr, tu })
+        }
+    }
+
+    pub fn severity(&self) -> DiagnosticSeverity {
+        DiagnosticSeverity::from_raw(unsafe { clang_sys::clang_getDiagnosticSeverity(self.ptr) })
+    }
+
+    pub fn spelling(&self) -> String {
+        into_string(unsafe { clang_sys::clang_getDiagnosticSpelling(self.ptr) })
+            .expect("invalid string")
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum DiagnosticSeverity {
+    Ignored,
+    Note,
+    Warning,
+    Error,
+    Fatal,
+}
+
+impl DiagnosticSeverity {
+    fn from_raw(raw: clang_sys::CXDiagnosticSeverity) -> Self {
+        use clang_sys::*;
+        #[allow(non_upper_case_globals)]
+        match raw {
+            CXDiagnostic_Ignored => DiagnosticSeverity::Ignored,
+            CXDiagnostic_Note => DiagnosticSeverity::Note,
+            CXDiagnostic_Warning => DiagnosticSeverity::Warning,
+            CXDiagnostic_Error => DiagnosticSeverity::Error,
+            CXDiagnostic_Fatal => DiagnosticSeverity::Fatal,
+            _ => panic!("invalid severity {:?}", raw),
         }
     }
 }
