@@ -160,8 +160,17 @@ fn to_string(clang_str: clang_sys::CXString) -> Option<String> {
     unsafe {
         let c = CStr::from_ptr(clang_sys::clang_getCString(clang_str));
         let owned = c.to_str().expect("invalid Rust string").to_string();
-        clang_sys::clang_disposeString(clang_str);
         Some(owned)
+    }
+}
+
+fn into_string(clang_str: clang_sys::CXString) -> Option<String> {
+    match to_string(clang_str) {
+        Some(str) => {
+            unsafe { clang_sys::clang_disposeString(clang_str) };
+            Some(str)
+        }
+        None => None,
     }
 }
 
@@ -193,23 +202,23 @@ impl<'a> Cursor<'a> {
     }
 
     pub fn spelling(&self) -> Option<String> {
-        to_string(unsafe { clang_sys::clang_getCursorSpelling(self.raw) })
+        into_string(unsafe { clang_sys::clang_getCursorSpelling(self.raw) })
     }
 
     pub fn display_name(&self) -> Option<String> {
-        to_string(unsafe { clang_sys::clang_getCursorDisplayName(self.raw) })
+        into_string(unsafe { clang_sys::clang_getCursorDisplayName(self.raw) })
     }
 
     pub fn mangling(&self) -> Option<String> {
-        to_string(unsafe { clang_sys::clang_Cursor_getMangling(self.raw) })
+        into_string(unsafe { clang_sys::clang_Cursor_getMangling(self.raw) })
     }
 
     pub fn objc_type_encoding(&self) -> Option<String> {
-        to_string(unsafe { clang_sys::clang_getDeclObjCTypeEncoding(self.raw) })
+        into_string(unsafe { clang_sys::clang_getDeclObjCTypeEncoding(self.raw) })
     }
 
     pub fn usr(&self) -> Option<String> {
-        to_string(unsafe { clang_sys::clang_getCursorUSR(self.raw) })
+        into_string(unsafe { clang_sys::clang_getCursorUSR(self.raw) })
     }
 
     pub fn arguments(&self) -> impl ExactSizeIterator<Item = Cursor> {
@@ -221,12 +230,82 @@ impl<'a> Cursor<'a> {
         unsafe { clang_sys::clang_Cursor_isObjCOptional(self.raw) != 0 }
     }
 
+    pub fn is_declaration(&self) -> bool {
+        unsafe { clang_sys::clang_isDeclaration(self.raw.kind) != 0 }
+    }
+
     pub fn objc_selector_index(&self) -> Option<u32> {
         let index = unsafe { clang_sys::clang_Cursor_getObjCSelectorIndex(self.raw) };
         if index < 0 {
             None
         } else {
             Some(index as _)
+        }
+    }
+
+    pub fn objc_attributes(&self) -> Option<ObjCAttributes> {
+        let attributes = unsafe { clang_sys::clang_Cursor_getObjCPropertyAttributes(self.raw, 0) };
+        if attributes != 0 {
+            Some(ObjCAttributes::from_bits(attributes).expect("unexpected bit pattern"))
+        } else {
+            None
+        }
+    }
+
+    pub fn platform_availability(&self) -> Option<Vec<PlatformAvailability>> {
+        if !self.is_declaration() {
+            return None;
+        }
+
+        let len = unsafe {
+            clang_sys::clang_getCursorPlatformAvailability(
+                self.raw,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+
+        if len == 0 {
+            return None;
+        }
+
+        let mut raw_availabilities: Vec<clang_sys::CXPlatformAvailability> =
+            vec![clang_sys::CXPlatformAvailability::default(); len as _];
+
+        let new_len = unsafe {
+            clang_sys::clang_getCursorPlatformAvailability(
+                self.raw,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                raw_availabilities.as_mut_ptr(),
+                len,
+            )
+        };
+        assert_eq!(len, new_len);
+
+        let availabilities = raw_availabilities
+            .drain(..)
+            .map(|raw| PlatformAvailability::from_raw(raw))
+            .collect();
+        Some(availabilities)
+    }
+
+    pub fn storage_class(&self) -> Option<StorageClass> {
+        StorageClass::from(unsafe { clang_sys::clang_Cursor_getStorageClass(self.raw) })
+    }
+
+    pub fn offset_of_field(&self) -> Option<usize> {
+        let offset = unsafe { clang_sys::clang_Cursor_getOffsetOfField(self.raw) };
+        if offset < 0 {
+            None
+        } else {
+            Some(offset as _)
         }
     }
 
@@ -561,7 +640,7 @@ impl<'a> Type<'a> {
     }
 
     pub fn spelling(&self) -> String {
-        to_string(unsafe { clang_sys::clang_getTypeSpelling(self.raw) })
+        into_string(unsafe { clang_sys::clang_getTypeSpelling(self.raw) })
             .expect("invalid type spelling")
     }
 
@@ -578,6 +657,24 @@ impl<'a> Type<'a> {
 
     pub fn nullability(&self) -> Option<Nullability> {
         Nullability::from_raw(unsafe { clang_sys::clang_Type_getNullability(self.raw) })
+    }
+
+    pub fn align_of(&self) -> Option<usize> {
+        let align_of = unsafe { clang_sys::clang_Type_getAlignOf(self.raw) };
+        if align_of < 0 {
+            None
+        } else {
+            Some(align_of as _)
+        }
+    }
+
+    pub fn size_of(&self) -> Option<usize> {
+        let size = unsafe { clang_sys::clang_Type_getSizeOf(self.raw) };
+        if size < 0 {
+            None
+        } else {
+            Some(size as _)
+        }
     }
 
     pub fn visit_fields<F: FnMut(Cursor<'a>) -> VisitorResult>(&self, f: F) -> bool {
@@ -1335,6 +1432,91 @@ impl From<VisitorResult> for clang_sys::CXVisitorResult {
         match result {
             VisitorResult::Break => CXVisit_Break,
             VisitorResult::Continue => CXVisit_Continue,
+        }
+    }
+}
+
+bitflags! {
+    pub struct ObjCAttributes: i32 {
+        const READONLY = clang_sys::CXObjCPropertyAttr_readonly;
+        const GETTER = clang_sys::CXObjCPropertyAttr_getter;
+        const ASSIGN = clang_sys::CXObjCPropertyAttr_assign;
+        const READWRITE = clang_sys::CXObjCPropertyAttr_readwrite;
+        const RETAIN = clang_sys::CXObjCPropertyAttr_retain;
+        const COPY = clang_sys::CXObjCPropertyAttr_copy;
+        const NONATOMIC = clang_sys::CXObjCPropertyAttr_nonatomic;
+        const SETTER = clang_sys::CXObjCPropertyAttr_setter;
+        const ATOMIC = clang_sys::CXObjCPropertyAttr_atomic;
+        const WEAK = clang_sys::CXObjCPropertyAttr_weak;
+        const STRONG = clang_sys::CXObjCPropertyAttr_strong;
+        const UNSAFE_UNRETAINED = clang_sys::CXObjCPropertyAttr_unsafe_unretained;
+        const CLASS = clang_sys::CXObjCPropertyAttr_class;
+    }
+}
+
+pub enum StorageClass {
+    Extern,
+    Static,
+    PrivateExtern,
+    Auto,
+    Register,
+}
+
+impl StorageClass {
+    fn from(storage_class: clang_sys::CX_StorageClass) -> Option<Self> {
+        use clang_sys::*;
+        #[allow(non_upper_case_globals)]
+        match storage_class {
+            CX_SC_Invalid | CX_SC_None => None,
+            CX_SC_Extern => Some(StorageClass::Extern),
+            CX_SC_Static => Some(StorageClass::Static),
+            CX_SC_PrivateExtern => Some(StorageClass::PrivateExtern),
+            CX_SC_Auto => Some(StorageClass::Auto),
+            CX_SC_Register => Some(StorageClass::Register),
+            _ => panic!("unknown storage class {:?}", storage_class),
+        }
+    }
+}
+
+pub struct PlatformAvailability {
+    pub platform: String,
+    pub introduced: Version,
+    pub deprecated: Version,
+    pub obsoleted: Version,
+    pub unavailable: bool,
+    pub message: String,
+}
+
+impl PlatformAvailability {
+    fn from_raw(mut raw: clang_sys::CXPlatformAvailability) -> Self {
+        let availability = PlatformAvailability {
+            platform: to_string(raw.Platform).expect("invalid string"),
+            introduced: Version::from_raw(raw.Introduced),
+            deprecated: Version::from_raw(raw.Deprecated),
+            obsoleted: Version::from_raw(raw.Obsoleted),
+            unavailable: raw.Unavailable != 0,
+            message: to_string(raw.Message).expect("invalid string"),
+        };
+        unsafe {
+            clang_sys::clang_disposeCXPlatformAvailability(&mut raw);
+        }
+        availability
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Version {
+    pub major: i32,
+    pub minor: i32,
+    pub subminor: i32,
+}
+
+impl Version {
+    fn from_raw(raw: clang_sys::CXVersion) -> Version {
+        Version {
+            major: raw.Major,
+            minor: raw.Minor,
+            subminor: raw.Subminor,
         }
     }
 }
