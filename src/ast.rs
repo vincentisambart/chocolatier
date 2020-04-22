@@ -1775,7 +1775,7 @@ pub(crate) fn ast_from_str(source: &str) -> Result<Vec<Decl>, ParseError> {
     let mut unnamed_tag_ids = TagIdMap::new();
     // Make unique identifiers for tags (struct/union/enum) that have no name.
     // Not using USRs as I'm not sure they are supposed to be stable between different clang versions.
-    // Also not using locations as due to the the processor their might not be unique.
+    // Also not using locations as due to the the preprocessor they might not be unique.
     tu_entity.visit_children(|entity, _| {
         match entity.get_kind() {
             EntityKind::StructDecl | EntityKind::UnionDecl | EntityKind::EnumDecl
