@@ -675,9 +675,13 @@ fn snake_case_split(text: &str) -> Vec<String> {
     static LOWER_TO_UPPER_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"([a-z])([A-Z])").unwrap());
     static UPPER_TO_LOWER_RE: Lazy<Regex> =
         Lazy::new(|| Regex::new(r"([A-Z])([A-Z][a-z])").unwrap());
+    static BEFORE_NUMBER_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"([a-z])([0-9])").unwrap());
+    static AFTER_NUMBER_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"([0-9])([A-Z][a-z])").unwrap());
 
     let text = &LOWER_TO_UPPER_RE.replace_all(text, "${1}_${2}");
-    let text = UPPER_TO_LOWER_RE.replace_all(text, "${1}_${2}");
+    let text = &UPPER_TO_LOWER_RE.replace_all(text, "${1}_${2}");
+    let text = &BEFORE_NUMBER_RE.replace_all(text, "${1}_${2}");
+    let text = AFTER_NUMBER_RE.replace_all(text, "${1}_${2}");
     text.split('_').map(|s| s.to_string()).collect()
 }
 
@@ -750,11 +754,18 @@ fn cleanup_enum_value_names<S: AsRef<str>, Iter: Iterator<Item = S>>(
     value_names_split
         .iter()
         .map(|value_name_split| {
-            value_name_split[matching_head_len..value_name_split.len() - matching_tail_len]
+            let mut name = value_name_split
+                [matching_head_len..value_name_split.len() - matching_tail_len]
                 .iter()
                 .map(|word| word.to_ascii_uppercase())
-                .collect::<Vec<String>>()
-                .join("_")
+                .collect::<Vec<_>>()
+                .join("_");
+
+            // Prepend a '_' if the name starts with a digit.
+            if name.chars().next().unwrap().is_ascii_digit() {
+                name.insert(0, '_');
+            }
+            name
         })
         .collect()
 }
