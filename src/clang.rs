@@ -1,3 +1,5 @@
+// Heavily based on the clang crate, with naming closer to the original libclang.
+
 use bitflags::bitflags;
 use clang_sys;
 use once_cell;
@@ -27,15 +29,18 @@ pub struct Index {
 }
 
 impl Index {
-    fn from_ptr(ptr: clang_sys::CXIndex) -> Self {
-        assert!(!ptr.is_null());
-        Self { ptr }
+    fn from_ptr(ptr: clang_sys::CXIndex) -> Option<Self> {
+        if ptr.is_null() {
+            None
+        } else {
+            Some(Self { ptr })
+        }
     }
 
     pub fn new(exclude: bool, diagnostics: bool) -> Self {
         ensure_libclang_loaded();
         let ptr = unsafe { clang_sys::clang_createIndex(exclude as _, diagnostics as _) };
-        Self::from_ptr(ptr)
+        Self::from_ptr(ptr).unwrap()
     }
 
     pub fn parse(
@@ -197,6 +202,10 @@ impl<'a> Cursor<'a> {
         self.raw.kind.into()
     }
 
+    pub fn tu(&self) -> &TranslationUnit {
+        self.tu
+    }
+
     pub fn availability(&self) -> Availability {
         unsafe { clang_sys::clang_getCursorAvailability(self.raw) }.into()
     }
@@ -252,6 +261,20 @@ impl<'a> Cursor<'a> {
         }
     }
 
+    pub fn location(&self) -> Option<SourceLocation> {
+        SourceLocation::from_raw(
+            unsafe { clang_sys::clang_getCursorLocation(self.raw) },
+            self.tu,
+        )
+    }
+
+    pub fn extent(&self) -> Option<SourceRange> {
+        SourceRange::from_raw(
+            unsafe { clang_sys::clang_getCursorExtent(self.raw) },
+            self.tu,
+        )
+    }
+
     pub fn platform_availability(&self) -> Option<Vec<PlatformAvailability>> {
         if !self.is_declaration() {
             return None;
@@ -290,7 +313,7 @@ impl<'a> Cursor<'a> {
         assert_eq!(len, new_len);
 
         let availabilities = raw_availabilities
-            .drain(..)
+            .into_iter()
             .map(|raw| PlatformAvailability::from_raw(raw))
             .collect();
         Some(availabilities)
@@ -444,6 +467,17 @@ impl<'a> PartialEq for Cursor<'a> {
     }
 }
 
+impl<'a> std::fmt::Debug for Cursor<'a> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter
+            .debug_struct("Cursor")
+            .field("kind", &self.kind())
+            .field("display_name", &self.display_name())
+            .field("location", &self.location())
+            .finish()
+    }
+}
+
 trait PropertyIterOwner<'a> {
     type Raw;
     fn raw(&self) -> Self::Raw;
@@ -560,7 +594,7 @@ pub struct Type<'a> {
 }
 
 impl<'a> Type<'a> {
-    pub fn from_raw(raw: clang_sys::CXType, tu: &'a TranslationUnit<'a>) -> Option<Self> {
+    fn from_raw(raw: clang_sys::CXType, tu: &'a TranslationUnit<'a>) -> Option<Self> {
         if raw.kind == clang_sys::CXType_Invalid {
             None
         } else {
@@ -721,6 +755,16 @@ impl<'a> Type<'a> {
 impl<'a> PartialEq for Type<'a> {
     fn eq(&self, other: &Self) -> bool {
         unsafe { clang_sys::clang_equalTypes(self.raw, other.raw) != 0 }
+    }
+}
+
+impl<'a> std::fmt::Debug for Type<'a> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter
+            .debug_struct("Type")
+            .field("kind", &self.kind())
+            .field("spelling", &self.spelling())
+            .finish()
     }
 }
 
@@ -1454,6 +1498,7 @@ bitflags! {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum StorageClass {
     Extern,
     Static,
@@ -1512,11 +1557,274 @@ pub struct Version {
 }
 
 impl Version {
-    fn from_raw(raw: clang_sys::CXVersion) -> Version {
+    fn from_raw(raw: clang_sys::CXVersion) -> Self {
         Version {
             major: raw.Major,
             minor: raw.Minor,
             subminor: raw.Subminor,
+        }
+    }
+}
+
+pub struct SourceLocation<'a> {
+    raw: clang_sys::CXSourceLocation,
+    tu: &'a TranslationUnit<'a>,
+}
+
+impl<'a> SourceLocation<'a> {
+    fn from_raw(raw: clang_sys::CXSourceLocation, tu: &'a TranslationUnit<'a>) -> Option<Self> {
+        unsafe {
+            if clang_sys::clang_equalLocations(raw, clang_sys::clang_getNullLocation()) == 0 {
+                Some(SourceLocation { raw, tu })
+            } else {
+                None
+            }
+        }
+    }
+
+    pub fn file_location(&self) -> Location {
+        let mut file: clang_sys::CXFile = std::ptr::null_mut();
+        let mut line: u32 = 0;
+        let mut column: u32 = 0;
+        let mut offset: u32 = 0;
+        unsafe {
+            clang_sys::clang_getFileLocation(
+                self.raw,
+                &mut file,
+                &mut line,
+                &mut column,
+                &mut offset,
+            );
+        }
+        let file = File::from_ptr(file, self.tu);
+        Location {
+            file,
+            line,
+            column,
+            offset,
+        }
+    }
+
+    pub fn presumed_location(&self) -> PartialLocation {
+        let mut file: clang_sys::CXString = clang_sys::CXString::default();
+        let mut line: u32 = 0;
+        let mut column: u32 = 0;
+        unsafe {
+            clang_sys::clang_getPresumedLocation(self.raw, &mut file, &mut line, &mut column);
+        }
+        let file = into_string(file).expect("invalid file name");
+        PartialLocation { file, line, column }
+    }
+
+    pub fn spelling_location(&self) -> Location {
+        let mut file: clang_sys::CXFile = std::ptr::null_mut();
+        let mut line: u32 = 0;
+        let mut column: u32 = 0;
+        let mut offset: u32 = 0;
+        unsafe {
+            clang_sys::clang_getSpellingLocation(
+                self.raw,
+                &mut file,
+                &mut line,
+                &mut column,
+                &mut offset,
+            );
+        }
+        let file = File::from_ptr(file, self.tu);
+        Location {
+            file,
+            line,
+            column,
+            offset,
+        }
+    }
+}
+
+impl<'a> PartialEq for SourceLocation<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { clang_sys::clang_equalLocations(self.raw, other.raw) != 0 }
+    }
+}
+
+impl<'a> std::fmt::Debug for SourceLocation<'a> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let location = self.spelling_location();
+        formatter
+            .debug_struct("SourceLocation")
+            .field("file", &location.file)
+            .field("line", &location.line)
+            .field("column", &location.column)
+            .field("offset", &location.offset)
+            .finish()
+    }
+}
+
+pub struct SourceRange<'a> {
+    raw: clang_sys::CXSourceRange,
+    tu: &'a TranslationUnit<'a>,
+}
+
+impl<'a> SourceRange<'a> {
+    fn from_raw(raw: clang_sys::CXSourceRange, tu: &'a TranslationUnit<'a>) -> Option<Self> {
+        unsafe {
+            if clang_sys::clang_Range_isNull(raw) == 0 {
+                Some(SourceRange { raw, tu })
+            } else {
+                None
+            }
+        }
+    }
+
+    pub fn start(&self) -> SourceLocation {
+        SourceLocation::from_raw(unsafe { clang_sys::clang_getRangeStart(self.raw) }, self.tu)
+            .expect("unexpected null location")
+    }
+
+    pub fn end(&self) -> SourceLocation {
+        SourceLocation::from_raw(unsafe { clang_sys::clang_getRangeEnd(self.raw) }, self.tu)
+            .expect("unexpected null location")
+    }
+
+    pub fn tokenize(&self) -> Vec<Token> {
+        unsafe {
+            let mut raw_tokens_ptr: *mut clang_sys::CXToken = std::ptr::null_mut();
+            let mut len: u32 = 0;
+            clang_sys::clang_tokenize(self.tu.ptr, self.raw, &mut raw_tokens_ptr, &mut len);
+            let raw_tokens = std::slice::from_raw_parts(raw_tokens_ptr, len as _);
+            let tokens = raw_tokens
+                .iter()
+                .map(|t| Token::from_raw(*t, self.tu))
+                .collect();
+            clang_sys::clang_disposeTokens(self.tu.ptr, raw_tokens_ptr, len);
+            tokens
+        }
+    }
+}
+
+impl<'a> std::cmp::PartialEq for SourceRange<'a> {
+    fn eq(&self, other: &SourceRange<'a>) -> bool {
+        unsafe { clang_sys::clang_equalRanges(self.raw, other.raw) != 0 }
+    }
+}
+
+impl<'a> std::fmt::Debug for SourceRange<'a> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter
+            .debug_struct("SourceRange")
+            .field("start", &self.start())
+            .field("end", &self.end())
+            .finish()
+    }
+}
+
+pub struct Location<'a> {
+    pub file: Option<File<'a>>,
+    pub line: u32,
+    pub column: u32,
+    pub offset: u32,
+}
+
+pub struct PartialLocation {
+    pub file: String,
+    pub line: u32,
+    pub column: u32,
+}
+
+pub struct File<'a> {
+    ptr: clang_sys::CXFile,
+    tu: &'a TranslationUnit<'a>,
+}
+
+impl<'a> File<'a> {
+    fn from_ptr(ptr: clang_sys::CXFile, tu: &'a TranslationUnit<'a>) -> Option<Self> {
+        if ptr.is_null() {
+            None
+        } else {
+            Some(File { ptr, tu })
+        }
+    }
+
+    pub fn file_name(&self) -> String {
+        into_string(unsafe { clang_sys::clang_getFileName(self.ptr) }).expect("invalid string")
+    }
+}
+
+impl<'a> std::fmt::Debug for File<'a> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter
+            .debug_struct("File")
+            .field("file_name", &self.file_name())
+            .finish()
+    }
+}
+
+pub struct Token<'a> {
+    raw: clang_sys::CXToken,
+    tu: &'a TranslationUnit<'a>,
+}
+
+impl<'a> Token<'a> {
+    fn from_raw(raw: clang_sys::CXToken, tu: &'a TranslationUnit<'a>) -> Self {
+        Token { raw, tu }
+    }
+
+    pub fn kind(&self) -> TokenKind {
+        TokenKind::from_raw(unsafe { clang_sys::clang_getTokenKind(self.raw) })
+    }
+
+    pub fn spelling(&self) -> String {
+        into_string(unsafe { clang_sys::clang_getTokenSpelling(self.tu.ptr, self.raw) })
+            .expect("invalid string")
+    }
+
+    pub fn location(&self) -> SourceLocation {
+        SourceLocation::from_raw(
+            unsafe { clang_sys::clang_getTokenLocation(self.tu.ptr, self.raw) },
+            self.tu,
+        )
+        .expect("invalid location")
+    }
+
+    pub fn extent(&self) -> SourceRange {
+        SourceRange::from_raw(
+            unsafe { clang_sys::clang_getTokenExtent(self.tu.ptr, self.raw) },
+            self.tu,
+        )
+        .expect("invalid extent")
+    }
+}
+
+impl<'a> std::fmt::Debug for Token<'a> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter
+            .debug_struct("Token")
+            .field("kind", &self.kind())
+            .field("spelling", &self.spelling())
+            .field("extent", &self.extent())
+            .finish()
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum TokenKind {
+    Punctuation,
+    Keyword,
+    Identifier,
+    Literal,
+    Comment,
+}
+
+impl TokenKind {
+    fn from_raw(raw: clang_sys::CXTokenKind) -> Self {
+        use clang_sys::*;
+        #[allow(non_upper_case_globals)]
+        match raw {
+            CXToken_Punctuation => TokenKind::Punctuation,
+            CXToken_Keyword => TokenKind::Keyword,
+            CXToken_Identifier => TokenKind::Identifier,
+            CXToken_Literal => TokenKind::Literal,
+            CXToken_Comment => TokenKind::Comment,
+            _ => panic!("invalid token kind {:?}", raw),
         }
     }
 }
