@@ -212,8 +212,9 @@ impl<'a> Cursor<'a> {
         to_string(unsafe { clang_sys::clang_getCursorUSR(self.raw) })
     }
 
-    pub fn arguments(&self) -> Arguments {
-        Arguments::new(self)
+    pub fn arguments(&self) -> impl ExactSizeIterator<Item = Cursor> {
+        let len = unsafe { clang_sys::clang_Cursor_getNumArguments(self.raw) as _ };
+        PropertyIter::new(self, len, clang_sys::clang_Cursor_getArgument)
     }
 
     pub fn is_objc_optional(&self) -> bool {
@@ -364,32 +365,98 @@ impl<'a> PartialEq for Cursor<'a> {
     }
 }
 
-pub struct Arguments<'a> {
-    cursor: &'a Cursor<'a>,
-    index: u32,
-    len: u32,
+trait PropertyIterOwner<'a> {
+    type Raw;
+    fn raw(&self) -> Self::Raw;
+    fn tu(&self) -> &'a TranslationUnit<'a>;
 }
 
-impl<'a> Arguments<'a> {
-    fn new(cursor: &'a Cursor<'a>) -> Self {
-        let index = 0;
-        let len = unsafe { clang_sys::clang_Cursor_getNumArguments(cursor.raw) as _ };
-        Self { cursor, index, len }
+impl<'a> PropertyIterOwner<'a> for Cursor<'a> {
+    type Raw = clang_sys::CXCursor;
+
+    fn raw(&self) -> Self::Raw {
+        self.raw
+    }
+
+    fn tu(&self) -> &'a TranslationUnit<'a> {
+        self.tu
     }
 }
 
-impl<'a> Iterator for Arguments<'a> {
-    type Item = Cursor<'a>;
+impl<'a> PropertyIterOwner<'a> for Type<'a> {
+    type Raw = clang_sys::CXType;
+
+    fn raw(&self) -> Self::Raw {
+        self.raw
+    }
+
+    fn tu(&self) -> &'a TranslationUnit<'a> {
+        self.tu
+    }
+}
+
+trait PropertyIterItem<'a> {
+    type Raw;
+    fn from_raw(raw: Self::Raw, tu: &'a TranslationUnit<'a>) -> Self;
+}
+
+impl<'a> PropertyIterItem<'a> for Cursor<'a> {
+    type Raw = clang_sys::CXCursor;
+
+    fn from_raw(raw: Self::Raw, tu: &'a TranslationUnit<'a>) -> Self {
+        Self::from_raw(raw, tu).expect("invalid cursor")
+    }
+}
+
+impl<'a> PropertyIterItem<'a> for Type<'a> {
+    type Raw = clang_sys::CXType;
+
+    fn from_raw(raw: Self::Raw, tu: &'a TranslationUnit<'a>) -> Self {
+        Self::from_raw(raw, tu).expect("invalid type")
+    }
+}
+
+struct PropertyIter<'a, Owner, Item>
+where
+    Owner: PropertyIterOwner<'a>,
+    Item: PropertyIterItem<'a>,
+{
+    owner: &'a Owner,
+    len: u32,
+    get_item: unsafe fn(Owner::Raw, u32) -> Item::Raw,
+    index: u32,
+}
+
+impl<'a, Owner, Item> PropertyIter<'a, Owner, Item>
+where
+    Owner: PropertyIterOwner<'a>,
+    Item: PropertyIterItem<'a>,
+{
+    fn new(owner: &'a Owner, len: u32, get_item: unsafe fn(Owner::Raw, u32) -> Item::Raw) -> Self {
+        Self {
+            owner,
+            get_item,
+            len,
+            index: 0,
+        }
+    }
+}
+
+impl<'a, Owner, Item> Iterator for PropertyIter<'a, Owner, Item>
+where
+    Owner: PropertyIterOwner<'a>,
+    Item: PropertyIterItem<'a>,
+{
+    type Item = Item;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.index == self.len {
             None
         } else {
-            let next = Cursor::from_raw(
-                unsafe { clang_sys::clang_Cursor_getArgument(self.cursor.raw, self.index) },
-                self.cursor.tu,
-            )
-            .expect("invalid cursor");
+            let next = Item::from_raw(
+                unsafe { (self.get_item)(self.owner.raw(), self.index) },
+                self.owner.tu(),
+            );
             self.index += 1;
             Some(next)
         }
@@ -401,7 +468,12 @@ impl<'a> Iterator for Arguments<'a> {
     }
 }
 
-impl<'a> ExactSizeIterator for Arguments<'a> {}
+impl<'a, Owner, Item> ExactSizeIterator for PropertyIter<'a, Owner, Item>
+where
+    Owner: PropertyIterOwner<'a>,
+    Item: PropertyIterItem<'a>,
+{
+}
 
 pub struct Type<'a> {
     raw: clang_sys::CXType,
@@ -466,6 +538,26 @@ impl<'a> Type<'a> {
             self.tu,
         )
         .expect("a type should have a canonical version")
+    }
+
+    pub fn argument_types(&self) -> impl ExactSizeIterator<Item = Type> {
+        let len = unsafe { clang_sys::clang_getNumArgTypes(self.raw) as _ };
+        PropertyIter::new(self, len, clang_sys::clang_getArgType)
+    }
+
+    pub fn template_arguments(&self) -> impl ExactSizeIterator<Item = Type> {
+        let len = unsafe { clang_sys::clang_Type_getNumTemplateArguments(self.raw) as _ };
+        PropertyIter::new(self, len, clang_sys::clang_Type_getTemplateArgumentAsType)
+    }
+
+    pub fn objc_type_arg_types(&self) -> impl ExactSizeIterator<Item = Type> {
+        let len = unsafe { clang_sys::clang_Type_getNumObjCTypeArgs(self.raw) as _ };
+        PropertyIter::new(self, len, clang_sys::clang_Type_getObjCTypeArg)
+    }
+
+    pub fn objc_protocol_decls(&self) -> impl ExactSizeIterator<Item = Cursor> {
+        let len = unsafe { clang_sys::clang_Type_getNumObjCProtocolRefs(self.raw) as _ };
+        PropertyIter::new(self, len, clang_sys::clang_Type_getObjCProtocolDecl)
     }
 
     pub fn spelling(&self) -> String {
@@ -554,45 +646,6 @@ impl Nullability {
         }
     }
 }
-
-pub struct ArgumentTypes<'a> {
-    type_: &'a Type<'a>,
-    index: u32,
-    len: u32,
-}
-
-impl<'a> ArgumentTypes<'a> {
-    fn new(type_: &'a Type<'a>) -> Self {
-        let index = 0;
-        let len = unsafe { clang_sys::clang_getNumArgTypes(type_.raw) as _ };
-        Self { type_, index, len }
-    }
-}
-
-impl<'a> Iterator for ArgumentTypes<'a> {
-    type Item = Type<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.index == self.len {
-            None
-        } else {
-            let next = Type::from_raw(
-                unsafe { clang_sys::clang_getArgType(self.type_.raw, self.index) },
-                self.type_.tu,
-            )
-            .expect("invalid type");
-            self.index += 1;
-            Some(next)
-        }
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let left = self.len - self.index;
-        (left as _, Some(left as _))
-    }
-}
-
-impl<'a> ExactSizeIterator for ArgumentTypes<'a> {}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum CursorKind {
