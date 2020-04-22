@@ -476,9 +476,22 @@ impl {struct_name} {{
         )
         .unwrap();
 
-        let mut non_deprecated_values = Vec::new();
+        let mut values_per_num_val: HashMap<_, Vec<_>> = HashMap::new();
+        for value in def.values.iter() {
+            values_per_num_val
+                .entry(value.value)
+                .or_default()
+                .push(value);
+        }
+
+        let mut cleaned_up_names: HashMap<&str, &str> = HashMap::new();
         for (cleaned_up_name, value) in value_names.iter().zip(def.values.iter()) {
-            let original_value_name = &value.name;
+            cleaned_up_names.insert(&value.name, &cleaned_up_name);
+        }
+
+        for value in def.values.iter() {
+            let original_value_name: &str = value.name.as_ref();
+            let cleaned_up_name = cleaned_up_names.get(original_value_name).unwrap();
             writeln!(
                 &mut code,
                 "    /// {original_value_name}",
@@ -487,8 +500,6 @@ impl {struct_name} {{
             .unwrap();
             if value.attrs.contains(ast::ValueAttrs::DEPRECATED) {
                 writeln!(&mut code, "    #[deprecated]").unwrap();
-            } else {
-                non_deprecated_values.push(value.value);
             }
             writeln!(
                 &mut code,
@@ -512,13 +523,42 @@ impl std::fmt::Debug for {struct_name} {{
         )
         .unwrap();
 
-        for (cleaned_up_name, value) in value_names.iter().zip(def.values.iter()) {
-            // Ignore deprecated values that are also defined under a non-deprecated name.
-            if value.attrs.contains(ast::ValueAttrs::DEPRECATED) {
-                if non_deprecated_values.contains(&value.value) {
-                    continue;
+        let mut values_to_use = Vec::new();
+        for num_value in values_per_num_val.keys() {
+            let values = values_per_num_val.get(&num_value).unwrap();
+
+            if values.len() > 1 {
+                // Multiple enum value have the same numeric value.
+                // It only makes sense to have one in the match statement so we have to choose.
+
+                let first_non_deprecated = values
+                    .iter()
+                    .filter(|v| {
+                        !v.attrs.contains(ast::ValueAttrs::DEPRECATED)
+                            && !v
+                                .attrs
+                                .contains(ast::ValueAttrs::HAS_SOME_PLATFORM_DEPRECATION)
+                    })
+                    .next();
+
+                if let Some(non_deprecated) = first_non_deprecated {
+                    values_to_use.push(*non_deprecated);
+                } else {
+                    // No value non deprecated so put the first we have.
+                    values_to_use.push(values[0]);
                 }
+            } else {
+                values_to_use.push(values[0]);
             }
+        }
+
+        // Iterating once again to keep the order they were originally defined in.
+        for value in def.values.iter() {
+            if !values_to_use.contains(&&value) {
+                continue;
+            }
+            let original_value_name: &str = value.name.as_ref();
+            let cleaned_up_name = cleaned_up_names.get(original_value_name).unwrap();
 
             writeln!(
                 &mut code,

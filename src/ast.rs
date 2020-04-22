@@ -686,7 +686,7 @@ pub(crate) struct Array {
     element: Box<ObjCType>,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum SignedOrNotInt {
     Signed(i64),
     Unsigned(u64),
@@ -704,6 +704,7 @@ impl std::fmt::Display for SignedOrNotInt {
 bitflags! {
     pub(crate) struct ValueAttrs: u8 {
         const DEPRECATED = 0b0000_0001;
+        const HAS_SOME_PLATFORM_DEPRECATION = 0b0000_0010;
     }
 }
 
@@ -712,6 +713,12 @@ impl ValueAttrs {
         let mut attrs = Self::empty();
         if decl.availability() == clang::Availability::Deprecated {
             attrs.insert(Self::DEPRECATED);
+        }
+        if let Some(availability) = decl.platform_availability() {
+            if availability.iter().any(|avail| avail.deprecated.is_some()) {
+                // The deprecation version can even be in the future (100000) but we don't have any way to check if there is a replacement available.
+                attrs.insert(Self::HAS_SOME_PLATFORM_DEPRECATION);
+            }
         }
         attrs
     }
