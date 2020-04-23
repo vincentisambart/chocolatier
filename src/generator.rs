@@ -734,7 +734,7 @@ fn cleanup_enum_value_names<S: AsRef<str>, Iter: Iterator<Item = S>>(
 
     // For "AU3DMixerRenderingFlags", ignore the first "AU" (value names starting with "k3DMixerRenderingFlags_")
     let mut enum_name_split = snake_case_split(enum_name);
-    let enum_name_start = enum_name_split.iter().next().unwrap();
+    let enum_name_start = enum_name_split.first().unwrap();
     for prefix in &["AU"] {
         if !enum_name_start.starts_with(prefix) {
             continue;

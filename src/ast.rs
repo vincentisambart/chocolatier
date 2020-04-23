@@ -4,7 +4,6 @@ use std::collections::{HashMap, HashSet};
 // TODO: Try to get:
 // - class and method OS version annotations
 // - consume/retained/not retained
-// - enum_extensibility(open)
 // - exception throwing info (maybe from annotations from Swift)
 // - support parsing code for different platforms (iOS, macOS, ...)
 // - alignment, packing, sizes (and make sure the size and offset of each item is the same for clang and Rust as bindgen does)
@@ -17,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 // - __attribute__((NSObject)), __attribute__/objc_bridge_mutable((objc_bridge*))
 // - __attribute__((ns_consumes_self)) (implicit on all init)
 // - __attribute__((cf_returns_*))
-// - ignore enum values with a better named replacement (for example in NSCalendarUnit)
+// - check if using TuOptions::DETAILED_PREPROCESSING_RECORD would let us not having to preprocess in advance.
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Origin {
