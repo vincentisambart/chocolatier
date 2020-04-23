@@ -143,6 +143,20 @@ impl<'idx> TranslationUnit<'idx> {
         let num = unsafe { clang_sys::clang_getNumDiagnostics(self.ptr) };
         PropertyIter::new(self, num, clang_sys::clang_getDiagnostic)
     }
+
+    pub fn location(&self, file: &File, line: u32, column: u32) -> Option<SourceLocation> {
+        SourceLocation::from_raw(
+            unsafe { clang_sys::clang_getLocation(self.ptr, file.ptr, line, column) },
+            self,
+        )
+    }
+
+    pub fn location_for_offset(&self, file: &File, offset: u32) -> Option<SourceLocation> {
+        SourceLocation::from_raw(
+            unsafe { clang_sys::clang_getLocationForOffset(self.ptr, file.ptr, offset) },
+            self,
+        )
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -1759,6 +1773,11 @@ impl<'a> SourceLocation<'a> {
             column,
             offset,
         }
+    }
+
+    pub fn cursor(&self) -> Option<Cursor<'a>> {
+        let raw = unsafe { clang_sys::clang_getCursor(self.tu.ptr, self.raw) };
+        Cursor::from_raw(raw, self.tu)
     }
 }
 
