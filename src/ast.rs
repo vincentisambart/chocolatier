@@ -1,10 +1,8 @@
 use crate::clang::{self, CursorKind, TypeKind};
-use bitflags::bitflags;
 use std::collections::{HashMap, HashSet};
 
 // TODO: Try to get:
 // - class and method OS version annotations
-// - annotations for Swift
 // - consume/retained/not retained
 // - enum_extensibility(open)
 // - exception throwing info (maybe from annotations from Swift)
@@ -22,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 // - ignore enum values with a better named replacement (for example in NSCalendarUnit)
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum Origin {
+pub enum Origin {
     ObjCCore,
     System,
     Framework(String),
@@ -366,8 +364,90 @@ fn show_tree(cursor: &clang::Cursor, indent_level: usize) {
     }
 }
 
+pub use clang::PlatformAvailability;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Attr {
+    Consumed,
+    Noescape,
+    ReturnsRetained,
+    Unavailable,
+    Deprecated,
+    PlatformAvailability(Vec<PlatformAvailability>),
+    SwiftName(String),
+}
+
+impl Attr {
+    fn from_decl(decl: &clang::Cursor) -> Vec<Self> {
+        let mut attrs: Vec<_> = decl
+            .children()
+            .iter()
+            .filter_map(|child| match child.kind() {
+                CursorKind::NSConsumed => Some(Self::Consumed),
+                CursorKind::NSReturnsRetained => Some(Self::ReturnsRetained),
+                CursorKind::UnexposedAttr => {
+                    let extent = child
+                        .extent()
+                        .expect("could not get extent of unexposed attr");
+                    let tokens = extent.tokenize();
+                    match tokens[0].spelling().as_str() {
+                        "noescape" => {
+                            assert!(
+                                tokens.len() == 1,
+                                "unexpected tokens for \"noescape\" unexposed attr: {:?}",
+                                tokens
+                            );
+                            Some(Self::Noescape)
+                        }
+                        "unavailable" => {
+                            assert!(
+                                tokens.len() == 1 || tokens.len() == 4,
+                                "unexpected tokens for \"unavailable\" unexposed attr: {:?}",
+                                tokens
+                            );
+                            // There can be a message but for the time being just ignore it.
+                            Some(Self::Unavailable)
+                        }
+                        "swift_name" => {
+                            // We expect to have 4 tokens here: "swift_name" "(" name ")"
+                            assert!(
+                                tokens.len() == 4,
+                                "unexpected tokens for \"swift_name\" unexposed attr: {:?}",
+                                tokens
+                            );
+                            let name_token = &tokens[2];
+                            assert!(
+                                name_token.kind() == clang::TokenKind::Literal,
+                                "unexpected tokens for \"swift_name\" unexposed attr: {:?}",
+                                tokens
+                            );
+                            // spelling() returns an escaped string, with '"' at the start and end.
+                            // The Swift name should have no other need of escaping, so that should be enough.
+                            let spelling = name_token.spelling();
+                            let name = spelling.trim_matches('"');
+                            assert!(!name.contains('\\'), "unexpected Swift name {:?}", name);
+                            Some(Self::SwiftName(name.into()))
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+            .collect();
+
+        if decl.availability() == clang::Availability::Deprecated {
+            attrs.push(Self::Deprecated);
+        }
+        if let Some(availability) = decl.platform_availability() {
+            attrs.push(Self::PlatformAvailability(availability));
+        }
+
+        attrs
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq)]
-pub(crate) enum Nullability {
+pub enum Nullability {
     NonNull,
     Nullable,
     Unspecified,
@@ -405,7 +485,7 @@ enum ObjPtrKind {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ObjPtr {
+pub struct ObjPtr {
     kind: ObjPtrKind,
     nullability: Nullability,
 }
@@ -447,7 +527,7 @@ impl Field {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum TagId {
+pub enum TagId {
     Named(String),
     Unnamed(u32),
 }
@@ -481,7 +561,7 @@ enum TagKind {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct TagRef {
+pub struct TagRef {
     id: TagId,
     kind: TagKind,
 }
@@ -506,79 +586,19 @@ impl TagRef {
     }
 }
 
-bitflags! {
-    pub(crate) struct ParamAttrs: u8 {
-        const CONSUMED = 0b0000_0001;
-        // noescape should really be for function and block pointers
-        // (or typedefs of those), but with the AST libclang provides,
-        // it's way easier to handle it as a parameter attribute.
-        const NOESCAPE = 0b0000_0010;
-    }
-}
-
-impl ParamAttrs {
-    fn from_decl(decl: &clang::Cursor) -> Self {
-        assert_eq!(decl.kind(), CursorKind::ParmDecl);
-        let mut attrs = Self::empty();
-        for child in decl.children() {
-            match child.kind() {
-                CursorKind::NSConsumed => attrs.insert(Self::CONSUMED),
-                CursorKind::UnexposedAttr => {
-                    if let Some(range) = child.extent() {
-                        let tokens = range.tokenize();
-                        if tokens.len() == 1 && tokens[0].spelling() == "noescape" {
-                            attrs.insert(Self::NOESCAPE);
-                        }
-                    }
-                }
-                _ => (),
-            }
-        }
-        attrs
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 struct Param {
     name: Option<String>,
     objc_type: ObjCType,
-    attrs: ParamAttrs,
-}
-
-bitflags! {
-    pub(crate) struct CallableAttrs: u8 {
-        const RETURNS_RETAINED = 0b0000_0001;
-        const UNAVAILABLE = 0b0000_0010;
-    }
-}
-
-impl CallableAttrs {
-    fn from_decl(decl: &clang::Cursor) -> Self {
-        let mut attrs = Self::empty();
-        for child in decl.children() {
-            match child.kind() {
-                CursorKind::NSReturnsRetained => attrs.insert(Self::RETURNS_RETAINED),
-                CursorKind::UnexposedAttr => {
-                    if let Some(range) = child.extent() {
-                        let tokens = range.tokenize();
-                        if tokens[0].spelling() == "unavailable" {
-                            attrs.insert(Self::UNAVAILABLE);
-                        }
-                    }
-                }
-                _ => (),
-            }
-        }
-        attrs
-    }
+    attrs: Vec<Attr>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct CallableDesc {
+pub struct CallableDesc {
     result: Box<ObjCType>,
     params: Option<Vec<Param>>,
     is_variadic: bool,
-    attrs: CallableAttrs,
+    attrs: Vec<Attr>,
 }
 
 impl CallableDesc {
@@ -596,7 +616,7 @@ impl CallableDesc {
             let spelling = clang_type.spelling();
             // Yes, that is very ugly but I could not find a better way.
             if spelling.contains("__attribute__((ns_returns_retained))") {
-                callable.attrs.insert(CallableAttrs::RETURNS_RETAINED);
+                callable.attrs.push(Attr::ReturnsRetained);
             } else {
                 panic!(
                     "Have to check what this Attributed is for - {:?}",
@@ -628,7 +648,7 @@ impl CallableDesc {
                             &mut parm_decl_children(&parm_decl),
                             unnamed_tag_ids,
                         );
-                        let attrs = ParamAttrs::from_decl(&parm_decl);
+                        let attrs = Attr::from_decl(&parm_decl);
                         Param {
                             name: parm_decl.spelling(),
                             objc_type,
@@ -647,14 +667,14 @@ impl CallableDesc {
             result,
             params,
             is_variadic: clang_type.is_variadic_function(),
-            attrs: CallableAttrs::empty(),
+            attrs: Vec::new(),
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct TypedefRef {
-    pub(crate) name: String,
+pub struct TypedefRef {
+    pub name: String,
 }
 
 impl TypedefRef {
@@ -666,7 +686,7 @@ impl TypedefRef {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Pointer {
+pub struct Pointer {
     pointee: Box<ObjCType>,
     nullability: Nullability,
 }
@@ -681,13 +701,13 @@ impl Pointer {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Array {
+pub struct Array {
     size: Option<usize>,
     element: Box<ObjCType>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum SignedOrNotInt {
+pub enum SignedOrNotInt {
     Signed(i64),
     Unsigned(u64),
 }
@@ -701,34 +721,11 @@ impl std::fmt::Display for SignedOrNotInt {
     }
 }
 
-bitflags! {
-    pub(crate) struct ValueAttrs: u8 {
-        const DEPRECATED = 0b0000_0001;
-        const HAS_SOME_PLATFORM_DEPRECATION = 0b0000_0010;
-    }
-}
-
-impl ValueAttrs {
-    fn from_decl(decl: &clang::Cursor) -> Self {
-        let mut attrs = Self::empty();
-        if decl.availability() == clang::Availability::Deprecated {
-            attrs.insert(Self::DEPRECATED);
-        }
-        if let Some(availability) = decl.platform_availability() {
-            if availability.iter().any(|avail| avail.deprecated.is_some()) {
-                // The deprecation version can even be in the future (100000) but we don't have any way to check if there is a replacement available.
-                attrs.insert(Self::HAS_SOME_PLATFORM_DEPRECATION);
-            }
-        }
-        attrs
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct EnumValue {
-    pub(crate) name: String,
-    pub(crate) value: SignedOrNotInt,
-    pub(crate) attrs: ValueAttrs,
+pub struct EnumValue {
+    pub name: String,
+    pub value: SignedOrNotInt,
+    pub attrs: Vec<Attr>,
 }
 
 fn type_signedness(clang_type: &clang::Type) -> Option<Signedness> {
@@ -774,7 +771,7 @@ enum Signedness {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
-pub(crate) enum NumKind {
+pub enum NumKind {
     SChar,
     UChar,
     Short,
@@ -791,13 +788,13 @@ pub(crate) enum NumKind {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
-pub(crate) enum Unsupported {
+pub enum Unsupported {
     Vector,
     Unexposed,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum ObjCType {
+pub enum ObjCType {
     Void,
     Bool,
     Num(NumKind),
@@ -1043,10 +1040,10 @@ impl Location {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ObjCParam {
-    pub(crate) name: String,
-    pub(crate) objc_type: ObjCType,
-    pub(crate) attrs: ParamAttrs,
+pub struct ObjCParam {
+    pub name: String,
+    pub objc_type: ObjCType,
+    pub attrs: Vec<Attr>,
 }
 
 impl ObjCParam {
@@ -1058,7 +1055,7 @@ impl ObjCParam {
             &mut parm_decl_children(decl),
             unnamed_tag_ids,
         );
-        let attrs = ParamAttrs::from_decl(&decl);
+        let attrs = Attr::from_decl(&decl);
         ObjCParam {
             name,
             objc_type,
@@ -1068,18 +1065,18 @@ impl ObjCParam {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
-pub(crate) enum ObjCMethodKind {
+pub enum ObjCMethodKind {
     Class,
     Instance,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ObjCMethod {
-    pub(crate) name: String,
-    pub(crate) kind: ObjCMethodKind,
-    pub(crate) params: Vec<ObjCParam>,
-    pub(crate) result: ObjCType,
-    pub(crate) attrs: CallableAttrs,
+pub struct ObjCMethod {
+    pub name: String,
+    pub kind: ObjCMethodKind,
+    pub params: Vec<ObjCParam>,
+    pub result: ObjCType,
+    pub attrs: Vec<Attr>,
 }
 
 impl ObjCMethod {
@@ -1102,7 +1099,7 @@ impl ObjCMethod {
             unnamed_tag_ids,
         );
 
-        let attrs = CallableAttrs::from_decl(cursor);
+        let attrs = Attr::from_decl(cursor);
 
         ObjCMethod {
             name: cursor.spelling().unwrap(),
@@ -1136,7 +1133,7 @@ fn is_generated_from_property(method_cursor: &clang::Cursor) -> bool {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
-pub(crate) enum PropOwnership {
+pub enum PropOwnership {
     Strong,
     Weak,
     Copy,
@@ -1146,15 +1143,15 @@ pub(crate) enum PropOwnership {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Property {
-    pub(crate) name: String,
-    pub(crate) value: ObjCType,
-    pub(crate) is_atomic: bool,
-    pub(crate) is_writable: bool,
-    pub(crate) is_class: bool,
-    pub(crate) ownership: PropOwnership,
-    pub(crate) getter: Option<String>,
-    pub(crate) setter: Option<String>,
+pub struct Property {
+    pub name: String,
+    pub value: ObjCType,
+    pub is_atomic: bool,
+    pub is_writable: bool,
+    pub is_class: bool,
+    pub ownership: PropOwnership,
+    pub getter: Option<String>,
+    pub setter: Option<String>,
 }
 
 impl Property {
@@ -1279,14 +1276,14 @@ impl Property {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct InterfaceDef {
-    pub(crate) name: String,
-    pub(crate) superclass: Option<String>,
-    pub(crate) adopted_protocols: Vec<String>,
-    pub(crate) template_params: Vec<String>,
-    pub(crate) methods: Vec<ObjCMethod>,
-    pub(crate) properties: Vec<Property>,
-    pub(crate) origin: Option<Origin>,
+pub struct InterfaceDef {
+    pub name: String,
+    pub superclass: Option<String>,
+    pub adopted_protocols: Vec<String>,
+    pub template_params: Vec<String>,
+    pub methods: Vec<ObjCMethod>,
+    pub properties: Vec<Property>,
+    pub origin: Option<Origin>,
 }
 
 impl InterfaceDef {
@@ -1343,9 +1340,9 @@ impl InterfaceDef {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct CategoryDef {
-    pub(crate) name: Option<String>,
-    pub(crate) class: String,
+pub struct CategoryDef {
+    pub name: Option<String>,
+    pub class: String,
     adopted_protocols: Vec<String>,
     methods: Vec<ObjCMethod>,
     properties: Vec<Property>,
@@ -1407,24 +1404,24 @@ impl CategoryDef {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ProtocolMethod {
-    pub(crate) method: ObjCMethod,
-    pub(crate) is_optional: bool,
+pub struct ProtocolMethod {
+    pub method: ObjCMethod,
+    pub is_optional: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ProtocolProperty {
-    pub(crate) property: Property,
-    pub(crate) is_optional: bool,
+pub struct ProtocolProperty {
+    pub property: Property,
+    pub is_optional: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ProtocolDef {
-    pub(crate) name: String,
-    pub(crate) inherited_protocols: Vec<String>,
-    pub(crate) methods: Vec<ProtocolMethod>,
-    pub(crate) properties: Vec<ProtocolProperty>,
-    pub(crate) origin: Option<Origin>,
+pub struct ProtocolDef {
+    pub name: String,
+    pub inherited_protocols: Vec<String>,
+    pub methods: Vec<ProtocolMethod>,
+    pub properties: Vec<ProtocolProperty>,
+    pub origin: Option<Origin>,
 }
 
 impl ProtocolDef {
@@ -1478,10 +1475,10 @@ impl ProtocolDef {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct TypedefDecl {
-    pub(crate) name: String,
-    pub(crate) underlying: ObjCType,
-    pub(crate) origin: Option<Origin>,
+pub struct TypedefDecl {
+    pub name: String,
+    pub underlying: ObjCType,
+    pub origin: Option<Origin>,
 }
 
 impl TypedefDecl {
@@ -1505,15 +1502,15 @@ impl TypedefDecl {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
-pub(crate) enum RecordKind {
+pub enum RecordKind {
     Union,
     Struct,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct RecordDef {
-    pub(crate) id: TagId,
-    pub(crate) kind: RecordKind,
+pub struct RecordDef {
+    pub id: TagId,
+    pub kind: RecordKind,
     fields: Vec<Field>,
     origin: Option<Origin>,
 }
@@ -1553,8 +1550,8 @@ impl RecordDef {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct FuncDecl {
-    pub(crate) name: String,
+pub struct FuncDecl {
+    pub name: String,
     desc: CallableDesc,
     origin: Option<Origin>,
 }
@@ -1574,11 +1571,12 @@ impl FuncDecl {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct EnumDef {
-    pub(crate) id: TagId,
-    pub(crate) underlying: ObjCType,
-    pub(crate) values: Vec<EnumValue>,
-    pub(crate) origin: Option<Origin>,
+pub struct EnumDef {
+    pub id: TagId,
+    pub underlying: ObjCType,
+    pub values: Vec<EnumValue>,
+    pub attrs: Vec<Attr>,
+    pub origin: Option<Origin>,
 }
 
 impl EnumDef {
@@ -1609,23 +1607,25 @@ impl EnumDef {
                         Signedness::Signed => SignedOrNotInt::Signed(values.0),
                         Signedness::Unsigned => SignedOrNotInt::Unsigned(values.1),
                     },
-                    attrs: ValueAttrs::from_decl(&decl),
+                    attrs: Attr::from_decl(&decl),
                 }
             })
             .collect();
+        let attrs = Attr::from_decl(decl);
         let origin = Origin::from_cursor(decl);
 
         EnumDef {
             id,
             underlying,
             values,
+            attrs,
             origin,
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum Decl {
+pub enum Decl {
     ProtocolDef(ProtocolDef),
     InterfaceDef(InterfaceDef),
     CategoryDef(CategoryDef),
@@ -1637,7 +1637,7 @@ pub(crate) enum Decl {
 }
 
 #[derive(Debug)]
-pub(crate) enum ParseError {
+pub enum ParseError {
     ClangError(clang::ClangError),
     CompilationError(String),
 }
@@ -1685,7 +1685,7 @@ fn preprocess_objc(source: &str) -> String {
 /// Prints the full clang AST.
 ///
 /// Should only be used for debugging purpose. Definitions with cycles can end up in a stack overflow.
-pub(crate) fn print_full_clang_ast(source: &str) {
+pub fn print_full_clang_ast(source: &str) {
     // Preprocess before to get more easily interesting tokens coming from #defines.
     let source: &str = &preprocess_objc(source);
 
@@ -1721,7 +1721,7 @@ fn parser_configuration() -> (Vec<String>, clang::TuOptions) {
     )
 }
 
-pub(crate) fn ast_from_str(source: &str) -> Result<Vec<Decl>, ParseError> {
+pub fn ast_from_str(source: &str) -> Result<Vec<Decl>, ParseError> {
     // Preprocess before to get more easily interesting tokens coming from #defines.
     let source: &str = &preprocess_objc(source);
 
@@ -1946,10 +1946,10 @@ mod tests {
                             }),
                             nullability: Nullability::Unspecified,
                         }),
-                        attrs: ParamAttrs::empty(),
+                        attrs: vec![],
                     }],
                     result: ObjCType::Void,
-                    attrs: CallableAttrs::empty(),
+                    attrs: vec![],
                 },
                 ObjCMethod {
                     name: "bar:".to_string(),
@@ -1964,10 +1964,10 @@ mod tests {
                             }),
                             nullability: Nullability::NonNull,
                         }),
-                        attrs: ParamAttrs::empty(),
+                        attrs: vec![],
                     }],
                     result: ObjCType::Void,
-                    attrs: CallableAttrs::empty(),
+                    attrs: vec![],
                 },
                 ObjCMethod {
                     name: "foobar:".to_string(),
@@ -1982,7 +1982,7 @@ mod tests {
                             }),
                             nullability: Nullability::Unspecified,
                         }),
-                        attrs: ParamAttrs::empty(),
+                        attrs: vec![],
                     }],
                     result: ObjCType::ObjPtr(ObjPtr {
                         kind: ObjPtrKind::Id(IdObjPtr {
@@ -1990,7 +1990,7 @@ mod tests {
                         }),
                         nullability: Nullability::Unspecified,
                     }),
-                    attrs: CallableAttrs::empty(),
+                    attrs: vec![],
                 },
             ],
             properties: vec![],
@@ -2068,7 +2068,7 @@ mod tests {
                         kind: ObjPtrKind::TypeParam("X".to_string()),
                         nullability: Nullability::NonNull,
                     }),
-                    attrs: CallableAttrs::empty(),
+                    attrs: vec![],
                 }],
                 properties: vec![],
                 origin: None,
@@ -2111,7 +2111,7 @@ mod tests {
                             kind: ObjCMethodKind::Instance,
                             params: vec![],
                             result: ObjCType::Void,
-                            attrs: CallableAttrs::empty(),
+                            attrs: vec![],
                         },
                         is_optional: false,
                     },
@@ -2121,7 +2121,7 @@ mod tests {
                             kind: ObjCMethodKind::Class,
                             params: vec![],
                             result: ObjCType::Void,
-                            attrs: CallableAttrs::empty(),
+                            attrs: vec![],
                         },
                         is_optional: true,
                     },
@@ -2131,7 +2131,7 @@ mod tests {
                             kind: ObjCMethodKind::Instance,
                             params: vec![],
                             result: ObjCType::Num(NumKind::Int),
-                            attrs: CallableAttrs::empty(),
+                            attrs: vec![],
                         },
                         is_optional: true,
                     },
@@ -2182,7 +2182,7 @@ mod tests {
                     kind: ObjCMethodKind::Instance,
                     params: vec![],
                     result: ObjCType::Void,
-                    attrs: CallableAttrs::empty(),
+                    attrs: vec![],
                 }],
                 properties: vec![],
                 origin: None,
@@ -2196,7 +2196,7 @@ mod tests {
                     kind: ObjCMethodKind::Instance,
                     params: vec![],
                     result: ObjCType::Void,
-                    attrs: CallableAttrs::empty(),
+                    attrs: vec![],
                 }],
                 properties: vec![],
                 origin: None,
@@ -2210,7 +2210,7 @@ mod tests {
                     kind: ObjCMethodKind::Instance,
                     params: vec![],
                     result: ObjCType::Void,
-                    attrs: CallableAttrs::empty(),
+                    attrs: vec![],
                 }],
                 properties: vec![Property {
                     name: "propertyOnUnnamedCategory".to_string(),
@@ -2255,7 +2255,7 @@ mod tests {
                         kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
                         nullability: Nullability::Unspecified,
                     }),
-                    attrs: CallableAttrs::empty(),
+                    attrs: vec![],
                 },
                 ObjCMethod {
                     name: "y".to_string(),
@@ -2267,7 +2267,7 @@ mod tests {
                         }),
                         nullability: Nullability::Unspecified,
                     }),
-                    attrs: CallableAttrs::empty(),
+                    attrs: vec![],
                 },
                 ObjCMethod {
                     name: "z".to_string(),
@@ -2279,7 +2279,7 @@ mod tests {
                         }),
                         nullability: Nullability::NonNull,
                     }),
-                    attrs: CallableAttrs::empty(),
+                    attrs: vec![],
                 },
             ],
             properties: vec![],
@@ -2317,7 +2317,7 @@ mod tests {
                     result: ObjCType::Typedef(TypedefRef {
                         name: "I".to_string(),
                     }),
-                    attrs: CallableAttrs::empty(),
+                    attrs: vec![],
                 }],
                 properties: vec![],
                 origin: None,
@@ -2374,7 +2374,7 @@ mod tests {
                             id: TagId::Named("S".to_string()),
                             kind: TagKind::Struct,
                         }),
-                        attrs: CallableAttrs::empty(),
+                        attrs: vec![],
                     },
                     ObjCMethod {
                         name: "inlineUnnamedStruct".to_string(),
@@ -2384,7 +2384,7 @@ mod tests {
                             id: TagId::Unnamed(1),
                             kind: TagKind::Struct,
                         }),
-                        attrs: CallableAttrs::empty(),
+                        attrs: vec![],
                     },
                     ObjCMethod {
                         name: "pointerToStructTypedef".to_string(),
@@ -2396,7 +2396,7 @@ mod tests {
                             })),
                             nullability: Nullability::Unspecified,
                         }),
-                        attrs: CallableAttrs::empty(),
+                        attrs: vec![],
                     },
                     ObjCMethod {
                         name: "pointerToUndeclaredStruct".to_string(),
@@ -2409,7 +2409,7 @@ mod tests {
                             })),
                             nullability: Nullability::Unspecified,
                         }),
-                        attrs: CallableAttrs::empty(),
+                        attrs: vec![],
                     },
                     ObjCMethod {
                         name: "pointerToStructDeclaredAfterwards".to_string(),
@@ -2422,7 +2422,7 @@ mod tests {
                             })),
                             nullability: Nullability::Unspecified,
                         }),
-                        attrs: CallableAttrs::empty(),
+                        attrs: vec![],
                     },
                 ],
                 properties: vec![],
@@ -2499,10 +2499,10 @@ mod tests {
                         params: Some(vec![Param {
                             name: Some("typedefParam".to_string()),
                             objc_type: ObjCType::Num(NumKind::Int),
-                            attrs: ParamAttrs::empty(),
+                            attrs: vec![],
                         }]),
                         is_variadic: false,
-                        attrs: CallableAttrs::empty(),
+                        attrs: vec![],
                     })),
                     nullability: Nullability::Unspecified,
                 }),
@@ -2524,11 +2524,11 @@ mod tests {
                                 result: Box::new(ObjCType::Num(NumKind::Int)),
                                 params: None,
                                 is_variadic: true,
-                                attrs: CallableAttrs::empty(),
+                                attrs: vec![],
                             })),
                             nullability: Nullability::Unspecified,
                         }),
-                        attrs: CallableAttrs::empty(),
+                        attrs: vec![],
                     },
                     // - (int(*)(float, ...))returningFunctionPointerVariadic;
                     ObjCMethod {
@@ -2541,14 +2541,14 @@ mod tests {
                                 params: Some(vec![Param {
                                     name: None,
                                     objc_type: ObjCType::Num(NumKind::Float),
-                                    attrs: ParamAttrs::empty(),
+                                    attrs: vec![],
                                 }]),
                                 is_variadic: true,
-                                attrs: CallableAttrs::empty(),
+                                attrs: vec![],
                             })),
                             nullability: Nullability::Unspecified,
                         }),
-                        attrs: CallableAttrs::empty(),
+                        attrs: vec![],
                     },
                     // - (int(*)(void))returningFunctionPointerWithNoParameters;
                     ObjCMethod {
@@ -2560,11 +2560,11 @@ mod tests {
                                 result: Box::new(ObjCType::Num(NumKind::Int)),
                                 params: Some(vec![]),
                                 is_variadic: false,
-                                attrs: CallableAttrs::empty(),
+                                attrs: vec![],
                             })),
                             nullability: Nullability::Unspecified,
                         }),
-                        attrs: CallableAttrs::empty(),
+                        attrs: vec![],
                     },
                     // - (T)returningFunctionPointerTypedef;
                     ObjCMethod {
@@ -2574,7 +2574,7 @@ mod tests {
                         result: ObjCType::Typedef(TypedefRef {
                             name: "T".to_string(),
                         }),
-                        attrs: CallableAttrs::empty(),
+                        attrs: vec![],
                     },
                     // - (char (*(*)(double innerParam))(float outerParam))returningFunctionPointerReturningFunctionPointer;
                     ObjCMethod {
@@ -2589,24 +2589,24 @@ mod tests {
                                         params: Some(vec![Param {
                                             name: Some("outerParam".to_string()),
                                             objc_type: ObjCType::Num(NumKind::Float),
-                                            attrs: ParamAttrs::empty(),
+                                            attrs: vec![],
                                         }]),
                                         is_variadic: false,
-                                        attrs: CallableAttrs::empty(),
+                                        attrs: vec![],
                                     })),
                                     nullability: Nullability::Unspecified,
                                 })),
                                 params: Some(vec![Param {
                                     name: Some("innerParam".to_string()),
                                     objc_type: ObjCType::Num(NumKind::Double),
-                                    attrs: ParamAttrs::empty(),
+                                    attrs: vec![],
                                 }]),
                                 is_variadic: false,
-                                attrs: CallableAttrs::empty(),
+                                attrs: vec![],
                             })),
                             nullability: Nullability::Unspecified,
                         }),
-                        attrs: CallableAttrs::empty(),
+                        attrs: vec![],
                     },
                     // - (A *(*)(short returnedFunctionParameter))takingTypedef:(T)typedefParam andFunctionPointersTakingFunctionPointers:(A *(*)(float someFloat, int (*functionPointerParam)(char someChar)))complicatedParam;
                     ObjCMethod {
@@ -2619,7 +2619,7 @@ mod tests {
                                 objc_type: ObjCType::Typedef(TypedefRef {
                                     name: "T".to_string(),
                                 }),
-                                attrs: ParamAttrs::empty(),
+                                attrs: vec![],
                             },
                             ObjCParam {
                                 name: "complicatedParam".to_string(),
@@ -2637,7 +2637,7 @@ mod tests {
                                             Param {
                                                 name: Some("someFloat".to_string()),
                                                 objc_type: ObjCType::Num(NumKind::Float),
-                                                attrs: ParamAttrs::empty(),
+                                                attrs: vec![],
                                             },
                                             Param {
                                                 name: Some("functionPointerParam".to_string()),
@@ -2652,23 +2652,23 @@ mod tests {
                                                                 objc_type: ObjCType::Num(
                                                                     NumKind::SChar,
                                                                 ),
-                                                                attrs: ParamAttrs::empty(),
+                                                                attrs: vec![],
                                                             }]),
                                                             is_variadic: false,
-                                                            attrs: CallableAttrs::empty(),
+                                                            attrs: vec![],
                                                         },
                                                     )),
                                                     nullability: Nullability::Unspecified,
                                                 }),
-                                                attrs: ParamAttrs::empty(),
+                                                attrs: vec![],
                                             },
                                         ]),
                                         is_variadic: false,
-                                        attrs: CallableAttrs::empty(),
+                                        attrs: vec![],
                                     })),
                                     nullability: Nullability::Unspecified,
                                 }),
-                                attrs: ParamAttrs::empty(),
+                                attrs: vec![],
                             },
                         ],
                         result: ObjCType::Pointer(Pointer {
@@ -2684,14 +2684,14 @@ mod tests {
                                 params: Some(vec![Param {
                                     name: Some("returnedFunctionParameter".to_string()),
                                     objc_type: ObjCType::Num(NumKind::Short),
-                                    attrs: ParamAttrs::empty(),
+                                    attrs: vec![],
                                 }]),
                                 is_variadic: false,
-                                attrs: CallableAttrs::empty(),
+                                attrs: vec![],
                             })),
                             nullability: Nullability::Unspecified,
                         }),
-                        attrs: CallableAttrs::empty(),
+                        attrs: vec![],
                     },
                 ],
                 properties: vec![],
@@ -2781,16 +2781,16 @@ mod tests {
                                     kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
                                     nullability: Nullability::NonNull,
                                 }),
-                                attrs: ParamAttrs::empty(),
+                                attrs: vec![],
                             },
                             Param {
                                 name: None,
                                 objc_type: ObjCType::ObjCSel(Nullability::NonNull),
-                                attrs: ParamAttrs::empty(),
+                                attrs: vec![],
                             },
                         ]),
                         is_variadic: true,
-                        attrs: CallableAttrs::empty(),
+                        attrs: vec![],
                     })),
                     nullability: Nullability::Unspecified,
                 }),
@@ -2806,12 +2806,12 @@ mod tests {
                         params: vec![ObjCParam {
                             name: "aSelector".to_string(),
                             objc_type: ObjCType::ObjCSel(Nullability::Unspecified),
-                            attrs: ParamAttrs::empty(),
+                            attrs: vec![],
                         }],
                         result: ObjCType::Typedef(TypedefRef {
                             name: "IMP".to_string(),
                         }),
-                        attrs: CallableAttrs::empty(),
+                        attrs: vec![],
                     },
                     is_optional: false,
                 }],
@@ -2846,10 +2846,10 @@ mod tests {
                         }),
                         nullability: Nullability::Unspecified,
                     }),
-                    attrs: ParamAttrs::empty(),
+                    attrs: vec![],
                 }]),
                 is_variadic: true,
-                attrs: CallableAttrs::empty(),
+                attrs: vec![],
             },
             origin: None,
         })];
@@ -2885,10 +2885,10 @@ mod tests {
                                 kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
                                 nullability: Nullability::Unspecified,
                             }),
-                            attrs: ParamAttrs::CONSUMED,
+                            attrs: vec![Attr::Consumed],
                         }],
                         result: ObjCType::Void,
-                        attrs: CallableAttrs::empty(),
+                        attrs: vec![],
                     },
                     ObjCMethod {
                         name: "methodWithNoescapeBlock:".to_string(),
@@ -2900,14 +2900,14 @@ mod tests {
                                     result: Box::new(ObjCType::Void),
                                     params: Some(vec![]),
                                     is_variadic: false,
-                                    attrs: CallableAttrs::empty(),
+                                    attrs: vec![],
                                 }),
                                 nullability: Nullability::Unspecified,
                             }),
-                            attrs: ParamAttrs::NOESCAPE,
+                            attrs: vec![Attr::Noescape],
                         }],
                         result: ObjCType::Void,
-                        attrs: CallableAttrs::empty(),
+                        attrs: vec![],
                     },
                 ],
                 properties: vec![],
@@ -2923,10 +2923,10 @@ mod tests {
                             kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
                             nullability: Nullability::Unspecified,
                         }),
-                        attrs: ParamAttrs::CONSUMED,
+                        attrs: vec![Attr::Consumed],
                     }]),
                     is_variadic: false,
-                    attrs: CallableAttrs::empty(),
+                    attrs: vec![],
                 },
                 origin: None,
             }),
@@ -2941,14 +2941,14 @@ mod tests {
                                 result: Box::new(ObjCType::Void),
                                 params: Some(vec![]),
                                 is_variadic: false,
-                                attrs: CallableAttrs::empty(),
+                                attrs: vec![],
                             }),
                             nullability: Nullability::Unspecified,
                         }),
-                        attrs: ParamAttrs::NOESCAPE,
+                        attrs: vec![Attr::Noescape],
                     }]),
                     is_variadic: false,
-                    attrs: CallableAttrs::empty(),
+                    attrs: vec![],
                 },
                 origin: None,
             }),
@@ -2984,14 +2984,14 @@ mod tests {
                             kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
                             nullability: Nullability::Unspecified,
                         }),
-                        attrs: CallableAttrs::RETURNS_RETAINED,
+                        attrs: vec![Attr::ReturnsRetained],
                     },
                     ObjCMethod {
                         name: "unavailableMethod".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
                         result: ObjCType::Void,
-                        attrs: CallableAttrs::UNAVAILABLE,
+                        attrs: vec![Attr::Unavailable],
                     },
                 ],
                 properties: vec![],
@@ -3006,11 +3006,52 @@ mod tests {
                     })),
                     params: Some(vec![]),
                     is_variadic: false,
-                    attrs: CallableAttrs::RETURNS_RETAINED,
+                    attrs: vec![Attr::ReturnsRetained],
                 },
                 origin: None,
             }),
         ];
+
+        let parsed_decls = ast_from_str(source).unwrap();
+        assert_eq!(parsed_decls, expected_decls);
+    }
+
+    #[test]
+    fn test_swift_name() {
+        let source = r#"
+            enum CIDataMatrixCodeECCVersion : long
+            {
+                CIDataMatrixCodeECCVersion000 __attribute__((swift_name("v000"))) = 0,
+                CIDataMatrixCodeECCVersion050 __attribute__((swift_name("v050"))) = 50,
+                CIDataMatrixCodeECCVersion080 __attribute__((swift_name("v080"))) = 80,
+            } __attribute__((swift_name("CIDataMatrixCodeDescriptor.ECCVersion")));
+        "#;
+
+        let expected_decls = vec![Decl::EnumDef(EnumDef {
+            id: TagId::Named("CIDataMatrixCodeECCVersion".to_string()),
+            underlying: ObjCType::Num(NumKind::Long),
+            values: vec![
+                EnumValue {
+                    name: "CIDataMatrixCodeECCVersion000".to_string(),
+                    value: SignedOrNotInt::Signed(0),
+                    attrs: vec![Attr::SwiftName("v000".to_string())],
+                },
+                EnumValue {
+                    name: "CIDataMatrixCodeECCVersion050".to_string(),
+                    value: SignedOrNotInt::Signed(50),
+                    attrs: vec![Attr::SwiftName("v050".to_string())],
+                },
+                EnumValue {
+                    name: "CIDataMatrixCodeECCVersion080".to_string(),
+                    value: SignedOrNotInt::Signed(80),
+                    attrs: vec![Attr::SwiftName("v080".to_string())],
+                },
+            ],
+            attrs: vec![Attr::SwiftName(
+                "CIDataMatrixCodeDescriptor.ECCVersion".to_string(),
+            )],
+            origin: None,
+        })];
 
         let parsed_decls = ast_from_str(source).unwrap();
         assert_eq!(parsed_decls, expected_decls);

@@ -498,7 +498,7 @@ impl {struct_name} {{
                 original_value_name = original_value_name,
             )
             .unwrap();
-            if value.attrs.contains(ast::ValueAttrs::DEPRECATED) {
+            if value.attrs.contains(&ast::Attr::Deprecated) {
                 writeln!(&mut code, "    #[deprecated]").unwrap();
             }
             writeln!(
@@ -531,13 +531,23 @@ impl std::fmt::Debug for {struct_name} {{
                 // Multiple enum value have the same numeric value.
                 // It only makes sense to have one in the match statement so we have to choose.
 
+                fn has_some_platform_deprecation(enum_value: &ast::EnumValue) -> bool {
+                    for attr in enum_value.attrs.iter() {
+                        if let ast::Attr::PlatformAvailability(availability) = attr {
+                            if availability.iter().any(|avail| avail.deprecated.is_some()) {
+                                // The deprecation version can even be in the future (100000) but we don't have any way to check if there is a replacement available.
+                                return true;
+                            }
+                        }
+                    }
+                    false
+                }
+
                 let first_non_deprecated = values
                     .iter()
                     .filter(|v| {
-                        !v.attrs.contains(ast::ValueAttrs::DEPRECATED)
-                            && !v
-                                .attrs
-                                .contains(ast::ValueAttrs::HAS_SOME_PLATFORM_DEPRECATION)
+                        !v.attrs.contains(&ast::Attr::Deprecated)
+                            && !has_some_platform_deprecation(v)
                     })
                     .next();
 
@@ -693,7 +703,6 @@ fn cleanup_enum_value_names<S: AsRef<str>, Iter: Iterator<Item = S>>(
     enum_name: &str,
     value_names: Iter,
 ) -> Vec<String> {
-    let enum_name_split = snake_case_split(enum_name);
     let value_names_split = value_names
         .map(|name| {
             let mut split_name = snake_case_split(name.as_ref());
@@ -704,6 +713,27 @@ fn cleanup_enum_value_names<S: AsRef<str>, Iter: Iterator<Item = S>>(
             split_name
         })
         .collect::<Vec<_>>();
+
+    // For "AU3DMixerRenderingFlags", ignore the first "AU" (value names starting with "k3DMixerRenderingFlags_")
+    let mut enum_name_split = snake_case_split(enum_name);
+    let enum_name_start = enum_name_split.iter().next().unwrap();
+    for prefix in &["AU"] {
+        if !enum_name_start.starts_with(prefix) {
+            continue;
+        }
+        if enum_name_start.len() == prefix.len() {
+            if &value_names_split[0][0] != enum_name_start {
+                enum_name_split.remove(0);
+                break;
+            }
+        } else {
+            if value_names_split[0][0] == enum_name_start[prefix.len()..] {
+                enum_name_split[0].drain(0..prefix.len());
+                break;
+            }
+        }
+    }
+    let enum_name_split = enum_name_split;
 
     let matching_head_len = value_names_split
         .iter()
@@ -751,23 +781,91 @@ fn cleanup_enum_value_names<S: AsRef<str>, Iter: Iterator<Item = S>>(
         .min()
         .unwrap();
 
-    value_names_split
+    let names = value_names_split
         .iter()
         .map(|value_name_split| {
-            let mut name = value_name_split
-                [matching_head_len..value_name_split.len() - matching_tail_len]
+            value_name_split[matching_head_len..value_name_split.len() - matching_tail_len]
                 .iter()
                 .map(|word| word.to_ascii_uppercase())
                 .collect::<Vec<_>>()
-                .join("_");
-
-            // Prepend a '_' if the name starts with a digit.
-            if name.chars().next().unwrap().is_ascii_digit() {
-                name.insert(0, '_');
-            }
-            name
+                .join("_")
         })
-        .collect()
+        .collect();
+
+    additional_manual_cleanup(enum_name, names)
+}
+
+fn additional_manual_cleanup(enum_name: &str, mut value_names: Vec<String>) -> Vec<String> {
+    fn starts_with_digit(text: &str) -> bool {
+        text.chars().next().unwrap().is_ascii_digit()
+    }
+
+    fn add_prefix_before_starting_digit(value_names: &mut Vec<String>, prefix: &str) {
+        for name in value_names
+            .iter_mut()
+            .filter(|name| starts_with_digit(name))
+        {
+            name.insert_str(0, prefix);
+        }
+    }
+
+    match enum_name {
+        "ColorSyncDataDepth" => {
+            for name in value_names
+                .iter_mut()
+                .filter(|name| starts_with_digit(name))
+            {
+                let mut parts: Vec<_> = name.split("_BIT_").collect();
+                assert!(parts.len() == 2);
+                parts.swap(0, 1);
+                *name = parts.join("_");
+                name.push_str("BIT");
+            }
+        }
+        "NSDataBase64EncodingOptions" => {
+            for name in value_names
+                .iter_mut()
+                .filter(|name| starts_with_digit(name))
+            {
+                let mut parts: Vec<_> = name.split("_CHARACTER_").collect();
+                assert!(parts.len() == 2);
+                parts.swap(0, 1);
+                *name = parts.join("_");
+                name.push_str("_CHARACTERS");
+            }
+        }
+        "CGImageByteOrderInfo" => {
+            for name in value_names
+                .iter_mut()
+                .filter(|name| starts_with_digit(name))
+            {
+                let mut parts: Vec<_> = name.splitn(2, "_").collect();
+                assert!(parts.len() == 2);
+                parts.swap(0, 1);
+                *name = parts.join("_");
+            }
+        }
+        "NSNumberFormatterBehavior" | "NSDateFormatterBehavior" => {
+            // 10_0 or 10_4 mean Mac OS X 10.0 and 10.4
+            add_prefix_before_starting_digit(&mut value_names, "MAC_OS_");
+        }
+        "SMPTETimeType" | "CVSMPTETimeType" => {
+            add_prefix_before_starting_digit(&mut value_names, "FPS_");
+        }
+        "IOSurfaceSubsampling" => {
+            add_prefix_before_starting_digit(&mut value_names, "CHROMA_");
+        }
+        _ => {}
+    }
+
+    assert!(
+        value_names.iter().all(|name| !starts_with_digit(name)),
+        "value names should not start with a digit in enum {}: {:?}",
+        enum_name,
+        value_names,
+    );
+
+    value_names
 }
 
 #[cfg(test)]
@@ -900,6 +998,77 @@ mod tests {
                 "MAC_HEBREW",
                 "MAC_GREEK",
                 "MAC_CYRILLIC",
+            ],
+        );
+
+        assert_eq!(
+            cleanup_enum_value_names(
+                "NSDataBase64EncodingOptions",
+                [
+                    "NSDataBase64Encoding64CharacterLineLength",
+                    "NSDataBase64Encoding76CharacterLineLength",
+                    "NSDataBase64EncodingEndLineWithCarriageReturn",
+                    "NSDataBase64EncodingEndLineWithLineFeed",
+                ]
+                .iter()
+            ),
+            [
+                "LINE_LENGTH_64_CHARACTERS",
+                "LINE_LENGTH_76_CHARACTERS",
+                "END_LINE_WITH_CARRIAGE_RETURN",
+                "END_LINE_WITH_LINE_FEED",
+            ],
+        );
+
+        assert_eq!(
+            cleanup_enum_value_names(
+                "ColorSyncDataDepth",
+                [
+                    "kColorSync1BitGamut",
+                    "kColorSync8BitInteger",
+                    "kColorSync16BitInteger",
+                    "kColorSync16BitFloat",
+                    "kColorSync32BitInteger",
+                    "kColorSync32BitNamedColorIndex",
+                    "kColorSync32BitFloat",
+                    "kColorSync10BitInteger",
+                ]
+                .iter()
+            ),
+            [
+                "GAMUT_1BIT",
+                "INTEGER_8BIT",
+                "INTEGER_16BIT",
+                "FLOAT_16BIT",
+                "INTEGER_32BIT",
+                "NAMED_COLOR_INDEX_32BIT",
+                "FLOAT_32BIT",
+                "INTEGER_10BIT",
+            ],
+        );
+
+        assert_eq!(
+            cleanup_enum_value_names(
+                "AU3DMixerRenderingFlags",
+                [
+                    "k3DMixerRenderingFlags_InterAuralDelay",
+                    "k3DMixerRenderingFlags_DopplerShift",
+                    "k3DMixerRenderingFlags_DistanceAttenuation",
+                    "k3DMixerRenderingFlags_DistanceFilter",
+                    "k3DMixerRenderingFlags_DistanceDiffusion",
+                    "k3DMixerRenderingFlags_LinearDistanceAttenuation",
+                    "k3DMixerRenderingFlags_ConstantReverbBlend",
+                ]
+                .iter()
+            ),
+            [
+                "INTER_AURAL_DELAY",
+                "DOPPLER_SHIFT",
+                "DISTANCE_ATTENUATION",
+                "DISTANCE_FILTER",
+                "DISTANCE_DIFFUSION",
+                "LINEAR_DISTANCE_ATTENUATION",
+                "CONSTANT_REVERB_BLEND",
             ],
         );
     }
