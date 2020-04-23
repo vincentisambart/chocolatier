@@ -685,14 +685,32 @@ fn snake_case_split(text: &str) -> Vec<String> {
     static LOWER_TO_UPPER_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"([a-z])([A-Z])").unwrap());
     static UPPER_TO_LOWER_RE: Lazy<Regex> =
         Lazy::new(|| Regex::new(r"([A-Z])([A-Z][a-z])").unwrap());
-    static BEFORE_NUMBER_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"([a-z])([0-9])").unwrap());
+    // "v" not included because we do not want "v1" to be split in ["v", "1"]
+    static BEFORE_NUMBER_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"([a-uw-z])([0-9])").unwrap());
     static AFTER_NUMBER_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"([0-9])([A-Z][a-z])").unwrap());
+    static OS_RE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"((?:\A|_)(?:mac|tv|i))_(OS(?:_|\z))").unwrap());
+
+    // We want "NSTextScalingiOS" to be split as ["NS", "Text", "Scaling", "iOS"]
+    let text = &text.replace("iOS", "_iOS_");
 
     let text = &LOWER_TO_UPPER_RE.replace_all(text, "${1}_${2}");
     let text = &UPPER_TO_LOWER_RE.replace_all(text, "${1}_${2}");
+    let text = &LOWER_TO_UPPER_RE.replace_all(text, "${1}_${2}");
     let text = &BEFORE_NUMBER_RE.replace_all(text, "${1}_${2}");
-    let text = AFTER_NUMBER_RE.replace_all(text, "${1}_${2}");
-    text.split('_').map(|s| s.to_string()).collect()
+    let text = &AFTER_NUMBER_RE.replace_all(text, "${1}_${2}");
+    // We want "iOS" or "macOS" to not be split in 2.
+    let text = OS_RE.replace_all(text, "${1}${2}");
+
+    text.split('_')
+        .filter_map(|s| {
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        })
+        .collect()
 }
 
 fn loosely_equal(text1: &str, text2: &str) -> bool {
@@ -1084,6 +1102,85 @@ mod tests {
                 "LINEAR_DISTANCE_ATTENUATION",
                 "CONSTANT_REVERB_BLEND",
             ],
+        );
+
+        assert_eq!(
+            cleanup_enum_value_names(
+                "MTLFeatureSet",
+                [
+                    "MTLFeatureSet_iOS_GPUFamily1_v1",
+                    "MTLFeatureSet_iOS_GPUFamily2_v1",
+                    "MTLFeatureSet_iOS_GPUFamily1_v2",
+                    "MTLFeatureSet_iOS_GPUFamily2_v2",
+                    "MTLFeatureSet_iOS_GPUFamily3_v1",
+                    "MTLFeatureSet_iOS_GPUFamily1_v3",
+                    "MTLFeatureSet_iOS_GPUFamily2_v3",
+                    "MTLFeatureSet_iOS_GPUFamily3_v2",
+                    "MTLFeatureSet_iOS_GPUFamily1_v4",
+                    "MTLFeatureSet_iOS_GPUFamily2_v4",
+                    "MTLFeatureSet_iOS_GPUFamily3_v3",
+                    "MTLFeatureSet_iOS_GPUFamily4_v1",
+                    "MTLFeatureSet_iOS_GPUFamily1_v5",
+                    "MTLFeatureSet_iOS_GPUFamily2_v5",
+                    "MTLFeatureSet_iOS_GPUFamily3_v4",
+                    "MTLFeatureSet_iOS_GPUFamily4_v2",
+                    "MTLFeatureSet_macOS_GPUFamily1_v1",
+                    "MTLFeatureSet_OSX_GPUFamily1_v1",
+                    "MTLFeatureSet_macOS_GPUFamily1_v2",
+                    "MTLFeatureSet_OSX_GPUFamily1_v2",
+                    "MTLFeatureSet_macOS_ReadWriteTextureTier2",
+                    "MTLFeatureSet_OSX_ReadWriteTextureTier2",
+                    "MTLFeatureSet_macOS_GPUFamily1_v3",
+                    "MTLFeatureSet_macOS_GPUFamily1_v4",
+                    "MTLFeatureSet_macOS_GPUFamily2_v1",
+                    "MTLFeatureSet_tvOS_GPUFamily1_v1",
+                    "MTLFeatureSet_TVOS_GPUFamily1_v1",
+                    "MTLFeatureSet_tvOS_GPUFamily1_v2",
+                    "MTLFeatureSet_tvOS_GPUFamily1_v3",
+                    "MTLFeatureSet_tvOS_GPUFamily1_v4",
+                ]
+                .iter()
+            ),
+            [
+                "IOS_GPU_FAMILY_1_V1",
+                "IOS_GPU_FAMILY_2_V1",
+                "IOS_GPU_FAMILY_1_V2",
+                "IOS_GPU_FAMILY_2_V2",
+                "IOS_GPU_FAMILY_3_V1",
+                "IOS_GPU_FAMILY_1_V3",
+                "IOS_GPU_FAMILY_2_V3",
+                "IOS_GPU_FAMILY_3_V2",
+                "IOS_GPU_FAMILY_1_V4",
+                "IOS_GPU_FAMILY_2_V4",
+                "IOS_GPU_FAMILY_3_V3",
+                "IOS_GPU_FAMILY_4_V1",
+                "IOS_GPU_FAMILY_1_V5",
+                "IOS_GPU_FAMILY_2_V5",
+                "IOS_GPU_FAMILY_3_V4",
+                "IOS_GPU_FAMILY_4_V2",
+                "MACOS_GPU_FAMILY_1_V1",
+                "OSX_GPU_FAMILY_1_V1",
+                "MACOS_GPU_FAMILY_1_V2",
+                "OSX_GPU_FAMILY_1_V2",
+                "MACOS_READ_WRITE_TEXTURE_TIER_2",
+                "OSX_READ_WRITE_TEXTURE_TIER_2",
+                "MACOS_GPU_FAMILY_1_V3",
+                "MACOS_GPU_FAMILY_1_V4",
+                "MACOS_GPU_FAMILY_2_V1",
+                "TVOS_GPU_FAMILY_1_V1",
+                "TVOS_GPU_FAMILY_1_V1",
+                "TVOS_GPU_FAMILY_1_V2",
+                "TVOS_GPU_FAMILY_1_V3",
+                "TVOS_GPU_FAMILY_1_V4",
+            ],
+        );
+
+        assert_eq!(
+            cleanup_enum_value_names(
+                "NSTextScalingType",
+                ["NSTextScalingStandard", "NSTextScalingiOS"].iter()
+            ),
+            ["STANDARD", "IOS"],
         );
     }
 
