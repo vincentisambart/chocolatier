@@ -364,6 +364,13 @@ fn show_tree(cursor: &clang::Cursor, indent_level: usize) {
 }
 
 pub use clang::PlatformAvailability;
+pub use clang::Version;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EnumExten {
+    Open,
+    Closed,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Attr {
@@ -374,6 +381,8 @@ pub enum Attr {
     Deprecated,
     PlatformAvailability(Vec<PlatformAvailability>),
     SwiftName(String),
+    FlagEnum,
+    EnumExten(EnumExten),
 }
 
 impl Attr {
@@ -384,16 +393,17 @@ impl Attr {
             .filter_map(|child| match child.kind() {
                 CursorKind::NSConsumed => Some(Self::Consumed),
                 CursorKind::NSReturnsRetained => Some(Self::ReturnsRetained),
+                CursorKind::FlagEnum => Some(Self::FlagEnum),
                 CursorKind::UnexposedAttr => {
                     let extent = child
                         .extent()
-                        .expect("could not get extent of unexposed attr");
+                        .expect("could not get extent of unexposed attribute");
                     let tokens = extent.tokenize();
                     match tokens[0].spelling().as_str() {
                         "noescape" => {
                             assert!(
                                 tokens.len() == 1,
-                                "unexpected tokens for \"noescape\" unexposed attr: {:?}",
+                                "unexpected tokens for \"noescape\": {:?}",
                                 tokens
                             );
                             Some(Self::Noescape)
@@ -401,23 +411,23 @@ impl Attr {
                         "unavailable" => {
                             assert!(
                                 tokens.len() == 1 || tokens.len() == 4,
-                                "unexpected tokens for \"unavailable\" unexposed attr: {:?}",
+                                "unexpected tokens for \"unavailable\": {:?}",
                                 tokens
                             );
                             // There can be a message but for the time being just ignore it.
                             Some(Self::Unavailable)
                         }
                         "swift_name" => {
-                            // We expect to have 4 tokens here: "swift_name" "(" name ")"
+                            // We expect to have 4 tokens here: swift_name ( name )
                             assert!(
                                 tokens.len() == 4,
-                                "unexpected tokens for \"swift_name\" unexposed attr: {:?}",
+                                "unexpected tokens for \"swift_name\": {:?}",
                                 tokens
                             );
                             let name_token = &tokens[2];
                             assert!(
                                 name_token.kind() == clang::TokenKind::Literal,
-                                "unexpected tokens for \"swift_name\" unexposed attr: {:?}",
+                                "unexpected tokens for \"swift_name\": {:?}",
                                 tokens
                             );
                             // spelling() returns an escaped string, with '"' at the start and end.
@@ -426,6 +436,28 @@ impl Attr {
                             let name = spelling.trim_matches('"');
                             assert!(!name.contains('\\'), "unexpected Swift name {:?}", name);
                             Some(Self::SwiftName(name.into()))
+                        }
+                        "enum_extensibility" => {
+                            // We expect to have 4 tokens here: enum_extensibility ( open/closed )
+                            assert!(
+                                tokens.len() == 4,
+                                "unexpected tokens for \"enum_extensibility\": {:?}",
+                                tokens
+                            );
+                            let kind_token = &tokens[2];
+                            assert!(
+                                kind_token.kind() == clang::TokenKind::Identifier,
+                                "unexpected tokens for \"enum_extensibility\": {:?}",
+                                tokens
+                            );
+                            match kind_token.spelling().as_str() {
+                                "open" => Some(Self::EnumExten(EnumExten::Open)),
+                                "closed" => Some(Self::EnumExten(EnumExten::Closed)),
+                                _ => panic!(
+                                    "unexpected tokens for \"enum_extensibility\": {:?}",
+                                    tokens
+                                ),
+                            }
                         }
                         _ => None,
                     }
@@ -3053,6 +3085,148 @@ mod tests {
             )],
             origin: None,
         })];
+
+        let parsed_decls = ast_from_str(source).unwrap();
+        assert_eq!(parsed_decls, expected_decls);
+    }
+
+    #[test]
+    fn test_enum_attrs() {
+        let source = r#"
+            typedef enum __attribute__((flag_enum,enum_extensibility(open))) MTLIndirectCommandType : unsigned long MTLIndirectCommandType;
+            enum MTLIndirectCommandType: unsigned long {
+                MTLIndirectCommandTypeDraw = (1 << 0),
+                MTLIndirectCommandTypeDrawIndexed = (1 << 1),
+                MTLIndirectCommandTypeDrawPatches __attribute__((availability(tvos,unavailable))) = (1 << 2),
+                MTLIndirectCommandTypeDrawIndexedPatches __attribute__((availability(tvos,unavailable))) = (1 << 3),
+            } __attribute__((availability(macos,introduced=10.14))) __attribute__((availability(ios,introduced=12.0)));
+        "#;
+
+        let expected_decls = vec![
+            Decl::TypedefDecl(TypedefDecl {
+                name: "MTLIndirectCommandType".to_string(),
+                underlying: ObjCType::Tag(TagRef {
+                    id: TagId::Named("MTLIndirectCommandType".to_string()),
+                    kind: TagKind::Enum,
+                }),
+                origin: None,
+            }),
+            Decl::EnumDef(EnumDef {
+                id: TagId::Named("MTLIndirectCommandType".to_string()),
+                underlying: ObjCType::Num(NumKind::ULong),
+                values: vec![
+                    EnumValue {
+                        name: "MTLIndirectCommandTypeDraw".to_string(),
+                        value: SignedOrNotInt::Unsigned(1),
+                        attrs: vec![Attr::PlatformAvailability(vec![
+                            PlatformAvailability {
+                                platform: "ios".to_string(),
+                                introduced: Some(Version::Minor {
+                                    major: 12,
+                                    minor: 0,
+                                }),
+                                deprecated: None,
+                                obsoleted: None,
+                                unavailable: false,
+                                message: None,
+                            },
+                            PlatformAvailability {
+                                platform: "macos".to_string(),
+                                introduced: Some(Version::Minor {
+                                    major: 10,
+                                    minor: 14,
+                                }),
+                                deprecated: None,
+                                obsoleted: None,
+                                unavailable: false,
+                                message: None,
+                            },
+                        ])],
+                    },
+                    EnumValue {
+                        name: "MTLIndirectCommandTypeDrawIndexed".to_string(),
+                        value: SignedOrNotInt::Unsigned(2),
+                        attrs: vec![Attr::PlatformAvailability(vec![
+                            PlatformAvailability {
+                                platform: "ios".to_string(),
+                                introduced: Some(Version::Minor {
+                                    major: 12,
+                                    minor: 0,
+                                }),
+                                deprecated: None,
+                                obsoleted: None,
+                                unavailable: false,
+                                message: None,
+                            },
+                            PlatformAvailability {
+                                platform: "macos".to_string(),
+                                introduced: Some(Version::Minor {
+                                    major: 10,
+                                    minor: 14,
+                                }),
+                                deprecated: None,
+                                obsoleted: None,
+                                unavailable: false,
+                                message: None,
+                            },
+                        ])],
+                    },
+                    EnumValue {
+                        name: "MTLIndirectCommandTypeDrawPatches".to_string(),
+                        value: SignedOrNotInt::Unsigned(4),
+                        attrs: vec![Attr::PlatformAvailability(vec![PlatformAvailability {
+                            platform: "tvos".to_string(),
+                            introduced: None,
+                            deprecated: None,
+                            obsoleted: None,
+                            unavailable: true,
+                            message: None,
+                        }])],
+                    },
+                    EnumValue {
+                        name: "MTLIndirectCommandTypeDrawIndexedPatches".to_string(),
+                        value: SignedOrNotInt::Unsigned(8),
+                        attrs: vec![Attr::PlatformAvailability(vec![PlatformAvailability {
+                            platform: "tvos".to_string(),
+                            introduced: None,
+                            deprecated: None,
+                            obsoleted: None,
+                            unavailable: true,
+                            message: None,
+                        }])],
+                    },
+                ],
+                attrs: vec![
+                    Attr::FlagEnum,
+                    Attr::EnumExten(EnumExten::Open),
+                    Attr::PlatformAvailability(vec![
+                        PlatformAvailability {
+                            platform: "ios".to_string(),
+                            introduced: Some(Version::Minor {
+                                major: 12,
+                                minor: 0,
+                            }),
+                            deprecated: None,
+                            obsoleted: None,
+                            unavailable: false,
+                            message: None,
+                        },
+                        PlatformAvailability {
+                            platform: "macos".to_string(),
+                            introduced: Some(Version::Minor {
+                                major: 10,
+                                minor: 14,
+                            }),
+                            deprecated: None,
+                            obsoleted: None,
+                            unavailable: false,
+                            message: None,
+                        },
+                    ]),
+                ],
+                origin: None,
+            }),
+        ];
 
         let parsed_decls = ast_from_str(source).unwrap();
         assert_eq!(parsed_decls, expected_decls);
