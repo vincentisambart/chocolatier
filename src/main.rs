@@ -12,9 +12,12 @@ fn main() {
         // @end
         // __attribute__((ns_returns_retained)) id foo(void);
 
-        // #import <AVFoundation/AVFoundation.h>
-        // #import <Cocoa/Cocoa.h>
         #import <Foundation/Foundation.h>
+        #import <Cocoa/Cocoa.h>
+        #import <AVFoundation/AVFoundation.h>
+        #import <AVKit/AVKit.h>
+        #import <Metal/Metal.h>
+        #import <MetalKit/MetalKit.h>
 
         // @interface I
         // @end

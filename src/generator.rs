@@ -847,13 +847,27 @@ fn additional_manual_cleanup(enum_name: &str, mut value_names: Vec<String>) -> V
         }
         "NSNumberFormatterBehavior" | "NSDateFormatterBehavior" => {
             // 10_0 or 10_4 mean Mac OS X 10.0 and 10.4
-            add_prefix_before_starting_digit(&mut value_names, "MAC_OS_");
+            add_prefix_before_starting_digit(&mut value_names, "MAC_OS_V");
         }
         "SMPTETimeType" | "CVSMPTETimeType" => {
             add_prefix_before_starting_digit(&mut value_names, "FPS_");
         }
         "IOSurfaceSubsampling" => {
             add_prefix_before_starting_digit(&mut value_names, "CHROMA_");
+        }
+        "CIDataMatrixCodeECCVersion" | "MTLLanguageVersion" => {
+            add_prefix_before_starting_digit(&mut value_names, "V");
+        }
+        "MTLReadWriteTextureTier" | "MTLArgumentBuffersTier" => {
+            add_prefix_before_starting_digit(&mut value_names, "TIER_");
+        }
+        "MTLTextureType" => {
+            // Has names like "1D", "2D_ARRAY", "CUBE".
+            // I could not find any good idea, so for the time being, just do something similar to what Swift does,
+            // adding a "TYPE_" prefix to all names (including those without digits)
+            for name in value_names.iter_mut() {
+                name.insert_str(0, "TYPE_");
+            }
         }
         _ => {}
     }

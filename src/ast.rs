@@ -791,6 +791,7 @@ pub enum NumKind {
 pub enum Unsupported {
     Vector,
     Unexposed,
+    Complex,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -983,6 +984,7 @@ impl ObjCType {
             TypeKind::Bool => Self::Bool,
             TypeKind::Vector => Self::Unsupported(Unsupported::Vector),
             TypeKind::Unexposed => Self::Unsupported(Unsupported::Unexposed),
+            TypeKind::Complex => Self::Unsupported(Unsupported::Complex),
             unknown_kind => panic!("Unhandled type kind {:?}: {:?}", unknown_kind, clang_type),
         }
     }
