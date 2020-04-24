@@ -59,7 +59,7 @@ impl Origin {
         None
     }
 
-    fn from_cursor(cursor: &clang::Cursor) -> Option<Origin> {
+    fn from_cursor(cursor: &clang::Cursor<'_>) -> Option<Origin> {
         // As preprocess the file in advance using the system compiler, we have to use presumed_location().
         let path = cursor.location()?.presumed_location().file;
         Self::from_path(&path)
@@ -102,7 +102,7 @@ fn sdk_path(sdk: AppleSdk) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-fn show_type(desc: &str, clang_type: &clang::Type, indent_level: usize) {
+fn show_type(desc: &str, clang_type: &clang::Type<'_>, indent_level: usize) {
     let indent = (0..indent_level)
         .map(|_| "   ")
         .collect::<Vec<&str>>()
@@ -205,7 +205,7 @@ fn show_type(desc: &str, clang_type: &clang::Type, indent_level: usize) {
     }
 }
 
-fn show_tree(cursor: &clang::Cursor, indent_level: usize) {
+fn show_tree(cursor: &clang::Cursor<'_>, indent_level: usize) {
     let indent = (0..indent_level)
         .map(|_| "   ")
         .collect::<Vec<&str>>()
@@ -386,7 +386,7 @@ pub enum Attr {
 }
 
 impl Attr {
-    fn from_decl(decl: &clang::Cursor) -> Vec<Self> {
+    fn from_decl(decl: &clang::Cursor<'_>) -> Vec<Self> {
         let mut attrs: Vec<_> = decl
             .children()
             .iter()
@@ -438,6 +438,15 @@ impl Attr {
                             Some(Self::SwiftName(name.into()))
                         }
                         "enum_extensibility" => {
+                            if tokens.len() == 1 {
+                                println!("location: {:?}", tokens[0].location());
+                                let file_location = tokens[0].location().file_location();
+                                let following = child
+                                    .tu()
+                                    .location_for_offset(&file_location.file.unwrap(), 0);
+                                println!("following: {:?}", following);
+                                println!("cursor: {:?}", following.unwrap().cursor());
+                            }
                             // We expect to have 4 tokens here: enum_extensibility ( open/closed )
                             assert!(
                                 tokens.len() == 4,
@@ -544,7 +553,7 @@ struct Field {
 }
 
 impl Field {
-    fn from_cursor(cursor: &clang::Cursor, unnamed_tag_ids: &TagIdMap) -> Self {
+    fn from_cursor(cursor: &clang::Cursor<'_>, unnamed_tag_ids: &TagIdMap) -> Self {
         assert_eq!(cursor.kind(), CursorKind::FieldDecl);
         Field {
             name: cursor.spelling(),
@@ -564,7 +573,7 @@ pub enum TagId {
 }
 
 impl TagId {
-    fn from_cursor(decl: &clang::Cursor, unnamed_tag_ids: &TagIdMap) -> Self {
+    fn from_cursor(decl: &clang::Cursor<'_>, unnamed_tag_ids: &TagIdMap) -> Self {
         assert!([
             CursorKind::StructDecl,
             CursorKind::UnionDecl,
@@ -598,7 +607,7 @@ pub struct TagRef {
 }
 
 impl TagRef {
-    fn from_type(clang_type: &clang::Type, unnamed_tag_ids: &TagIdMap) -> Self {
+    fn from_type(clang_type: &clang::Type<'_>, unnamed_tag_ids: &TagIdMap) -> Self {
         let decl = clang_type.declaration().unwrap();
 
         let kind = match decl.kind() {
@@ -634,7 +643,7 @@ pub struct CallableDesc {
 
 impl CallableDesc {
     fn from_type<'a>(
-        clang_type: &clang::Type,
+        clang_type: &clang::Type<'_>,
         base_parm_decls: &mut impl Iterator<Item = clang::Cursor<'a>>,
         unnamed_tag_ids: &TagIdMap,
     ) -> Self {
@@ -709,7 +718,7 @@ pub struct TypedefRef {
 }
 
 impl TypedefRef {
-    fn from_type(clang_type: &clang::Type) -> Self {
+    fn from_type(clang_type: &clang::Type<'_>) -> Self {
         assert_eq!(clang_type.kind(), TypeKind::Typedef);
         let name = clang_type.spelling();
         TypedefRef { name }
@@ -759,7 +768,7 @@ pub struct EnumValue {
     pub attrs: Vec<Attr>,
 }
 
-fn type_signedness(clang_type: &clang::Type) -> Option<Signedness> {
+fn type_signedness(clang_type: &clang::Type<'_>) -> Option<Signedness> {
     match clang_type.kind() {
         TypeKind::SChar
         | TypeKind::CharS
@@ -843,7 +852,7 @@ pub enum ObjCType {
 
 impl ObjCType {
     fn from_type<'a>(
-        clang_type: &clang::Type,
+        clang_type: &clang::Type<'_>,
         base_parm_decls: &mut impl Iterator<Item = clang::Cursor<'a>>,
         unnamed_tag_ids: &TagIdMap,
     ) -> Self {
@@ -1036,7 +1045,7 @@ struct Location {
 }
 
 impl Location {
-    fn from_cursor(cursor: &clang::Cursor) -> Self {
+    fn from_cursor(cursor: &clang::Cursor<'_>) -> Self {
         let source_location = cursor.location().unwrap();
         // let location = source_location.get_file_location();
         let location = source_location.spelling_location();
@@ -1080,7 +1089,7 @@ pub struct ObjCParam {
 }
 
 impl ObjCParam {
-    fn from_cursor(decl: &clang::Cursor, unnamed_tag_ids: &TagIdMap) -> Self {
+    fn from_cursor(decl: &clang::Cursor<'_>, unnamed_tag_ids: &TagIdMap) -> Self {
         assert_eq!(decl.kind(), CursorKind::ParmDecl);
         let name = decl.spelling().unwrap();
         let objc_type = ObjCType::from_type(
@@ -1113,7 +1122,7 @@ pub struct ObjCMethod {
 }
 
 impl ObjCMethod {
-    fn from_cursor(cursor: &clang::Cursor, unnamed_tag_ids: &TagIdMap) -> Self {
+    fn from_cursor(cursor: &clang::Cursor<'_>, unnamed_tag_ids: &TagIdMap) -> Self {
         let kind = match cursor.kind() {
             CursorKind::ObjCClassMethodDecl => ObjCMethodKind::Class,
             CursorKind::ObjCInstanceMethodDecl => ObjCMethodKind::Instance,
@@ -1144,7 +1153,7 @@ impl ObjCMethod {
     }
 }
 
-fn is_generated_from_property(method_cursor: &clang::Cursor) -> bool {
+fn is_generated_from_property(method_cursor: &clang::Cursor<'_>) -> bool {
     assert!([
         CursorKind::ObjCInstanceMethodDecl,
         CursorKind::ObjCClassMethodDecl,
@@ -1188,7 +1197,7 @@ pub struct Property {
 }
 
 impl Property {
-    fn from_cursor(cursor: &clang::Cursor, unnamed_tag_ids: &TagIdMap) -> Self {
+    fn from_cursor(cursor: &clang::Cursor<'_>, unnamed_tag_ids: &TagIdMap) -> Self {
         assert_eq!(cursor.kind(), CursorKind::ObjCPropertyDecl);
 
         let name = cursor.spelling().unwrap();
@@ -1254,7 +1263,7 @@ impl Property {
         {
             let parent = cursor.semantic_parent().unwrap();
             let property_location = cursor.location().unwrap();
-            let methods_at_same_location: Vec<clang::Cursor> = parent
+            let methods_at_same_location: Vec<clang::Cursor<'_>> = parent
                 .children()
                 .into_iter()
                 .filter(|sibling| {
@@ -1320,7 +1329,7 @@ pub struct InterfaceDef {
 }
 
 impl InterfaceDef {
-    fn from_cursor(cursor: &clang::Cursor, unnamed_tag_ids: &TagIdMap) -> Self {
+    fn from_cursor(cursor: &clang::Cursor<'_>, unnamed_tag_ids: &TagIdMap) -> Self {
         assert_eq!(cursor.kind(), CursorKind::ObjCInterfaceDecl);
         let name = cursor.spelling().unwrap();
         let children = cursor.children();
@@ -1383,7 +1392,7 @@ pub struct CategoryDef {
 }
 
 impl CategoryDef {
-    fn from_cursor(cursor: &clang::Cursor, unnamed_tag_ids: &TagIdMap) -> Self {
+    fn from_cursor(cursor: &clang::Cursor<'_>, unnamed_tag_ids: &TagIdMap) -> Self {
         assert_eq!(cursor.kind(), CursorKind::ObjCCategoryDecl);
         let children = cursor.children();
 
@@ -1458,7 +1467,7 @@ pub struct ProtocolDef {
 }
 
 impl ProtocolDef {
-    fn from_cursor(cursor: &clang::Cursor, unnamed_tag_ids: &TagIdMap) -> Self {
+    fn from_cursor(cursor: &clang::Cursor<'_>, unnamed_tag_ids: &TagIdMap) -> Self {
         assert_eq!(cursor.kind(), CursorKind::ObjCProtocolDecl);
         let children = cursor.children();
 
@@ -1515,7 +1524,7 @@ pub struct TypedefDecl {
 }
 
 impl TypedefDecl {
-    fn from_cursor(decl: &clang::Cursor, unnamed_tag_ids: &TagIdMap) -> Self {
+    fn from_cursor(decl: &clang::Cursor<'_>, unnamed_tag_ids: &TagIdMap) -> Self {
         assert_eq!(decl.kind(), CursorKind::TypedefDecl);
 
         let name = decl.spelling().unwrap();
@@ -1549,7 +1558,7 @@ pub struct RecordDef {
 }
 
 impl RecordDef {
-    fn from_cursor(decl: &clang::Cursor, unnamed_tag_ids: &TagIdMap) -> Self {
+    fn from_cursor(decl: &clang::Cursor<'_>, unnamed_tag_ids: &TagIdMap) -> Self {
         let id = TagId::from_cursor(decl, unnamed_tag_ids);
 
         let kind = match decl.kind() {
@@ -1590,7 +1599,7 @@ pub struct FuncDecl {
 }
 
 impl FuncDecl {
-    fn from_cursor(decl: &clang::Cursor, unnamed_tag_ids: &TagIdMap) -> Self {
+    fn from_cursor(decl: &clang::Cursor<'_>, unnamed_tag_ids: &TagIdMap) -> Self {
         assert_eq!(decl.kind(), CursorKind::FunctionDecl);
         let clang_type = decl.type_().unwrap();
 
@@ -1613,7 +1622,7 @@ pub struct EnumDef {
 }
 
 impl EnumDef {
-    fn from_cursor(decl: &clang::Cursor, unnamed_tag_ids: &TagIdMap) -> Self {
+    fn from_cursor(decl: &clang::Cursor<'_>, unnamed_tag_ids: &TagIdMap) -> Self {
         assert_eq!(decl.kind(), CursorKind::EnumDecl);
 
         let id = TagId::from_cursor(decl, unnamed_tag_ids);

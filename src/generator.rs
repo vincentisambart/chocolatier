@@ -10,11 +10,11 @@ const BASE_OBJC_TRAIT_FULL_PATH: &'static str = "crate::core::ObjCPtr";
 const UNTYPED_OBJC_PTR_FULL_PATH: &'static str = "crate::core::UntypedObjCPtr";
 
 trait OriginExt {
-    fn mod_name(&self) -> Cow<str>;
+    fn mod_name(&self) -> Cow<'_, str>;
 }
 
 impl OriginExt for ast::Origin {
-    fn mod_name(&self) -> Cow<str> {
+    fn mod_name(&self) -> Cow<'_, str> {
         use ast::Origin;
         match self {
             Origin::ObjCCore | Origin::System => CORE_MOD.into(),
@@ -96,11 +96,11 @@ impl TypeIndex {
         }
     }
 
-    fn protoc_mod(&self, protocol: &str) -> Cow<str> {
+    fn protoc_mod(&self, protocol: &str) -> Cow<'_, str> {
         self.protocols[protocol].origin.as_ref().unwrap().mod_name()
     }
 
-    fn interf_mod(&self, protocol: &str) -> Cow<str> {
+    fn interf_mod(&self, protocol: &str) -> Cow<'_, str> {
         self.interfaces[protocol]
             .origin
             .as_ref()
@@ -214,6 +214,7 @@ impl OutputHandler {
 
         use std::io::Write;
         writeln!(&main_file, "#![allow(dead_code)]").unwrap();
+        writeln!(&main_file, "#![warn(rust_2018_idioms)]").unwrap();
 
         OutputHandler {
             src_dir,
@@ -277,7 +278,7 @@ impl Generator {
         }
     }
 
-    fn protoc_rel_path(&self, name: &str, current_mod: &str) -> Cow<str> {
+    fn protoc_rel_path(&self, name: &str, current_mod: &str) -> Cow<'_, str> {
         let mod_name = self.index.protoc_mod(&name);
         let trait_name = protocol_trait_name(name);
         if current_mod == mod_name {
@@ -311,7 +312,7 @@ impl Generator {
         Some(code)
     }
 
-    fn interf_rel_path(&self, name: &str, current_mod: &str) -> Cow<str> {
+    fn interf_rel_path(&self, name: &str, current_mod: &str) -> Cow<'_, str> {
         let mod_name = self.index.interf_mod(&name);
         let trait_name = interface_trait_name(name);
         if current_mod == mod_name {

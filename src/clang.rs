@@ -50,7 +50,7 @@ impl Index {
         file_path: &std::path::Path,
         unsaved: &[UnsavedFile],
         options: TuOptions,
-    ) -> Result<TranslationUnit, ClangError> {
+    ) -> Result<TranslationUnit<'_>, ClangError> {
         let c_file_path =
             CString::new(file_path.as_os_str().to_str().expect("invalid C string")).unwrap();
 
@@ -134,24 +134,24 @@ impl<'idx> TranslationUnit<'idx> {
         }
     }
 
-    pub fn cursor(&self) -> Cursor {
+    pub fn cursor(&self) -> Cursor<'_> {
         let raw = unsafe { clang_sys::clang_getTranslationUnitCursor(self.ptr) };
         Cursor::from_raw(raw, self).expect("invalid cursor")
     }
 
-    pub fn diagnostics(&self) -> impl ExactSizeIterator<Item = Diagnostic> {
+    pub fn diagnostics(&self) -> impl ExactSizeIterator<Item = Diagnostic<'_>> {
         let num = unsafe { clang_sys::clang_getNumDiagnostics(self.ptr) };
         PropertyIter::new(self, num, clang_sys::clang_getDiagnostic)
     }
 
-    pub fn location(&self, file: &File, line: u32, column: u32) -> Option<SourceLocation> {
+    pub fn location(&self, file: &File<'_>, line: u32, column: u32) -> Option<SourceLocation<'_>> {
         SourceLocation::from_raw(
             unsafe { clang_sys::clang_getLocation(self.ptr, file.ptr, line, column) },
             self,
         )
     }
 
-    pub fn location_for_offset(&self, file: &File, offset: u32) -> Option<SourceLocation> {
+    pub fn location_for_offset(&self, file: &File<'_>, offset: u32) -> Option<SourceLocation<'_>> {
         SourceLocation::from_raw(
             unsafe { clang_sys::clang_getLocationForOffset(self.ptr, file.ptr, offset) },
             self,
@@ -268,7 +268,7 @@ impl<'a> Cursor<'a> {
         }))
     }
 
-    pub fn arguments(&self) -> Option<impl ExactSizeIterator<Item = Cursor>> {
+    pub fn arguments(&self) -> Option<impl ExactSizeIterator<Item = Cursor<'_>>> {
         let num = unsafe { clang_sys::clang_Cursor_getNumArguments(self.raw) };
         if num < 0 {
             None
@@ -526,7 +526,7 @@ impl<'a> PartialEq for Cursor<'a> {
 }
 
 impl<'a> std::fmt::Debug for Cursor<'a> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("Cursor")
             .field("kind", &self.kind())
@@ -684,7 +684,7 @@ impl<'a> Type<'a> {
         self.raw.kind.into()
     }
 
-    pub fn pointee_type(&self) -> Option<Type> {
+    pub fn pointee_type(&self) -> Option<Type<'_>> {
         Type::from_raw(
             unsafe { clang_sys::clang_getPointeeType(self.raw) },
             self.tu,
@@ -738,7 +738,7 @@ impl<'a> Type<'a> {
         )
     }
 
-    pub fn argument_types(&self) -> Option<impl ExactSizeIterator<Item = Type>> {
+    pub fn argument_types(&self) -> Option<impl ExactSizeIterator<Item = Type<'_>>> {
         let num = unsafe { clang_sys::clang_getNumArgTypes(self.raw) };
         if num < 0 {
             None
@@ -751,7 +751,7 @@ impl<'a> Type<'a> {
         }
     }
 
-    pub fn template_arguments(&self) -> Option<impl ExactSizeIterator<Item = Type>> {
+    pub fn template_arguments(&self) -> Option<impl ExactSizeIterator<Item = Type<'_>>> {
         let num = unsafe { clang_sys::clang_Type_getNumTemplateArguments(self.raw) };
         if num < 0 {
             None
@@ -764,12 +764,12 @@ impl<'a> Type<'a> {
         }
     }
 
-    pub fn objc_type_arg_types(&self) -> impl ExactSizeIterator<Item = Type> {
+    pub fn objc_type_arg_types(&self) -> impl ExactSizeIterator<Item = Type<'_>> {
         let num = unsafe { clang_sys::clang_Type_getNumObjCTypeArgs(self.raw) };
         PropertyIter::new(self, num, clang_sys::clang_Type_getObjCTypeArg)
     }
 
-    pub fn objc_protocol_decls(&self) -> impl ExactSizeIterator<Item = Cursor> {
+    pub fn objc_protocol_decls(&self) -> impl ExactSizeIterator<Item = Cursor<'_>> {
         let num = unsafe { clang_sys::clang_Type_getNumObjCProtocolRefs(self.raw) };
         PropertyIter::new(self, num, clang_sys::clang_Type_getObjCProtocolDecl)
     }
@@ -869,7 +869,7 @@ impl<'a> PartialEq for Type<'a> {
 }
 
 impl<'a> std::fmt::Debug for Type<'a> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("Type")
             .field("kind", &self.kind())
@@ -1752,7 +1752,7 @@ impl<'a> SourceLocation<'a> {
         PresumedLocation { file, line, column }
     }
 
-    pub fn spelling_location(&self) -> Location {
+    pub fn spelling_location(&self) -> Location<'_> {
         let mut file: clang_sys::CXFile = std::ptr::null_mut();
         let mut line: u32 = 0;
         let mut column: u32 = 0;
@@ -1788,7 +1788,7 @@ impl<'a> PartialEq for SourceLocation<'a> {
 }
 
 impl<'a> std::fmt::Debug for SourceLocation<'a> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let location = self.spelling_location();
         formatter
             .debug_struct("SourceLocation")
@@ -1826,7 +1826,7 @@ impl<'a> SourceRange<'a> {
             .expect("unexpected null location")
     }
 
-    pub fn tokenize(&self) -> Vec<Token> {
+    pub fn tokenize(&self) -> Vec<Token<'_>> {
         unsafe {
             let mut raw_tokens_ptr: *mut clang_sys::CXToken = std::ptr::null_mut();
             let mut len: u32 = 0;
@@ -1849,7 +1849,7 @@ impl<'a> std::cmp::PartialEq for SourceRange<'a> {
 }
 
 impl<'a> std::fmt::Debug for SourceRange<'a> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("SourceRange")
             .field("start", &self.start())
@@ -1905,7 +1905,7 @@ impl<'a> std::cmp::PartialEq for File<'a> {
 }
 
 impl<'a> std::fmt::Debug for File<'a> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("File")
             .field("file_name", &self.file_name())
@@ -1932,7 +1932,7 @@ impl<'a> Token<'a> {
             .expect("invalid string")
     }
 
-    pub fn location(&self) -> SourceLocation {
+    pub fn location(&self) -> SourceLocation<'_> {
         SourceLocation::from_raw(
             unsafe { clang_sys::clang_getTokenLocation(self.tu.ptr, self.raw) },
             self.tu,
@@ -1940,7 +1940,7 @@ impl<'a> Token<'a> {
         .expect("invalid location")
     }
 
-    pub fn extent(&self) -> SourceRange {
+    pub fn extent(&self) -> SourceRange<'_> {
         SourceRange::from_raw(
             unsafe { clang_sys::clang_getTokenExtent(self.tu.ptr, self.raw) },
             self.tu,
@@ -1950,7 +1950,7 @@ impl<'a> Token<'a> {
 }
 
 impl<'a> std::fmt::Debug for Token<'a> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("Token")
             .field("kind", &self.kind())

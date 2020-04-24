@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 #![allow(clippy::cognitive_complexity)]
+#![warn(rust_2018_idioms)]
 
 mod ast;
 mod clang;
@@ -12,12 +13,20 @@ fn main() {
         // @end
         // __attribute__((ns_returns_retained)) id foo(void);
 
-        #import <Foundation/Foundation.h>
-        #import <Cocoa/Cocoa.h>
-        #import <AVFoundation/AVFoundation.h>
-        #import <AVKit/AVKit.h>
-        #import <Metal/Metal.h>
-        #import <MetalKit/MetalKit.h>
+        // #import <Foundation/Foundation.h>
+        // #import <Cocoa/Cocoa.h>
+        // #import <AVFoundation/AVFoundation.h>
+        // #import <AVKit/AVKit.h>
+        // #import <Metal/Metal.h>
+        // #import <MetalKit/MetalKit.h>
+
+            typedef enum __attribute__((flag_enum,enum_extensibility(open))) MTLIndirectCommandType : unsigned long MTLIndirectCommandType;
+            enum MTLIndirectCommandType: unsigned long {
+                MTLIndirectCommandTypeDraw = (1 << 0),
+                MTLIndirectCommandTypeDrawIndexed = (1 << 1),
+                MTLIndirectCommandTypeDrawPatches __attribute__((availability(tvos,unavailable))) = (1 << 2),
+                MTLIndirectCommandTypeDrawIndexedPatches __attribute__((availability(tvos,unavailable))) = (1 << 3),
+            } __attribute__((availability(macos,introduced=10.14))) __attribute__((availability(ios,introduced=12.0)));
 
         // @interface I
         // @end
@@ -40,10 +49,10 @@ fn main() {
         // struct ll { struct ll *nextl; };
         // struct { float f; union { int i; double d; }; } a;
   "#;
-    let decls = ast::ast_from_str(source).unwrap();
-    // ast::print_full_clang_ast(source);
+    // let decls = ast::ast_from_str(source).unwrap();
+    ast::print_full_clang_ast(source);
     // println!("{:#?}", decls);
     // println!("{:#?}", index);
-    let mut generator = generator::Generator::new(decls);
-    generator.generate();
+    // let mut generator = generator::Generator::new(decls);
+    // generator.generate();
 }
