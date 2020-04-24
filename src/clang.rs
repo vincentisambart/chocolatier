@@ -1,8 +1,6 @@
 // Heavily based on the clang crate, with naming closer to the original libclang.
 
 use bitflags::bitflags;
-use clang_sys;
-use once_cell;
 use std::convert::TryInto;
 use std::ffi::{CStr, CString};
 use std::marker::PhantomData;
@@ -360,7 +358,7 @@ impl<'a> Cursor<'a> {
 
         let availabilities = raw_availabilities
             .into_iter()
-            .map(|raw| PlatformAvailability::from_raw(raw))
+            .map(PlatformAvailability::from_raw)
             .collect();
         Some(availabilities)
     }

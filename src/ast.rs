@@ -1210,7 +1210,7 @@ impl Property {
         use clang::ObjCAttributes;
         let attributes = cursor
             .objc_attributes()
-            .unwrap_or_else(|| ObjCAttributes::empty());
+            .unwrap_or_else(ObjCAttributes::empty);
         let is_atomic = {
             if attributes.contains(ObjCAttributes::ATOMIC) {
                 assert!(!attributes.contains(ObjCAttributes::NONATOMIC));

@@ -3,11 +3,11 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::Write;
 
-const BASE_OBJC_TRAIT: &'static str = "ObjCPtr";
-const UNTYPED_OBJC_PTR: &'static str = "UntypedObjCPtr";
-const CORE_MOD: &'static str = "core";
-const BASE_OBJC_TRAIT_FULL_PATH: &'static str = "crate::core::ObjCPtr";
-const UNTYPED_OBJC_PTR_FULL_PATH: &'static str = "crate::core::UntypedObjCPtr";
+const BASE_OBJC_TRAIT: &str = "ObjCPtr";
+const UNTYPED_OBJC_PTR: &str = "UntypedObjCPtr";
+const CORE_MOD: &str = "core";
+const BASE_OBJC_TRAIT_FULL_PATH: &str = "crate::core::ObjCPtr";
+const UNTYPED_OBJC_PTR_FULL_PATH: &str = "crate::core::UntypedObjCPtr";
 
 trait OriginExt {
     fn mod_name(&self) -> Cow<'_, str>;
@@ -205,7 +205,7 @@ impl OutputHandler {
         use std::fs::{DirBuilder, File};
 
         let generated_dir = std::path::Path::new("generated");
-        let src_dir = generated_dir.join("src").to_path_buf();
+        let src_dir = generated_dir.join("src");
         let files = HashMap::new();
 
         DirBuilder::new().recursive(true).create(&src_dir).unwrap();
@@ -544,13 +544,9 @@ impl std::fmt::Debug for {struct_name} {{
                     false
                 }
 
-                let first_non_deprecated = values
-                    .iter()
-                    .filter(|v| {
-                        !v.attrs.contains(&ast::Attr::Deprecated)
-                            && !has_some_platform_deprecation(v)
-                    })
-                    .next();
+                let first_non_deprecated = values.iter().find(|v| {
+                    !v.attrs.contains(&ast::Attr::Deprecated) && !has_some_platform_deprecation(v)
+                });
 
                 if let Some(non_deprecated) = first_non_deprecated {
                     values_to_use.push(*non_deprecated);
@@ -858,7 +854,7 @@ fn additional_manual_cleanup(enum_name: &str, mut value_names: Vec<String>) -> V
                 .iter_mut()
                 .filter(|name| starts_with_digit(name))
             {
-                let mut parts: Vec<_> = name.splitn(2, "_").collect();
+                let mut parts: Vec<_> = name.splitn(2, '_').collect();
                 assert!(parts.len() == 2);
                 parts.swap(0, 1);
                 *name = parts.join("_");
