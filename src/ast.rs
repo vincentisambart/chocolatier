@@ -236,11 +236,11 @@ fn show_tree(cursor: &clang::Cursor<'_>, indent_level: usize) {
         println!("{}location: {:?}", indent, location);
     }
 
-    if let Some(range) = cursor.extent() {
-        println!("{}range: {:?}", indent, range);
+    if let Some(extent) = cursor.extent() {
+        println!("{}extent: {:?}", indent, extent);
 
         if cursor.kind() == CursorKind::UnexposedAttr {
-            println!("{}tokens: {:?}", indent, range.tokenize());
+            println!("{}tokens: {:?}", indent, extent.tokenize());
         }
     }
 
@@ -385,6 +385,15 @@ pub enum Attr {
     EnumExten(EnumExten),
 }
 
+// Gets the next token, expecting there is one.
+// Ugly but it seems to work.
+fn next_token<'a>(token: clang::Token<'a>) -> clang::Token<'a> {
+    let extent = token.extent();
+    let end = extent.end();
+    let range = end.range_to(end);
+    range.tokenize().into_iter().next().unwrap()
+}
+
 impl Attr {
     fn from_decl(decl: &clang::Cursor<'_>) -> Vec<Self> {
         let mut attrs: Vec<_> = decl
@@ -438,22 +447,23 @@ impl Attr {
                             Some(Self::SwiftName(name.into()))
                         }
                         "enum_extensibility" => {
-                            if tokens.len() == 1 {
-                                println!("location: {:?}", tokens[0].location());
-                                let file_location = tokens[0].location().file_location();
-                                let following = child
-                                    .tu()
-                                    .location_for_offset(&file_location.file.unwrap(), 0);
-                                println!("following: {:?}", following);
-                                println!("cursor: {:?}", following.unwrap().cursor());
-                            }
                             // We expect to have 4 tokens here: enum_extensibility ( open/closed )
-                            assert!(
-                                tokens.len() == 4,
-                                "unexpected tokens for \"enum_extensibility\": {:?}",
-                                tokens
-                            );
-                            let kind_token = &tokens[2];
+                            let kind_token = {
+                                if tokens.len() == 1 {
+                                    // When the attribute was put on a typedef, the attribute is also present at the definition,
+                                    // but for some reason, at the definition, its extent only covers the first token.
+                                    // So try to directly get the 2 tokens after the one we just got.
+                                    let second_token = next_token(tokens[0]);
+                                    next_token(second_token)
+                                } else {
+                                    assert!(
+                                        tokens.len() == 4,
+                                        "unexpected tokens for \"enum_extensibility\": {:?}",
+                                        tokens
+                                    );
+                                    tokens[2]
+                                }
+                            };
                             assert!(
                                 kind_token.kind() == clang::TokenKind::Identifier,
                                 "unexpected tokens for \"enum_extensibility\": {:?}",
@@ -832,6 +842,7 @@ pub enum Unsupported {
     Vector,
     Unexposed,
     Complex,
+    ExtVector,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1025,6 +1036,7 @@ impl ObjCType {
             TypeKind::Vector => Self::Unsupported(Unsupported::Vector),
             TypeKind::Unexposed => Self::Unsupported(Unsupported::Unexposed),
             TypeKind::Complex => Self::Unsupported(Unsupported::Complex),
+            TypeKind::ExtVector => Self::Unsupported(Unsupported::ExtVector),
             unknown_kind => panic!("Unhandled type kind {:?}: {:?}", unknown_kind, clang_type),
         }
     }
