@@ -1,6 +1,6 @@
 use crate::ast;
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
 const BASE_OBJC_TRAIT: &str = "ObjCPtr";
@@ -457,6 +457,8 @@ impl {base_objc_trait} for {struct_name} {{
             return None;
         }
 
+        let is_flag_enum = def.attrs.contains(&ast::Attr::FlagEnum);
+
         let value_names =
             cleanup_enum_value_names(enum_name, def.values.iter().map(|value| &value.name));
 
@@ -490,9 +492,17 @@ impl {struct_name} {{
             cleaned_up_names.insert(&value.name, &cleaned_up_name);
         }
 
+        let mut used_names = HashSet::new();
         for value in def.values.iter() {
             let original_value_name: &str = value.name.as_ref();
             let cleaned_up_name = cleaned_up_names.get(original_value_name).unwrap();
+
+            // After cleaning up, everything became upper case, so we can have duplicates.
+            // Just keep the first.
+            if !used_names.insert(cleaned_up_name) {
+                continue;
+            }
+
             writeln!(
                 &mut code,
                 "    /// {original_value_name}",
@@ -515,16 +525,11 @@ impl {struct_name} {{
             &mut code,
             "\
 }}
-impl std::fmt::Debug for {struct_name} {{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{
-        #[allow(deprecated)]
-        match *self {{
-",
-            struct_name = enum_name,
+"
         )
         .unwrap();
 
-        let mut values_to_use = Vec::new();
+        let mut values_for_fmt = Vec::new();
         for num_value in values_per_num_val.keys() {
             let values = values_per_num_val.get(&num_value).unwrap();
 
@@ -549,42 +554,222 @@ impl std::fmt::Debug for {struct_name} {{
                 });
 
                 if let Some(non_deprecated) = first_non_deprecated {
-                    values_to_use.push(*non_deprecated);
+                    values_for_fmt.push(*non_deprecated);
                 } else {
                     // No value non deprecated so put the first we have.
-                    values_to_use.push(values[0]);
+                    values_for_fmt.push(values[0]);
                 }
             } else {
-                values_to_use.push(values[0]);
+                values_for_fmt.push(values[0]);
             }
         }
 
-        // Iterating once again to keep the order they were originally defined in.
-        for value in def.values.iter() {
-            if !values_to_use.contains(&&value) {
-                continue;
-            }
-            let original_value_name: &str = value.name.as_ref();
-            let cleaned_up_name = cleaned_up_names.get(original_value_name).unwrap();
-
-            writeln!(
+        if is_flag_enum {
+            write!(
                 &mut code,
-                "            Self::{cleaned_up_name} => f.write_str({cleaned_up_name:?}),",
-                cleaned_up_name = cleaned_up_name,
+                "\
+impl {struct_name} {{
+    fn is_empty(&self) -> bool {{
+        self.0 == 0
+    }}
+}}
+impl std::ops::BitOr for {struct_name} {{
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {{
+        Self(self.0 | rhs.0)
+    }}
+}}
+impl std::ops::BitOrAssign for {struct_name} {{
+    fn bitor_assign(&mut self, rhs: Self) {{
+        *self = Self(self.0 | rhs.0)
+    }}
+}}
+impl std::ops::BitAnd for {struct_name} {{
+    type Output = Self;
+
+    fn bitand(self, rhs: Self) -> Self::Output {{
+        Self(self.0 & rhs.0)
+    }}
+}}
+impl std::ops::BitAndAssign for {struct_name} {{
+    fn bitand_assign(&mut self, rhs: Self) {{
+        *self = Self(self.0 & rhs.0)
+    }}
+}}
+impl std::ops::Not for {struct_name} {{
+    type Output = Self;
+
+    fn not(self) -> Self::Output {{
+        Self(!self.0)
+    }}
+}}
+#[allow(deprecated)]
+impl std::fmt::Debug for {struct_name} {{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{
+",
+                struct_name = enum_name,
             )
             .unwrap();
-        }
 
-        write!(
-            &mut code,
-            "            _ => write!(f, \"{struct_name}({{}})\", self.0),
+            let empty_name =
+                if let Some(zero_val) = values_for_fmt.iter().find(|val| val.value.is_zero()) {
+                    cleaned_up_names.get(&zero_val.name.as_ref()).unwrap()
+                } else {
+                    "(empty)"
+                };
+            write!(
+                &mut code,
+                "        if self.is_empty() {{
+            return f.write_str({empty_name:?});
+        }}
+",
+                empty_name = empty_name
+            )
+            .unwrap();
+
+            // Remove values that include other values (for example DEFAULT that is the same as OPTION1 | OPTION2) and the empty value.
+            let values_for_fmt: Vec<_> = values_for_fmt
+                .iter()
+                .filter(|outer_val| {
+                    !outer_val.value.is_zero()
+                        && !values_for_fmt.iter().any(|inner_val| {
+                            if inner_val.value == outer_val.value || inner_val.value.is_zero() {
+                                return false;
+                            }
+                            match (inner_val.value, outer_val.value) {
+                                (
+                                    ast::SignedOrNotInt::Signed(inner_num),
+                                    ast::SignedOrNotInt::Signed(outer_num),
+                                ) => ((inner_num & outer_num) == inner_num),
+                                (
+                                    ast::SignedOrNotInt::Unsigned(inner_num),
+                                    ast::SignedOrNotInt::Unsigned(outer_num),
+                                ) => ((inner_num & outer_num) == inner_num),
+                                _ => panic!("both sides should have the same type"),
+                            }
+                        })
+                })
+                .collect();
+
+            if values_for_fmt.is_empty() {
+                writeln!(
+                    &mut code,
+                    "        write!(f, \"{struct_name}({{}})\", self.0)?;",
+                    struct_name = enum_name,
+                )
+                .unwrap()
+            } else {
+                writeln!(
+                    &mut code,
+                    "        let mut left = *self;
+        let mut is_first = true;"
+                )
+                .unwrap();
+
+                let mut is_first = true;
+                // Iterating from def.values and not from values_for_fmt to keep the order they were originally defined in.
+                for value in def.values.iter() {
+                    if !values_for_fmt.contains(&&value) {
+                        continue;
+                    }
+
+                    let original_value_name: &str = value.name.as_ref();
+                    let cleaned_up_name = cleaned_up_names.get(original_value_name).unwrap();
+
+                    if is_first {
+                        write!(
+                            &mut code,
+                            "        if !(left & Self::{cleaned_up_name}).is_empty() {{
+            f.write_str({cleaned_up_name:?})?;
+            left &= !Self::{cleaned_up_name};
+            is_first = false;
+        }}
+",
+                            cleaned_up_name = cleaned_up_name
+                        )
+                        .unwrap();
+                        is_first = false;
+                    } else {
+                        write!(
+                            &mut code,
+                            "        if !(left & Self::{cleaned_up_name}).is_empty() {{
+            if !is_first {{
+                f.write_str(\" | \")?;
+            }}
+            f.write_str({cleaned_up_name:?})?;
+            left &= !Self::{cleaned_up_name};
+            is_first = false;
+        }}
+",
+                            cleaned_up_name = cleaned_up_name
+                        )
+                        .unwrap();
+                    }
+                }
+
+                write!(
+                    &mut code,
+                    "        if !left.is_empty() {{
+            if !is_first {{
+                f.write_str(\" | \")?;
+            }}
+            write!(f, \"{struct_name}({{}})\", left.0)?;
+        }}
+",
+                    struct_name = enum_name,
+                )
+                .unwrap()
+            }
+
+            write!(
+                &mut code,
+                "        Ok(())
+    }}
+}}
+"
+            )
+            .unwrap();
+        } else {
+            write!(
+                &mut code,
+                "\
+#[allow(deprecated)]
+impl std::fmt::Debug for {struct_name} {{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{
+        match *self {{
+",
+                struct_name = enum_name,
+            )
+            .unwrap();
+
+            // Iterating from def.values and not from values_for_fmt to keep the order they were originally defined in.
+            for value in def.values.iter() {
+                if !values_for_fmt.contains(&&value) {
+                    continue;
+                }
+                let original_value_name: &str = value.name.as_ref();
+                let cleaned_up_name = cleaned_up_names.get(original_value_name).unwrap();
+
+                writeln!(
+                    &mut code,
+                    "            Self::{cleaned_up_name} => f.write_str({cleaned_up_name:?}),",
+                    cleaned_up_name = cleaned_up_name,
+                )
+                .unwrap();
+            }
+
+            write!(
+                &mut code,
+                "            _ => write!(f, \"{struct_name}({{}})\", self.0),
         }}
     }}
 }}
 ",
-            struct_name = enum_name,
-        )
-        .unwrap();
+                struct_name = enum_name,
+            )
+            .unwrap();
+        }
 
         Some(code)
     }
@@ -862,7 +1047,7 @@ fn additional_manual_cleanup(enum_name: &str, mut value_names: Vec<String>) -> V
         }
         "NSNumberFormatterBehavior" | "NSDateFormatterBehavior" => {
             // 10_0 or 10_4 mean Mac OS X 10.0 and 10.4
-            add_prefix_before_starting_digit(&mut value_names, "MAC_OS_V");
+            add_prefix_before_starting_digit(&mut value_names, "OSX_V");
         }
         "SMPTETimeType" | "CVSMPTETimeType" => {
             add_prefix_before_starting_digit(&mut value_names, "FPS_");
@@ -878,10 +1063,10 @@ fn additional_manual_cleanup(enum_name: &str, mut value_names: Vec<String>) -> V
         }
         "MTLTextureType" => {
             // Has names like "1D", "2D_ARRAY", "CUBE".
-            // I could not find any good idea, so for the time being, just do something similar to what Swift does,
-            // adding a "TYPE_" prefix to all names (including those without digits)
+            // I could not find any good idea, so for the time being,
+            // add a "TEXTURE_" prefix to all names (including those without digits)
             for name in value_names.iter_mut() {
-                name.insert_str(0, "TYPE_");
+                name.insert_str(0, "TEXTURE_");
             }
         }
         _ => {}

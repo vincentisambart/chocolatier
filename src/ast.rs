@@ -762,6 +762,15 @@ pub enum SignedOrNotInt {
     Unsigned(u64),
 }
 
+impl SignedOrNotInt {
+    pub fn is_zero(&self) -> bool {
+        match self {
+            SignedOrNotInt::Signed(i) => *i == 0,
+            SignedOrNotInt::Unsigned(u) => *u == 0,
+        }
+    }
+}
+
 impl std::fmt::Display for SignedOrNotInt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
