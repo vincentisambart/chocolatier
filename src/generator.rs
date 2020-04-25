@@ -940,9 +940,29 @@ fn snake_case_split(text: &str) -> Vec<String> {
         .collect()
 }
 
-fn loosely_equal(text1: &str, text2: &str) -> bool {
-    text1.trim_end_matches('s') == text2.trim_end_matches('s')
+fn strip_prefix<'a>(text: &'a str, prefix: &str) -> &'a str {
+    if text.starts_with(prefix) {
+        &text[prefix.len()..]
+    } else {
+        text
+    }
 }
+
+fn strip_suffix<'a>(text: &'a str, suffix: &str) -> &'a str {
+    if text.ends_with(suffix) {
+        let end_pos = text.len() - suffix.len();
+        &text[..end_pos]
+    } else {
+        text
+    }
+}
+
+fn loosely_equal(text1: &str, text2: &str) -> bool {
+    strip_suffix(text1, "s") == strip_suffix(text2, "s")
+}
+
+// The prefixes list does not need to be exhaustive as in most cases cleanup_enum_value_names will do its job without it.
+static ENUM_COMMON_PREFIXES: [&str; 2] = ["NS", "AU"];
 
 fn cleanup_enum_value_names<S: AsRef<str>, Iter: Iterator<Item = S>>(
     enum_name: &str,
@@ -950,12 +970,16 @@ fn cleanup_enum_value_names<S: AsRef<str>, Iter: Iterator<Item = S>>(
 ) -> Vec<String> {
     let value_names_split = value_names
         .map(|name| {
-            let mut split_name = snake_case_split(name.as_ref());
-            // Ignore "k" at the start of a value name.
-            if split_name[0] == "k" {
-                split_name.remove(0);
+            let name = name.as_ref();
+            let mut name = strip_prefix(name, "k");
+            // removing the prefix is mainly useful when we do not know how to split properly, for example "NSUUIDAttributeType".
+            for prefix in &ENUM_COMMON_PREFIXES {
+                if name.starts_with(prefix) {
+                    name = &name[prefix.len()..];
+                    break;
+                }
             }
-            split_name
+            snake_case_split(name)
         })
         .collect::<Vec<_>>();
 
@@ -963,26 +987,15 @@ fn cleanup_enum_value_names<S: AsRef<str>, Iter: Iterator<Item = S>>(
         return Vec::new();
     }
 
-    // For "AU3DMixerRenderingFlags", ignore the first "AU" (value names starting with "k3DMixerRenderingFlags_")
-    let mut enum_name_split = snake_case_split(enum_name);
-    let enum_name_start = enum_name_split.first().unwrap();
-    for prefix in &["AU"] {
-        if !enum_name_start.starts_with(prefix) {
-            continue;
-        }
-        if enum_name_start.len() == prefix.len() {
-            if &value_names_split[0][0] != enum_name_start {
-                enum_name_split.remove(0);
-                break;
-            }
-        } else {
-            if value_names_split[0][0] == enum_name_start[prefix.len()..] {
-                enum_name_split[0].drain(0..prefix.len());
-                break;
-            }
+    let mut cleaned_enum_name = enum_name;
+    for prefix in &ENUM_COMMON_PREFIXES {
+        if cleaned_enum_name.starts_with(prefix) {
+            cleaned_enum_name = &enum_name[prefix.len()..];
+            break;
         }
     }
-    let enum_name_split = enum_name_split;
+
+    let enum_name_split = snake_case_split(cleaned_enum_name);
 
     let matching_head_len = value_names_split
         .iter()
@@ -1412,6 +1425,47 @@ mod tests {
                 ["NSTextScalingStandard", "NSTextScalingiOS"].iter()
             ),
             ["STANDARD", "IOS"],
+        );
+
+        assert_eq!(
+            cleanup_enum_value_names(
+                "NSAttributeType",
+                [
+                    "NSUndefinedAttributeType",
+                    "NSInteger16AttributeType",
+                    "NSInteger32AttributeType",
+                    "NSInteger64AttributeType",
+                    "NSDecimalAttributeType",
+                    "NSDoubleAttributeType",
+                    "NSFloatAttributeType",
+                    "NSStringAttributeType",
+                    "NSBooleanAttributeType",
+                    "NSDateAttributeType",
+                    "NSBinaryDataAttributeType",
+                    "NSUUIDAttributeType",
+                    "NSURIAttributeType",
+                    "NSTransformableAttributeType",
+                    "NSObjectIDAttributeType",
+                ]
+                .iter()
+            ),
+            [
+                "UNDEFINED",
+                "INTEGER_16",
+                "INTEGER_32",
+                "INTEGER_64",
+                "DECIMAL",
+                "DOUBLE",
+                "FLOAT",
+                "STRING",
+                "BOOLEAN",
+                "DATE",
+                "BINARY_DATA",
+                "UUID",
+                "URI",
+                "TRANSFORMABLE",
+                "OBJECT_ID",
+            ],
         );
     }
 
