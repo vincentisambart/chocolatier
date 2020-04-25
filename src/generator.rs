@@ -1,6 +1,6 @@
 use crate::ast;
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt::Write;
 
 const BASE_OBJC_TRAIT: &str = "ObjCPtr";
@@ -214,6 +214,11 @@ impl OutputHandler {
 
         use std::io::Write;
         writeln!(&main_file, "#![allow(dead_code)]").unwrap();
+        writeln!(
+            &main_file,
+            "#![allow(clippy::useless_let_if_seq,clippy::cognitive_complexity)]"
+        )
+        .unwrap();
         writeln!(&main_file, "#![warn(rust_2018_idioms)]").unwrap();
 
         OutputHandler {
@@ -265,6 +270,24 @@ fn protocol_trait_name(protocol_name: &str) -> String {
 
 fn interface_trait_name(class_name: &str) -> String {
     format!("{}Interface", class_name)
+}
+
+fn stable_group_by<T, K: std::hash::Hash + Eq, F: Fn(&T) -> K>(vec: &Vec<T>, f: F) -> Vec<Vec<&T>> {
+    let mut indices: HashMap<K, usize> = HashMap::new();
+    let mut groups: Vec<Vec<&T>> = Vec::new();
+
+    for item in vec {
+        let key = f(item);
+        if let Some(i) = indices.get(&key) {
+            groups[*i].push(item);
+        } else {
+            let i = groups.len();
+            groups.push(vec![item]);
+            indices.insert(key, i);
+        }
+    }
+
+    groups
 }
 
 impl Generator {
@@ -387,7 +410,7 @@ impl {base_objc_trait} for {struct_name} {{
         let mut unprocessed_adopted_protocols: Vec<&str> = Vec::new();
         Extend::<&str>::extend(
             &mut unprocessed_adopted_protocols,
-            def.adopted_protocols.iter().map(|name| name.as_ref()),
+            def.adopted_protocols.iter().map(|name| name.as_str()),
         );
 
         {
@@ -408,7 +431,7 @@ impl {base_objc_trait} for {struct_name} {{
                     current_def
                         .adopted_protocols
                         .iter()
-                        .map(|name| name.as_ref()),
+                        .map(|name| name.as_str()),
                 );
             }
         }
@@ -425,7 +448,7 @@ impl {base_objc_trait} for {struct_name} {{
                 protocol_def
                     .inherited_protocols
                     .iter()
-                    .map(|name| name.as_ref()),
+                    .map(|name| name.as_str()),
             );
         }
         for protoc in adopted_protocols {
@@ -459,8 +482,26 @@ impl {base_objc_trait} for {struct_name} {{
 
         let is_flag_enum = def.attrs.contains(&ast::Attr::FlagEnum);
 
-        let value_names =
-            cleanup_enum_value_names(enum_name, def.values.iter().map(|value| &value.name));
+        // Clean-up deprecated and non deprecated names separately, as they can use different naming schemes.
+        let mut cleaned_up_names: HashMap<&str, &str> = HashMap::new();
+        let (deprecated_values, non_deprecated_values): (Vec<_>, Vec<_>) = def
+            .values
+            .iter()
+            .partition(|v| v.attrs.contains(&ast::Attr::Deprecated));
+        let deprecated_names =
+            cleanup_enum_value_names(enum_name, deprecated_values.iter().map(|v| &v.name));
+        for (name, value) in deprecated_names.iter().zip(deprecated_values.iter()) {
+            cleaned_up_names.insert(&value.name, name);
+        }
+        let non_deprecated_names =
+            cleanup_enum_value_names(enum_name, non_deprecated_values.iter().map(|v| &v.name));
+        for (name, value) in non_deprecated_names
+            .iter()
+            .zip(non_deprecated_values.iter())
+        {
+            cleaned_up_names.insert(&value.name, name);
+        }
+        let cleaned_up_names = cleaned_up_names;
 
         let underlying = rust_type_name_for_enum_underlying(&def.underlying, &self.index);
         let mut code = String::new();
@@ -487,21 +528,25 @@ impl {struct_name} {{
                 .push(value);
         }
 
-        let mut cleaned_up_names: HashMap<&str, &str> = HashMap::new();
-        for (cleaned_up_name, value) in value_names.iter().zip(def.values.iter()) {
-            cleaned_up_names.insert(&value.name, &cleaned_up_name);
-        }
-
-        let mut used_names = HashSet::new();
-        for value in def.values.iter() {
-            let original_value_name: &str = value.name.as_ref();
+        // We have to group by cleaned-up names, as multiple values can have the same name.
+        // This can happen if the only difference in the original name was case,
+        // or when cleaning of some deprecated and non deprecated names ended up with the same name.
+        let grouped_values = stable_group_by(&def.values, |v| {
+            cleaned_up_names.get(v.name.as_str()).unwrap()
+        });
+        for group in grouped_values {
+            assert!(group[1..].iter().all(|v| v.value == group[0].value));
+            // Taking the first non deprecated one, or the first one if they are all deprecated.
+            let value = if let Some(value) = group
+                .iter()
+                .find(|v| !v.attrs.contains(&ast::Attr::Deprecated))
+            {
+                value
+            } else {
+                group[0]
+            };
+            let original_value_name = value.name.as_str();
             let cleaned_up_name = cleaned_up_names.get(original_value_name).unwrap();
-
-            // After cleaning up, everything became upper case, so we can have duplicates.
-            // Just keep the first.
-            if !used_names.insert(cleaned_up_name) {
-                continue;
-            }
 
             writeln!(
                 &mut code,
@@ -569,7 +614,7 @@ impl {struct_name} {{
                 &mut code,
                 "\
 impl {struct_name} {{
-    fn is_empty(&self) -> bool {{
+    fn is_empty(self) -> bool {{
         self.0 == 0
     }}
 }}
@@ -614,7 +659,7 @@ impl std::fmt::Debug for {struct_name} {{
 
             let empty_name =
                 if let Some(zero_val) = values_for_fmt.iter().find(|val| val.value.is_zero()) {
-                    cleaned_up_names.get(&zero_val.name.as_ref()).unwrap()
+                    cleaned_up_names.get(zero_val.name.as_str()).unwrap()
                 } else {
                     "(empty)"
                 };
@@ -674,7 +719,7 @@ impl std::fmt::Debug for {struct_name} {{
                         continue;
                     }
 
-                    let original_value_name: &str = value.name.as_ref();
+                    let original_value_name = value.name.as_str();
                     let cleaned_up_name = cleaned_up_names.get(original_value_name).unwrap();
 
                     if is_first {
@@ -748,7 +793,7 @@ impl std::fmt::Debug for {struct_name} {{
                 if !values_for_fmt.contains(&&value) {
                     continue;
                 }
-                let original_value_name: &str = value.name.as_ref();
+                let original_value_name = value.name.as_str();
                 let cleaned_up_name = cleaned_up_names.get(original_value_name).unwrap();
 
                 writeln!(
@@ -913,6 +958,10 @@ fn cleanup_enum_value_names<S: AsRef<str>, Iter: Iterator<Item = S>>(
             split_name
         })
         .collect::<Vec<_>>();
+
+    if value_names_split.is_empty() {
+        return Vec::new();
+    }
 
     // For "AU3DMixerRenderingFlags", ignore the first "AU" (value names starting with "k3DMixerRenderingFlags_")
     let mut enum_name_split = snake_case_split(enum_name);
