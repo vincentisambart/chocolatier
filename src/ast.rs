@@ -367,7 +367,7 @@ pub use clang::PlatformAvailability;
 pub use clang::Version;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum EnumExten {
+pub enum EnumExtensib {
     Open,
     Closed,
 }
@@ -382,7 +382,7 @@ pub enum Attr {
     PlatformAvailability(Vec<PlatformAvailability>),
     SwiftName(String),
     FlagEnum,
-    EnumExten(EnumExten),
+    EnumExtensib(EnumExtensib),
 }
 
 // Gets the next token, expecting there is one.
@@ -470,8 +470,8 @@ impl Attr {
                                 tokens
                             );
                             match kind_token.spelling().as_str() {
-                                "open" => Some(Self::EnumExten(EnumExten::Open)),
-                                "closed" => Some(Self::EnumExten(EnumExten::Closed)),
+                                "open" => Some(Self::EnumExtensib(EnumExtensib::Open)),
+                                "closed" => Some(Self::EnumExtensib(EnumExtensib::Closed)),
                                 _ => panic!(
                                     "unexpected tokens for \"enum_extensibility\": {:?}",
                                     tokens
@@ -3228,7 +3228,7 @@ mod tests {
                 ],
                 attrs: vec![
                     Attr::FlagEnum,
-                    Attr::EnumExten(EnumExten::Open),
+                    Attr::EnumExtensib(EnumExtensib::Open),
                     Attr::PlatformAvailability(vec![
                         PlatformAvailability {
                             platform: "ios".to_string(),
