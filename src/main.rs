@@ -41,10 +41,9 @@ fn main() {
         // struct ll { struct ll *nextl; };
         // struct { float f; union { int i; double d; }; } a;
   "#;
-    let decls = ast::ast_from_str(source).unwrap();
     // ast::print_full_clang_ast(source);
+    let decls = ast::ast_from_str(source).unwrap();
     // println!("{:#?}", decls);
-    // println!("{:#?}", index);
     let mut generator = generator::Generator::new(decls);
     generator.generate();
 }

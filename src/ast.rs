@@ -408,7 +408,7 @@ impl Attr {
                         .extent()
                         .expect("could not get extent of unexposed attribute");
                     let tokens = extent.tokenize();
-                    match tokens[0].spelling().as_str() {
+                    match tokens[0].spelling().as_str().trim_matches('_') {
                         "noescape" => {
                             assert!(
                                 tokens.len() == 1,
@@ -2923,13 +2923,14 @@ mod tests {
 
     #[test]
     fn test_param_attributes() {
+        // Note that noescape has 2 spelling: noescape and __noescape__.
         let source = "
             @interface I
             - (void)methodWithConsumedParam:(id) __attribute((ns_consumed)) consumedParam;
             - (void)methodWithNoescapeBlock:(void (__attribute__((noescape)) ^)(void))block;
             @end
             void function_with_consumed_param(__attribute((ns_consumed)) id consumedParam);
-            void function_with_noescape_block(void (__attribute__((noescape)) ^)(void));
+            void function_with_noescape_block(void (__attribute__((__noescape__)) ^)(void));
         ";
 
         let expected_decls = vec![
