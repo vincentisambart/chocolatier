@@ -128,6 +128,15 @@ __attribute__((ns_returns_retained)) NSArray *chocolat_Foundation_NSArrayInterfa
     }
 }
 
+void chocolat_Foundation_NSArrayInterface_instance_enumerateObjectsUsingBlock(__unsafe_unretained NSArray *self_, void (^ __unsafe_unretained block)(id obj, NSUInteger idx, BOOL *stop)) {
+    @try {
+        return [self_ enumerateObjectsUsingBlock:block];
+    }
+    @catch (NSException *exception) {
+        abort_on_exception(exception);
+    }
+}
+
 @interface Bar: NSObject
 @property (nonatomic) Bar *bar;
 @end

@@ -1,4 +1,7 @@
 #![allow(dead_code)]
+#![warn(rust_2018_idioms)]
+
+mod block;
 
 // TODO:
 // - enum
@@ -59,6 +62,10 @@ extern "C" {
         self_: *mut Object,
         obj: *mut Object,
     ) -> *mut Object;
+    fn chocolat_Foundation_NSArrayInterface_instance_enumerateObjectsUsingBlock(
+        self_: *mut Object,
+        block: *mut std::ffi::c_void,
+    );
 
     fn chocolat_Foundation_NSMutableArrayInterface_class_new() -> *mut Object;
     fn chocolat_Foundation_NSMutableArrayInterface_instance_addObject(
@@ -336,6 +343,20 @@ trait NSArrayInterface<T: ObjCPtr>: NSObjectInterface {
         let raw = NonNull::new(raw_ptr).expect("expecting non-null");
         unsafe { NSArray::from_raw_unchecked(raw) }
     }
+    fn enumerate_objects_using_block<F: Fn(NonNull<Object>, usize, &mut u8) + Clone + 'static>(
+        &self,
+        f: F,
+    ) {
+        let raw_self = self.as_raw().as_ptr();
+        let block = block::Block::new(f);
+        let block_ref = &block;
+        unsafe {
+            chocolat_Foundation_NSArrayInterface_instance_enumerateObjectsUsingBlock(
+                raw_self,
+                block_ref as *const _ as _,
+            );
+        }
+    }
 }
 
 struct NSArray<T: ObjCPtr> {
@@ -490,6 +511,11 @@ fn main() {
     let first2 = array.first();
     println!("obj ref count 4 - {}", obj.retain_count());
     println!("equal: {}", first1.is_equal(first2.as_ref()));
+
+    array.enumerate_objects_using_block(|_, idx, stop| {
+        println!("idx: {}", idx);
+        *stop = 1;
+    });
 
     // unsafe { objc_autoreleasePoolPop(pool) };
 }
