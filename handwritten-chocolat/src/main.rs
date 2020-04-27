@@ -343,12 +343,14 @@ trait NSArrayInterface<T: ObjCPtr>: NSObjectInterface {
         let raw = NonNull::new(raw_ptr).expect("expecting non-null");
         unsafe { NSArray::from_raw_unchecked(raw) }
     }
-    fn enumerate_objects_using_block<F: Fn(NonNull<Object>, usize, &mut u8) + Clone + 'static>(
+    fn enumerate_objects_using_block<
+        F: Fn(NonNull<Object>, usize, &mut u8) + Send + Sync + Clone + 'static,
+    >(
         &self,
         f: F,
     ) {
         let raw_self = self.as_raw().as_ptr();
-        let block = block::Block::new(f);
+        let block = block::StackBlock::new(f);
         let block_ref = &block;
         unsafe {
             chocolat_Foundation_NSArrayInterface_instance_enumerateObjectsUsingBlock(
