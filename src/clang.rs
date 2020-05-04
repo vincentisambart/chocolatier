@@ -359,10 +359,28 @@ impl<'a> Cursor<'a> {
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 raw_availabilities.as_mut_ptr(),
-                len,
+                raw_availabilities.len() as _,
             )
         };
-        assert_eq!(len, new_len);
+        assert!(new_len >= len);
+        if new_len > len {
+            // Sometime clang underestimates the number of values so resize our vector and try again.
+            raw_availabilities.resize_with(new_len as _, Default::default);
+
+            let new_new_len = unsafe {
+                clang_sys::clang_getCursorPlatformAvailability(
+                    self.raw,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    raw_availabilities.as_mut_ptr(),
+                    raw_availabilities.len() as _,
+                )
+            };
+
+            assert_eq!(new_len, new_new_len);
+        }
 
         let availabilities = raw_availabilities
             .into_iter()
@@ -737,7 +755,7 @@ impl<'a> Type<'a> {
         .expect("a type should have a canonical version")
     }
 
-    pub fn get_element_type(&self) -> Option<Type<'a>> {
+    pub fn element_type(&self) -> Option<Type<'a>> {
         Type::from_raw(
             unsafe { clang_sys::clang_getElementType(self.raw) },
             self.tu,

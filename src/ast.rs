@@ -1,22 +1,14 @@
 use crate::clang::{self, CursorKind, TypeKind};
 use std::collections::{HashMap, HashSet};
 
-// TODO: Try to get:
-// - class and method OS version annotations
-// - consume/retained/not retained
-// - exception throwing info (maybe from annotations from Swift)
+// TODO:
 // - support parsing code for different platforms (iOS, macOS, ...)
 // - alignment, packing, sizes (and make sure the size and offset of each item is the same for clang and Rust as bindgen does)
-// - instancetype
-// - namespacing of ObjC exported from Swift (though that might be fine as we're calling from generated ObjC)
 // - const
-// - bit fields
 // - try getting the best definition of a function (unfortunately libclang's "canonical" seems to just be the first one)
-// - struct or type declaration inside interface declaration
-// - __attribute__((NSObject)), __attribute__/objc_bridge_mutable((objc_bridge*))
-// - __attribute__((ns_consumes_self)) (implicit on all init)
-// - __attribute__((cf_returns_*))
-// - check if using TuOptions::DETAILED_PREPROCESSING_RECORD would let us not having to preprocess in advance.
+// - real ObjC type encoding of C blocks
+// - variable decl
+// - force the libclang library path so that we don't have warnings at start and we are sure the use is using the Xcode version.
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Origin {
@@ -60,7 +52,7 @@ impl Origin {
     }
 
     fn from_cursor(cursor: &clang::Cursor<'_>) -> Option<Origin> {
-        // As preprocess the file in advance using the system compiler, we have to use presumed_location().
+        // As we preprocess the file in advance using the system compiler, we have to use presumed_location().
         let path = cursor.location()?.presumed_location().file;
         Self::from_path(&path)
     }
@@ -176,11 +168,11 @@ fn show_type(desc: &str, clang_type: &clang::Type<'_>, indent_level: usize) {
     }
 
     if let Some(alignment) = clang_type.align_of() {
-        println!("{}alignment: {:?}", indent, alignment);
+        println!("{}{} alignment: {:?}", indent, desc, alignment);
     }
 
     if let Some(size) = clang_type.size_of() {
-        println!("{}size: {:?}", indent, size);
+        println!("{}{} size: {:?}", indent, desc, size);
     }
 
     if let Some(template_arguments) = clang_type.template_arguments() {
@@ -374,24 +366,96 @@ pub enum EnumExtensib {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Attr {
-    Consumed,
     Noescape,
-    ReturnsRetained,
+    NSReturnsRetained,
+    NSReturnsNotRetained,
+    NSReturnsAutoreleased,
+    NSConsumesSelf,
+    NSConsumed,
+    CFReturnsRetained,
+    CFReturnsNotRetained,
+    CFConsumed,
     Unavailable,
     Deprecated,
     PlatformAvailability(Vec<PlatformAvailability>),
     SwiftName(String),
+    ObjCRuntimeName(String),
     FlagEnum,
     EnumExtensib(EnumExtensib),
+    ObjCBridge { ty_name: String, is_mutable: bool },
+    NSObject,
 }
 
 // Gets the next token, expecting there is one.
-// Ugly but it seems to work.
+// Ugly but it seems to work – but only because we preprocess the code in advance.
 fn next_token<'a>(token: clang::Token<'a>) -> clang::Token<'a> {
     let extent = token.extent();
     let end = extent.end();
     let range = end.range_to(end);
     range.tokenize().into_iter().next().unwrap()
+}
+
+fn extract_attr_val_token<'a>(attr_name: &str, tokens: &[clang::Token<'a>]) -> clang::Token<'a> {
+    // We expect to have 4 tokens here: <attr_name> ( name )
+    if tokens.len() == 1 {
+        // When the attribute was put on a typedef, the attribute is also present at the definition,
+        // but for some reason, at the definition, its extent only covers the first token.
+        // So try to directly get the 2 tokens after the one we just got.
+        let second_token = next_token(tokens[0]);
+        next_token(second_token)
+    } else {
+        assert!(
+            tokens.len() == 4,
+            "unexpected tokens for {} attribute: {:?}",
+            attr_name,
+            tokens
+        );
+        tokens[2]
+    }
+}
+
+fn extract_attr_ident_value(attr_name: &str, tokens: &[clang::Token<'_>]) -> String {
+    let val_token = extract_attr_val_token(attr_name, tokens);
+    assert!(
+        val_token.kind() == clang::TokenKind::Identifier,
+        "unexpected value token for {} attribute: {:?}",
+        attr_name,
+        val_token
+    );
+    val_token.spelling()
+}
+
+fn extract_attr_lit_value(attr_name: &str, tokens: &[clang::Token<'_>]) -> String {
+    let val_token = extract_attr_val_token(attr_name, tokens);
+    assert!(
+        val_token.kind() == clang::TokenKind::Literal,
+        "unexpected value token for {} attribute: {:?}",
+        attr_name,
+        val_token
+    );
+    // spelling() returns an escaped string, with '"' at the start and end.
+    let mut spelling = val_token.spelling();
+    if let Some(start_pos) = spelling.find(|c| c != '"') {
+        spelling.drain(..start_pos);
+    }
+    if let Some(end_pos) = spelling.rfind(|c| c != '"') {
+        spelling.drain((end_pos + 1)..);
+    }
+    assert!(
+        !spelling.contains('\\'),
+        "need to properly unescape {:?}",
+        spelling
+    );
+    spelling
+}
+
+fn ensure_attr_no_value(attr_name: &str, tokens: &[clang::Token<'_>]) {
+    assert!(
+        tokens.len() == 1,
+        "unexpected tokens for {} attribute: {:?}",
+        attr_name,
+        tokens
+    );
 }
 
 impl Attr {
@@ -400,82 +464,78 @@ impl Attr {
             .children()
             .iter()
             .filter_map(|child| match child.kind() {
-                CursorKind::NSConsumed => Some(Self::Consumed),
-                CursorKind::NSReturnsRetained => Some(Self::ReturnsRetained),
+                CursorKind::NSReturnsRetained => Some(Self::NSReturnsRetained),
+                CursorKind::NSReturnsNotRetained => Some(Self::NSReturnsNotRetained),
+                CursorKind::NSReturnsAutoreleased => Some(Self::NSReturnsAutoreleased),
+                CursorKind::NSConsumesSelf => Some(Self::NSConsumesSelf),
+                CursorKind::NSConsumed => Some(Self::NSConsumed),
                 CursorKind::FlagEnum => Some(Self::FlagEnum),
+                CursorKind::ObjCNSObject => Some(Self::NSObject),
                 CursorKind::UnexposedAttr => {
-                    let extent = child
-                        .extent()
-                        .expect("could not get extent of unexposed attribute");
+                    let extent = match child.extent() {
+                        Some(extent) => extent,
+                        None => return None,
+                    };
                     let tokens = extent.tokenize();
-                    match tokens[0].spelling().as_str().trim_matches('_') {
+                    let spelling = tokens[0].spelling();
+                    let attr_name = spelling.trim_matches('_');
+                    match attr_name {
                         "noescape" => {
-                            assert!(
-                                tokens.len() == 1,
-                                "unexpected tokens for \"noescape\": {:?}",
-                                tokens
-                            );
+                            ensure_attr_no_value(attr_name, &tokens);
                             Some(Self::Noescape)
+                        }
+                        "cf_returns_retained" => {
+                            ensure_attr_no_value(attr_name, &tokens);
+                            Some(Self::CFReturnsRetained)
+                        }
+                        "cf_returns_not_retained" => {
+                            ensure_attr_no_value(attr_name, &tokens);
+                            Some(Self::CFReturnsNotRetained)
+                        }
+                        "cf_consumed" => {
+                            ensure_attr_no_value(attr_name, &tokens);
+                            Some(Self::CFConsumed)
                         }
                         "unavailable" => {
                             assert!(
                                 tokens.len() == 1 || tokens.len() == 4,
-                                "unexpected tokens for \"unavailable\": {:?}",
+                                "unexpected tokens for \"{}\": {:?}",
+                                attr_name,
                                 tokens
                             );
                             // There can be a message but for the time being just ignore it.
                             Some(Self::Unavailable)
                         }
                         "swift_name" => {
-                            // We expect to have 4 tokens here: swift_name ( name )
-                            assert!(
-                                tokens.len() == 4,
-                                "unexpected tokens for \"swift_name\": {:?}",
-                                tokens
-                            );
-                            let name_token = &tokens[2];
-                            assert!(
-                                name_token.kind() == clang::TokenKind::Literal,
-                                "unexpected tokens for \"swift_name\": {:?}",
-                                tokens
-                            );
-                            // spelling() returns an escaped string, with '"' at the start and end.
-                            // The Swift name should have no other need of escaping, so that should be enough.
-                            let spelling = name_token.spelling();
-                            let name = spelling.trim_matches('"');
-                            assert!(!name.contains('\\'), "unexpected Swift name {:?}", name);
+                            let name = extract_attr_lit_value(attr_name, &tokens);
                             Some(Self::SwiftName(name.into()))
                         }
+                        "objc_runtime_name" => {
+                            let name = extract_attr_lit_value(attr_name, &tokens);
+                            Some(Self::ObjCRuntimeName(name.into()))
+                        }
                         "enum_extensibility" => {
-                            // We expect to have 4 tokens here: enum_extensibility ( open/closed )
-                            let kind_token = {
-                                if tokens.len() == 1 {
-                                    // When the attribute was put on a typedef, the attribute is also present at the definition,
-                                    // but for some reason, at the definition, its extent only covers the first token.
-                                    // So try to directly get the 2 tokens after the one we just got.
-                                    let second_token = next_token(tokens[0]);
-                                    next_token(second_token)
-                                } else {
-                                    assert!(
-                                        tokens.len() == 4,
-                                        "unexpected tokens for \"enum_extensibility\": {:?}",
-                                        tokens
-                                    );
-                                    tokens[2]
-                                }
-                            };
-                            assert!(
-                                kind_token.kind() == clang::TokenKind::Identifier,
-                                "unexpected tokens for \"enum_extensibility\": {:?}",
-                                tokens
-                            );
-                            match kind_token.spelling().as_str() {
+                            let kind = extract_attr_ident_value(attr_name, &tokens);
+                            match kind.as_str() {
                                 "open" => Some(Self::EnumExtensib(EnumExtensib::Open)),
                                 "closed" => Some(Self::EnumExtensib(EnumExtensib::Closed)),
-                                _ => panic!(
-                                    "unexpected tokens for \"enum_extensibility\": {:?}",
-                                    tokens
-                                ),
+                                _ => {
+                                    panic!("unexpected tokens for \"{}\": {:?}", attr_name, tokens)
+                                }
+                            }
+                        }
+                        "objc_bridge" | "objc_bridge_mutable" => {
+                            let ty_name = extract_attr_ident_value(attr_name, &tokens);
+                            if attr_name == "objc_bridge_mutable" {
+                                Some(Self::ObjCBridge {
+                                    ty_name,
+                                    is_mutable: true,
+                                })
+                            } else {
+                                Some(Self::ObjCBridge {
+                                    ty_name,
+                                    is_mutable: false,
+                                })
                             }
                         }
                         _ => None,
@@ -492,6 +552,15 @@ impl Attr {
             attrs.push(Self::PlatformAvailability(availability));
         }
 
+        // ReturnsNotRetained and ReturnsAutoreleased take priority over ReturnsRetained.
+        // Removing ReturnsRetained when it's not active makes processing easier afterwards.
+        if attrs
+            .iter()
+            .any(|attr| [Attr::NSReturnsNotRetained, Attr::NSReturnsAutoreleased].contains(attr))
+        {
+            attrs.retain(|attr| attr != &Attr::NSReturnsRetained);
+        }
+
         attrs
     }
 }
@@ -500,34 +569,37 @@ impl Attr {
 pub enum Nullability {
     NonNull,
     Nullable,
-    Unspecified,
 }
 
-impl From<clang::Nullability> for Nullability {
+impl From<clang::Nullability> for Option<Nullability> {
     fn from(nul: clang::Nullability) -> Self {
         match nul {
-            clang::Nullability::NonNull => Nullability::NonNull,
-            clang::Nullability::Nullable => Nullability::Nullable,
-            clang::Nullability::Unspecified => Nullability::Unspecified,
+            clang::Nullability::NonNull => Some(Nullability::NonNull),
+            clang::Nullability::Nullable => Some(Nullability::Nullable),
+            clang::Nullability::Unspecified => None,
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct IdObjPtr {
-    protocols: Vec<String>,
+pub struct IdObjPtr {
+    pub protocols: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct SomeInstanceObjPtr {
-    interface: String,
-    protocols: Vec<String>,
-    type_args: Vec<ObjCTypeArg>,
+pub struct SomeInstanceObjPtr {
+    pub interface: String,
+    pub protocols: Vec<String>,
+    pub type_args: Vec<ObjCTypeArg>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-enum ObjPtrKind {
+pub enum ObjPtrKind {
     Class,
+    // In the clang AST, instancetype is just a typedef for `id`,
+    // but it's generally used to promise to return an instance of the current class,
+    // so special case it.
+    Instancetype,
     Id(IdObjPtr),
     SomeInstance(SomeInstanceObjPtr),
     Block(CallableDesc),
@@ -536,13 +608,14 @@ enum ObjPtrKind {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObjPtr {
-    kind: ObjPtrKind,
-    nullability: Nullability,
+    pub kind: ObjPtrKind,
+    // You can specify nullability when referencing a typedef for a pointer type.
+    pub nullability: Option<Nullability>,
 }
 
 impl ObjPtr {
-    fn with_nullability(self, nullability: Nullability) -> Self {
-        ObjPtr {
+    fn with_nullability(self, nullability: Option<Nullability>) -> Self {
+        Self {
             kind: self.kind,
             nullability,
         }
@@ -557,9 +630,9 @@ fn parm_decl_children<'a>(cursor: &clang::Cursor<'a>) -> impl Iterator<Item = cl
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct Field {
-    name: Option<String>,
-    objc_type: ObjCType,
+pub struct Field {
+    pub name: Option<String>,
+    pub objc_type: ObjCType,
 }
 
 impl Field {
@@ -614,6 +687,7 @@ enum TagKind {
 pub struct TagRef {
     id: TagId,
     kind: TagKind,
+    attrs: Vec<Attr>,
 }
 
 impl TagRef {
@@ -631,8 +705,9 @@ impl TagRef {
         };
 
         let id = TagId::from_cursor(&decl, unnamed_tag_ids);
+        let attrs = Attr::from_decl(&decl);
 
-        TagRef { id, kind }
+        TagRef { id, kind, attrs }
     }
 }
 
@@ -664,9 +739,10 @@ impl CallableDesc {
                 unnamed_tag_ids,
             );
             let spelling = clang_type.spelling();
-            // Yes, that is very ugly but I could not find a better way.
+            // Yes, that is very ugly but I could not find a better way to get that attribute
+            // when it's applied to a C function.
             if spelling.contains("__attribute__((ns_returns_retained))") {
-                callable.attrs.push(Attr::ReturnsRetained);
+                callable.attrs.push(Attr::NSReturnsRetained);
             } else {
                 panic!(
                     "Have to check what this Attributed is for - {:?}",
@@ -725,25 +801,34 @@ impl CallableDesc {
 #[derive(Clone, Debug, PartialEq)]
 pub struct TypedefRef {
     pub name: String,
+    pub nullability: Option<Nullability>,
 }
 
 impl TypedefRef {
     fn from_type(clang_type: &clang::Type<'_>) -> Self {
         assert_eq!(clang_type.kind(), TypeKind::Typedef);
         let name = clang_type.spelling();
-        TypedefRef { name }
+        let nullability = clang_type.nullability().and_then(Into::into);
+        TypedefRef { name, nullability }
+    }
+
+    fn with_nullability(self, nullability: Option<Nullability>) -> Self {
+        Self {
+            name: self.name,
+            nullability,
+        }
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Pointer {
     pointee: Box<ObjCType>,
-    nullability: Nullability,
+    nullability: Option<Nullability>,
 }
 
 impl Pointer {
-    fn with_nullability(self, nullability: Nullability) -> Self {
-        Pointer {
+    fn with_nullability(self, nullability: Option<Nullability>) -> Self {
+        Self {
             pointee: self.pointee,
             nullability,
         }
@@ -818,13 +903,13 @@ fn type_signedness(clang_type: &clang::Type<'_>) -> Option<Signedness> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-enum ObjCTypeArg {
+pub enum ObjCTypeArg {
     ObjPtr(ObjPtr),
     Typedef(TypedefRef),
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
-enum Signedness {
+pub enum Signedness {
     Signed,
     Unsigned,
 }
@@ -865,7 +950,7 @@ pub enum ObjCType {
     Function(CallableDesc),
     ObjPtr(ObjPtr),
     /// `SEL` in Objective-C. A special type of (non-object) pointer.
-    ObjCSel(Nullability),
+    ObjCSel(Option<Nullability>),
     Array(Array),
     Unsupported(Unsupported),
 }
@@ -901,7 +986,7 @@ impl ObjCType {
                         base_parm_decls,
                         unnamed_tag_ids,
                     )),
-                    nullability: Nullability::Unspecified,
+                    nullability: None,
                 })
             }
             TypeKind::ObjCObjectPointer => {
@@ -949,7 +1034,7 @@ impl ObjCType {
                     assert_eq!(base_type.spelling(), "id");
                     Self::ObjPtr(ObjPtr {
                         kind: ObjPtrKind::Id(IdObjPtr { protocols }),
-                        nullability: Nullability::Unspecified,
+                        nullability: None,
                     })
                 } else {
                     Self::ObjPtr(ObjPtr {
@@ -958,7 +1043,7 @@ impl ObjCType {
                             protocols,
                             type_args,
                         }),
-                        nullability: Nullability::Unspecified,
+                        nullability: None,
                     })
                 }
             }
@@ -969,11 +1054,15 @@ impl ObjCType {
                     unnamed_tag_ids,
                 );
                 if let Some(nullability) = clang_type.nullability() {
+                    // Note that even if Into::into returns None we probably want to override the one existing with None.
                     let nullability = nullability.into();
                     match modified {
                         Self::Pointer(ptr) => Self::Pointer(ptr.with_nullability(nullability)),
                         Self::ObjPtr(ptr) => Self::ObjPtr(ptr.with_nullability(nullability)),
                         Self::ObjCSel(_) => Self::ObjCSel(nullability),
+                        Self::Typedef(typedef) => {
+                            Self::Typedef(typedef.with_nullability(nullability))
+                        }
                         _ => modified,
                     }
                 } else {
@@ -982,28 +1071,36 @@ impl ObjCType {
             }
             TypeKind::ObjCTypeParam => Self::ObjPtr(ObjPtr {
                 kind: ObjPtrKind::TypeParam(clang_type.spelling()),
-                nullability: Nullability::Unspecified,
+                nullability: None,
             }),
             TypeKind::ObjCId => Self::ObjPtr(ObjPtr {
                 kind: ObjPtrKind::Id(IdObjPtr {
                     protocols: Vec::new(),
                 }),
-                nullability: Nullability::Unspecified,
+                nullability: None,
             }),
-            TypeKind::ObjCSel => Self::ObjCSel(Nullability::Unspecified),
+            TypeKind::ObjCSel => Self::ObjCSel(None),
             TypeKind::ObjCClass => Self::ObjPtr(ObjPtr {
                 kind: ObjPtrKind::Class,
-                nullability: Nullability::Unspecified,
+                nullability: None,
             }),
             TypeKind::Typedef => {
                 let decl = clang_type.declaration().unwrap();
                 if decl.kind() == CursorKind::TemplateTypeParameter {
                     Self::ObjPtr(ObjPtr {
                         kind: ObjPtrKind::TypeParam(clang_type.spelling()),
-                        nullability: Nullability::Unspecified,
+                        nullability: None,
                     })
                 } else {
-                    Self::Typedef(TypedefRef::from_type(&clang_type))
+                    let typedef = TypedefRef::from_type(&clang_type);
+                    if typedef.name == "instancetype" {
+                        Self::ObjPtr(ObjPtr {
+                            kind: ObjPtrKind::Instancetype,
+                            nullability: None,
+                        })
+                    } else {
+                        Self::Typedef(typedef)
+                    }
                 }
             }
             TypeKind::Elaborated => Self::from_type(
@@ -1020,7 +1117,7 @@ impl ObjCType {
             TypeKind::ConstantArray => Self::Array(Array {
                 size: Some(clang_type.num_elements().unwrap()),
                 element: Box::new(Self::from_type(
-                    &clang_type.get_element_type().unwrap(),
+                    &clang_type.element_type().unwrap(),
                     base_parm_decls,
                     unnamed_tag_ids,
                 )),
@@ -1028,7 +1125,7 @@ impl ObjCType {
             TypeKind::IncompleteArray => Self::Array(Array {
                 size: None,
                 element: Box::new(Self::from_type(
-                    &clang_type.get_element_type().unwrap(),
+                    &clang_type.element_type().unwrap(),
                     base_parm_decls,
                     unnamed_tag_ids,
                 )),
@@ -1039,7 +1136,7 @@ impl ObjCType {
                     base_parm_decls,
                     unnamed_tag_ids,
                 )),
-                nullability: Nullability::Unspecified,
+                nullability: None,
             }),
             TypeKind::Bool => Self::Bool,
             TypeKind::Vector => Self::Unsupported(Unsupported::Vector),
@@ -1213,8 +1310,9 @@ pub struct Property {
     pub is_writable: bool,
     pub is_class: bool,
     pub ownership: PropOwnership,
-    pub getter: Option<String>,
-    pub setter: Option<String>,
+    pub custom_getter_name: Option<String>,
+    pub custom_setter_name: Option<String>,
+    pub attrs: Vec<Attr>,
 }
 
 impl Property {
@@ -1229,58 +1327,58 @@ impl Property {
         );
 
         use clang::ObjCAttributes;
-        let attributes = cursor
+        let objc_attrs = cursor
             .objc_attributes()
             .unwrap_or_else(ObjCAttributes::empty);
         let is_atomic = {
-            if attributes.contains(ObjCAttributes::ATOMIC) {
-                assert!(!attributes.contains(ObjCAttributes::NONATOMIC));
+            if objc_attrs.contains(ObjCAttributes::ATOMIC) {
+                assert!(!objc_attrs.contains(ObjCAttributes::NONATOMIC));
                 true
             } else {
-                !attributes.contains(ObjCAttributes::NONATOMIC)
+                !objc_attrs.contains(ObjCAttributes::NONATOMIC)
             }
         };
-        let is_writable = attributes.contains(ObjCAttributes::READWRITE);
+        let is_writable = objc_attrs.contains(ObjCAttributes::READWRITE);
         if is_writable {
-            assert!(!attributes.contains(ObjCAttributes::READONLY));
+            assert!(!objc_attrs.contains(ObjCAttributes::READONLY));
         }
-        let is_class = attributes.contains(ObjCAttributes::CLASS);
+        let is_class = objc_attrs.contains(ObjCAttributes::CLASS);
         let ownership = {
-            if attributes.contains(ObjCAttributes::STRONG) {
-                assert!(!attributes.contains(ObjCAttributes::WEAK));
-                assert!(!attributes.contains(ObjCAttributes::COPY));
-                assert!(!attributes.contains(ObjCAttributes::ASSIGN));
-                assert!(!attributes.contains(ObjCAttributes::RETAIN));
-                assert!(!attributes.contains(ObjCAttributes::UNSAFE_UNRETAINED));
+            if objc_attrs.contains(ObjCAttributes::STRONG) {
+                assert!(!objc_attrs.contains(ObjCAttributes::WEAK));
+                assert!(!objc_attrs.contains(ObjCAttributes::COPY));
+                assert!(!objc_attrs.contains(ObjCAttributes::ASSIGN));
+                assert!(!objc_attrs.contains(ObjCAttributes::RETAIN));
+                assert!(!objc_attrs.contains(ObjCAttributes::UNSAFE_UNRETAINED));
                 PropOwnership::Strong
-            } else if attributes.contains(ObjCAttributes::WEAK) {
-                assert!(!attributes.contains(ObjCAttributes::COPY));
-                assert!(!attributes.contains(ObjCAttributes::ASSIGN));
-                assert!(!attributes.contains(ObjCAttributes::RETAIN));
-                assert!(!attributes.contains(ObjCAttributes::UNSAFE_UNRETAINED));
+            } else if objc_attrs.contains(ObjCAttributes::WEAK) {
+                assert!(!objc_attrs.contains(ObjCAttributes::COPY));
+                assert!(!objc_attrs.contains(ObjCAttributes::ASSIGN));
+                assert!(!objc_attrs.contains(ObjCAttributes::RETAIN));
+                assert!(!objc_attrs.contains(ObjCAttributes::UNSAFE_UNRETAINED));
                 PropOwnership::Weak
-            } else if attributes.contains(ObjCAttributes::COPY) {
-                assert!(!attributes.contains(ObjCAttributes::ASSIGN));
-                assert!(!attributes.contains(ObjCAttributes::RETAIN));
-                assert!(!attributes.contains(ObjCAttributes::UNSAFE_UNRETAINED));
+            } else if objc_attrs.contains(ObjCAttributes::COPY) {
+                assert!(!objc_attrs.contains(ObjCAttributes::ASSIGN));
+                assert!(!objc_attrs.contains(ObjCAttributes::RETAIN));
+                assert!(!objc_attrs.contains(ObjCAttributes::UNSAFE_UNRETAINED));
                 PropOwnership::Copy
-            } else if attributes.contains(ObjCAttributes::ASSIGN) {
-                assert!(!attributes.contains(ObjCAttributes::RETAIN));
-                assert!(!attributes.contains(ObjCAttributes::UNSAFE_UNRETAINED));
+            } else if objc_attrs.contains(ObjCAttributes::ASSIGN) {
+                assert!(!objc_attrs.contains(ObjCAttributes::RETAIN));
+                assert!(!objc_attrs.contains(ObjCAttributes::UNSAFE_UNRETAINED));
                 PropOwnership::Assign
-            } else if attributes.contains(ObjCAttributes::RETAIN) {
-                assert!(!attributes.contains(ObjCAttributes::UNSAFE_UNRETAINED));
+            } else if objc_attrs.contains(ObjCAttributes::RETAIN) {
+                assert!(!objc_attrs.contains(ObjCAttributes::UNSAFE_UNRETAINED));
                 PropOwnership::Retain
-            } else if attributes.contains(ObjCAttributes::UNSAFE_UNRETAINED) {
+            } else if objc_attrs.contains(ObjCAttributes::UNSAFE_UNRETAINED) {
                 PropOwnership::UnsafeUnretained
             } else {
                 PropOwnership::Strong
             }
         };
-        let getter;
-        let setter;
-        if attributes.contains(ObjCAttributes::GETTER)
-            || attributes.contains(ObjCAttributes::SETTER)
+        let custom_getter_name;
+        let custom_setter_name;
+        if objc_attrs.contains(ObjCAttributes::GETTER)
+            || objc_attrs.contains(ObjCAttributes::SETTER)
         {
             let parent = cursor.semantic_parent().unwrap();
             let property_location = cursor.location().unwrap();
@@ -1296,8 +1394,8 @@ impl Property {
                         && sibling.location().unwrap() == property_location
                 })
                 .collect();
-            if attributes.contains(ObjCAttributes::GETTER) {
-                getter = Some(
+            if objc_attrs.contains(ObjCAttributes::GETTER) {
+                custom_getter_name = Some(
                     methods_at_same_location
                         .iter()
                         .find(|method| method.arguments().unwrap().len() == 0)
@@ -1306,10 +1404,10 @@ impl Property {
                         .unwrap(),
                 );
             } else {
-                getter = None;
+                custom_getter_name = None;
             }
-            if attributes.contains(ObjCAttributes::SETTER) {
-                setter = Some(
+            if objc_attrs.contains(ObjCAttributes::SETTER) {
+                custom_setter_name = Some(
                     methods_at_same_location
                         .iter()
                         .find(|method| method.arguments().unwrap().len() > 0)
@@ -1318,12 +1416,14 @@ impl Property {
                         .unwrap(),
                 );
             } else {
-                setter = None;
+                custom_setter_name = None;
             }
         } else {
-            getter = None;
-            setter = None;
+            custom_getter_name = None;
+            custom_setter_name = None;
         };
+
+        let attrs = Attr::from_decl(&cursor);
 
         Property {
             name,
@@ -1332,8 +1432,9 @@ impl Property {
             is_writable,
             is_class,
             ownership,
-            getter,
-            setter,
+            custom_getter_name,
+            custom_setter_name,
+            attrs,
         }
     }
 }
@@ -1574,8 +1675,8 @@ pub enum RecordKind {
 pub struct RecordDef {
     pub id: TagId,
     pub kind: RecordKind,
-    fields: Vec<Field>,
-    origin: Option<Origin>,
+    pub fields: Vec<Field>,
+    pub origin: Option<Origin>,
 }
 
 impl RecordDef {
@@ -1638,7 +1739,6 @@ pub struct EnumDef {
     pub id: TagId,
     pub underlying: ObjCType,
     pub values: Vec<EnumValue>,
-    pub attrs: Vec<Attr>,
     pub origin: Option<Origin>,
 }
 
@@ -1674,21 +1774,19 @@ impl EnumDef {
                 }
             })
             .collect();
-        let attrs = Attr::from_decl(decl);
         let origin = Origin::from_cursor(decl);
 
         EnumDef {
             id,
             underlying,
             values,
-            attrs,
             origin,
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum Decl {
+pub enum Item {
     ProtocolDef(ProtocolDef),
     InterfaceDef(InterfaceDef),
     CategoryDef(CategoryDef),
@@ -1697,6 +1795,12 @@ pub enum Decl {
     TypedefDecl(TypedefDecl),
     FuncDecl(FuncDecl),
     // VarDecl(VarDecl),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AttributedItem {
+    pub item: Item,
+    pub attrs: Vec<Attr>,
 }
 
 #[derive(Debug)]
@@ -1784,7 +1888,7 @@ fn parser_configuration() -> (Vec<String>, clang::TuOptions) {
     )
 }
 
-pub fn ast_from_str(source: &str) -> Result<Vec<Decl>, ParseError> {
+pub fn ast_from_str(source: &str) -> Result<Vec<AttributedItem>, ParseError> {
     // Preprocess before to get more easily interesting tokens coming from #defines.
     let source: &str = &preprocess_objc(source);
 
@@ -1815,7 +1919,7 @@ pub fn ast_from_str(source: &str) -> Result<Vec<Decl>, ParseError> {
         return Err(ParseError::CompilationError(error.spelling()));
     }
 
-    let mut decls: Vec<Decl> = Vec::new();
+    let mut items: Vec<AttributedItem> = Vec::new();
 
     let tu_cursor = tu.cursor();
 
@@ -1855,24 +1959,24 @@ pub fn ast_from_str(source: &str) -> Result<Vec<Decl>, ParseError> {
                 return clang::ChildVisitResult::Recurse;
             }
         }
-        let decl = match cursor.kind() {
-            CursorKind::ObjCInterfaceDecl => Some(Decl::InterfaceDef(InterfaceDef::from_cursor(
+        let item = match cursor.kind() {
+            CursorKind::ObjCInterfaceDecl => Some(Item::InterfaceDef(InterfaceDef::from_cursor(
                 &cursor,
                 &unnamed_tag_ids,
             ))),
-            CursorKind::ObjCProtocolDecl => Some(Decl::ProtocolDef(ProtocolDef::from_cursor(
+            CursorKind::ObjCProtocolDecl => Some(Item::ProtocolDef(ProtocolDef::from_cursor(
                 &cursor,
                 &unnamed_tag_ids,
             ))),
-            CursorKind::ObjCCategoryDecl => Some(Decl::CategoryDef(CategoryDef::from_cursor(
+            CursorKind::ObjCCategoryDecl => Some(Item::CategoryDef(CategoryDef::from_cursor(
                 &cursor,
                 &unnamed_tag_ids,
             ))),
-            CursorKind::TypedefDecl => Some(Decl::TypedefDecl(TypedefDecl::from_cursor(
+            CursorKind::TypedefDecl => Some(Item::TypedefDecl(TypedefDecl::from_cursor(
                 &cursor,
                 &unnamed_tag_ids,
             ))),
-            CursorKind::FunctionDecl => Some(Decl::FuncDecl(FuncDecl::from_cursor(
+            CursorKind::FunctionDecl => Some(Item::FuncDecl(FuncDecl::from_cursor(
                 &cursor,
                 &unnamed_tag_ids,
             ))),
@@ -1881,7 +1985,7 @@ pub fn ast_from_str(source: &str) -> Result<Vec<Decl>, ParseError> {
                 // (details of unnamed ones are included directly in the types that include them)
                 if let Some(def) = cursor.definition() {
                     if def == cursor {
-                        Some(Decl::RecordDef(RecordDef::from_cursor(
+                        Some(Item::RecordDef(RecordDef::from_cursor(
                             &cursor,
                             &unnamed_tag_ids,
                         )))
@@ -1897,7 +2001,7 @@ pub fn ast_from_str(source: &str) -> Result<Vec<Decl>, ParseError> {
                 // But contrarily to struct and enums, we do care about unnamed ones as they are used to declare constants.
                 if let Some(def) = cursor.definition() {
                     if def == cursor {
-                        Some(Decl::EnumDef(EnumDef::from_cursor(
+                        Some(Item::EnumDef(EnumDef::from_cursor(
                             &cursor,
                             &unnamed_tag_ids,
                         )))
@@ -1911,14 +2015,16 @@ pub fn ast_from_str(source: &str) -> Result<Vec<Decl>, ParseError> {
             _ => None,
         };
 
-        if let Some(decl) = decl {
-            decls.push(decl);
+        if let Some(item) = item {
+            let attrs = Attr::from_decl(&cursor);
+            let attributed = AttributedItem { item, attrs };
+            items.push(attributed);
             visited.insert(usr.unwrap());
         }
 
         clang::ChildVisitResult::Recurse
     });
-    Ok(decls)
+    Ok(items)
 }
 
 #[cfg(test)]
@@ -1970,14 +2076,17 @@ mod tests {
             typedef int I;
         "#;
 
-        let expected_decls = vec![Decl::TypedefDecl(TypedefDecl {
-            name: "I".to_string(),
-            underlying: ObjCType::Num(NumKind::Int),
-            origin: Some(Origin::Framework("Foundation".to_string())),
-        })];
+        let expected_items = vec![AttributedItem {
+            item: Item::TypedefDecl(TypedefDecl {
+                name: "I".to_string(),
+                underlying: ObjCType::Num(NumKind::Int),
+                origin: Some(Origin::Framework("Foundation".to_string())),
+            }),
+            attrs: vec![],
+        }];
 
-        let parsed_decls = ast_from_str(source).unwrap();
-        assert_eq!(parsed_decls, expected_decls);
+        let parsed_items = ast_from_str(source).unwrap();
+        assert_eq!(parsed_items, expected_items);
     }
 
     #[test]
@@ -1992,76 +2101,79 @@ mod tests {
             @end
         ";
 
-        let expected_decls = vec![Decl::InterfaceDef(InterfaceDef {
-            name: "A".to_string(),
-            superclass: None,
-            adopted_protocols: vec![],
-            template_params: vec![],
-            methods: vec![
-                ObjCMethod {
-                    name: "foo:".to_string(),
-                    kind: ObjCMethodKind::Instance,
-                    params: vec![ObjCParam {
-                        name: "x".to_string(),
-                        objc_type: ObjCType::ObjPtr(ObjPtr {
+        let expected_items = vec![AttributedItem {
+            item: Item::InterfaceDef(InterfaceDef {
+                name: "A".to_string(),
+                superclass: None,
+                adopted_protocols: vec![],
+                template_params: vec![],
+                methods: vec![
+                    ObjCMethod {
+                        name: "foo:".to_string(),
+                        kind: ObjCMethodKind::Instance,
+                        params: vec![ObjCParam {
+                            name: "x".to_string(),
+                            objc_type: ObjCType::ObjPtr(ObjPtr {
+                                kind: ObjPtrKind::Id(IdObjPtr {
+                                    protocols: vec!["P1".to_string(), "P2".to_string()],
+                                }),
+                                nullability: None,
+                            }),
+                            attrs: vec![],
+                        }],
+                        result: ObjCType::Void,
+                        attrs: vec![],
+                    },
+                    ObjCMethod {
+                        name: "bar:".to_string(),
+                        kind: ObjCMethodKind::Class,
+                        params: vec![ObjCParam {
+                            name: "y".to_string(),
+                            objc_type: ObjCType::ObjPtr(ObjPtr {
+                                kind: ObjPtrKind::SomeInstance(SomeInstanceObjPtr {
+                                    interface: "B".to_string(),
+                                    protocols: vec!["P2".to_string()],
+                                    type_args: vec![],
+                                }),
+                                nullability: Some(Nullability::NonNull),
+                            }),
+                            attrs: vec![],
+                        }],
+                        result: ObjCType::Void,
+                        attrs: vec![],
+                    },
+                    ObjCMethod {
+                        name: "foobar:".to_string(),
+                        kind: ObjCMethodKind::Instance,
+                        params: vec![ObjCParam {
+                            name: "z".to_string(),
+                            objc_type: ObjCType::ObjPtr(ObjPtr {
+                                kind: ObjPtrKind::SomeInstance(SomeInstanceObjPtr {
+                                    interface: "B".to_string(),
+                                    protocols: vec!["P2".to_string()],
+                                    type_args: vec![],
+                                }),
+                                nullability: None,
+                            }),
+                            attrs: vec![],
+                        }],
+                        result: ObjCType::ObjPtr(ObjPtr {
                             kind: ObjPtrKind::Id(IdObjPtr {
                                 protocols: vec!["P1".to_string(), "P2".to_string()],
                             }),
-                            nullability: Nullability::Unspecified,
+                            nullability: None,
                         }),
                         attrs: vec![],
-                    }],
-                    result: ObjCType::Void,
-                    attrs: vec![],
-                },
-                ObjCMethod {
-                    name: "bar:".to_string(),
-                    kind: ObjCMethodKind::Class,
-                    params: vec![ObjCParam {
-                        name: "y".to_string(),
-                        objc_type: ObjCType::ObjPtr(ObjPtr {
-                            kind: ObjPtrKind::SomeInstance(SomeInstanceObjPtr {
-                                interface: "B".to_string(),
-                                protocols: vec!["P2".to_string()],
-                                type_args: vec![],
-                            }),
-                            nullability: Nullability::NonNull,
-                        }),
-                        attrs: vec![],
-                    }],
-                    result: ObjCType::Void,
-                    attrs: vec![],
-                },
-                ObjCMethod {
-                    name: "foobar:".to_string(),
-                    kind: ObjCMethodKind::Instance,
-                    params: vec![ObjCParam {
-                        name: "z".to_string(),
-                        objc_type: ObjCType::ObjPtr(ObjPtr {
-                            kind: ObjPtrKind::SomeInstance(SomeInstanceObjPtr {
-                                interface: "B".to_string(),
-                                protocols: vec!["P2".to_string()],
-                                type_args: vec![],
-                            }),
-                            nullability: Nullability::Unspecified,
-                        }),
-                        attrs: vec![],
-                    }],
-                    result: ObjCType::ObjPtr(ObjPtr {
-                        kind: ObjPtrKind::Id(IdObjPtr {
-                            protocols: vec!["P1".to_string(), "P2".to_string()],
-                        }),
-                        nullability: Nullability::Unspecified,
-                    }),
-                    attrs: vec![],
-                },
-            ],
-            properties: vec![],
-            origin: None,
-        })];
+                    },
+                ],
+                properties: vec![],
+                origin: None,
+            }),
+            attrs: vec![],
+        }];
 
-        let parsed_decls = ast_from_str(source).unwrap();
-        assert_eq!(parsed_decls, expected_decls);
+        let parsed_items = ast_from_str(source).unwrap();
+        assert_eq!(parsed_items, expected_items);
     }
 
     #[test]
@@ -2073,29 +2185,35 @@ mod tests {
             @end
         ";
 
-        let expected_decls = vec![
-            Decl::InterfaceDef(InterfaceDef {
-                name: "A".to_string(),
-                superclass: None,
-                adopted_protocols: vec![],
-                template_params: vec![],
-                methods: vec![],
-                properties: vec![],
-                origin: None,
-            }),
-            Decl::InterfaceDef(InterfaceDef {
-                name: "B".to_string(),
-                superclass: Some("A".to_string()),
-                adopted_protocols: vec![],
-                template_params: vec![],
-                methods: vec![],
-                properties: vec![],
-                origin: None,
-            }),
+        let expected_items = vec![
+            AttributedItem {
+                item: Item::InterfaceDef(InterfaceDef {
+                    name: "A".to_string(),
+                    superclass: None,
+                    adopted_protocols: vec![],
+                    template_params: vec![],
+                    methods: vec![],
+                    properties: vec![],
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
+            AttributedItem {
+                item: Item::InterfaceDef(InterfaceDef {
+                    name: "B".to_string(),
+                    superclass: Some("A".to_string()),
+                    adopted_protocols: vec![],
+                    template_params: vec![],
+                    methods: vec![],
+                    properties: vec![],
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
         ];
 
-        let parsed_decls = ast_from_str(source).unwrap();
-        assert_eq!(parsed_decls, expected_decls);
+        let parsed_items = ast_from_str(source).unwrap();
+        assert_eq!(parsed_items, expected_items);
     }
 
     #[test]
@@ -2108,38 +2226,44 @@ mod tests {
             @end
         ";
 
-        let expected_decls = vec![
-            Decl::InterfaceDef(InterfaceDef {
-                name: "A".to_string(),
-                superclass: None,
-                adopted_protocols: vec![],
-                template_params: vec![],
-                methods: vec![],
-                properties: vec![],
-                origin: None,
-            }),
-            Decl::InterfaceDef(InterfaceDef {
-                name: "B".to_string(),
-                superclass: Some("A".to_string()),
-                adopted_protocols: vec![],
-                template_params: vec!["X".to_string(), "Y".to_string(), "Z".to_string()],
-                methods: vec![ObjCMethod {
-                    name: "x".to_string(),
-                    kind: ObjCMethodKind::Instance,
-                    params: vec![],
-                    result: ObjCType::ObjPtr(ObjPtr {
-                        kind: ObjPtrKind::TypeParam("X".to_string()),
-                        nullability: Nullability::NonNull,
-                    }),
-                    attrs: vec![],
-                }],
-                properties: vec![],
-                origin: None,
-            }),
+        let expected_items = vec![
+            AttributedItem {
+                item: Item::InterfaceDef(InterfaceDef {
+                    name: "A".to_string(),
+                    superclass: None,
+                    adopted_protocols: vec![],
+                    template_params: vec![],
+                    methods: vec![],
+                    properties: vec![],
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
+            AttributedItem {
+                item: Item::InterfaceDef(InterfaceDef {
+                    name: "B".to_string(),
+                    superclass: Some("A".to_string()),
+                    adopted_protocols: vec![],
+                    template_params: vec!["X".to_string(), "Y".to_string(), "Z".to_string()],
+                    methods: vec![ObjCMethod {
+                        name: "x".to_string(),
+                        kind: ObjCMethodKind::Instance,
+                        params: vec![],
+                        result: ObjCType::ObjPtr(ObjPtr {
+                            kind: ObjPtrKind::TypeParam("X".to_string()),
+                            nullability: Some(Nullability::NonNull),
+                        }),
+                        attrs: vec![],
+                    }],
+                    properties: vec![],
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
         ];
 
-        let parsed_decls = ast_from_str(source).unwrap();
-        assert_eq!(parsed_decls, expected_decls);
+        let parsed_items = ast_from_str(source).unwrap();
+        assert_eq!(parsed_items, expected_items);
     }
 
     #[test]
@@ -2156,56 +2280,62 @@ mod tests {
             @end
         ";
 
-        let expected_decls = vec![
-            Decl::ProtocolDef(ProtocolDef {
-                name: "B".to_string(),
-                inherited_protocols: vec![],
-                methods: vec![],
-                properties: vec![],
-                origin: None,
-            }),
-            Decl::ProtocolDef(ProtocolDef {
-                name: "A".to_string(),
-                inherited_protocols: vec![],
-                methods: vec![
-                    ProtocolMethod {
-                        method: ObjCMethod {
-                            name: "x".to_string(),
-                            kind: ObjCMethodKind::Instance,
-                            params: vec![],
-                            result: ObjCType::Void,
-                            attrs: vec![],
+        let expected_items = vec![
+            AttributedItem {
+                item: Item::ProtocolDef(ProtocolDef {
+                    name: "B".to_string(),
+                    inherited_protocols: vec![],
+                    methods: vec![],
+                    properties: vec![],
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
+            AttributedItem {
+                item: Item::ProtocolDef(ProtocolDef {
+                    name: "A".to_string(),
+                    inherited_protocols: vec![],
+                    methods: vec![
+                        ProtocolMethod {
+                            method: ObjCMethod {
+                                name: "x".to_string(),
+                                kind: ObjCMethodKind::Instance,
+                                params: vec![],
+                                result: ObjCType::Void,
+                                attrs: vec![],
+                            },
+                            is_optional: false,
                         },
-                        is_optional: false,
-                    },
-                    ProtocolMethod {
-                        method: ObjCMethod {
-                            name: "y".to_string(),
-                            kind: ObjCMethodKind::Class,
-                            params: vec![],
-                            result: ObjCType::Void,
-                            attrs: vec![],
+                        ProtocolMethod {
+                            method: ObjCMethod {
+                                name: "y".to_string(),
+                                kind: ObjCMethodKind::Class,
+                                params: vec![],
+                                result: ObjCType::Void,
+                                attrs: vec![],
+                            },
+                            is_optional: true,
                         },
-                        is_optional: true,
-                    },
-                    ProtocolMethod {
-                        method: ObjCMethod {
-                            name: "z".to_string(),
-                            kind: ObjCMethodKind::Instance,
-                            params: vec![],
-                            result: ObjCType::Num(NumKind::Int),
-                            attrs: vec![],
+                        ProtocolMethod {
+                            method: ObjCMethod {
+                                name: "z".to_string(),
+                                kind: ObjCMethodKind::Instance,
+                                params: vec![],
+                                result: ObjCType::Num(NumKind::Int),
+                                attrs: vec![],
+                            },
+                            is_optional: true,
                         },
-                        is_optional: true,
-                    },
-                ],
-                properties: vec![],
-                origin: None,
-            }),
+                    ],
+                    properties: vec![],
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
         ];
 
-        let parsed_decls = ast_from_str(source).unwrap();
-        assert_eq!(parsed_decls, expected_decls);
+        let parsed_items = ast_from_str(source).unwrap();
+        assert_eq!(parsed_items, expected_items);
     }
 
     #[test]
@@ -2226,71 +2356,84 @@ mod tests {
             @end
         ";
 
-        let expected_decls = vec![
-            Decl::InterfaceDef(InterfaceDef {
-                name: "A".to_string(),
-                superclass: None,
-                adopted_protocols: vec![],
-                template_params: vec![],
-                methods: vec![],
-                properties: vec![],
-                origin: None,
-            }),
-            Decl::CategoryDef(CategoryDef {
-                name: Some("Categ".to_string()),
-                class: "A".to_string(),
-                adopted_protocols: vec!["P".to_string()],
-                methods: vec![ObjCMethod {
-                    name: "foo".to_string(),
-                    kind: ObjCMethodKind::Instance,
-                    params: vec![],
-                    result: ObjCType::Void,
-                    attrs: vec![],
-                }],
-                properties: vec![],
-                origin: None,
-            }),
-            Decl::CategoryDef(CategoryDef {
-                name: None,
-                class: "A".to_string(),
-                adopted_protocols: vec![],
-                methods: vec![ObjCMethod {
-                    name: "firstUnnamedCategoryMethod".to_string(),
-                    kind: ObjCMethodKind::Instance,
-                    params: vec![],
-                    result: ObjCType::Void,
-                    attrs: vec![],
-                }],
-                properties: vec![],
-                origin: None,
-            }),
-            Decl::CategoryDef(CategoryDef {
-                name: None,
-                class: "A".to_string(),
-                adopted_protocols: vec![],
-                methods: vec![ObjCMethod {
-                    name: "secondUnnamedCategoryMethod".to_string(),
-                    kind: ObjCMethodKind::Instance,
-                    params: vec![],
-                    result: ObjCType::Void,
-                    attrs: vec![],
-                }],
-                properties: vec![Property {
-                    name: "propertyOnUnnamedCategory".to_string(),
-                    value: ObjCType::Num(NumKind::Int),
-                    is_atomic: true,
-                    is_writable: false,
-                    is_class: false,
-                    ownership: PropOwnership::Strong,
-                    getter: None,
-                    setter: None,
-                }],
-                origin: None,
-            }),
+        let expected_items = vec![
+            AttributedItem {
+                item: Item::InterfaceDef(InterfaceDef {
+                    name: "A".to_string(),
+                    superclass: None,
+                    adopted_protocols: vec![],
+                    template_params: vec![],
+                    methods: vec![],
+                    properties: vec![],
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
+            AttributedItem {
+                item: Item::CategoryDef(CategoryDef {
+                    name: Some("Categ".to_string()),
+                    class: "A".to_string(),
+                    adopted_protocols: vec!["P".to_string()],
+                    methods: vec![ObjCMethod {
+                        name: "foo".to_string(),
+                        kind: ObjCMethodKind::Instance,
+                        params: vec![],
+                        result: ObjCType::Void,
+                        attrs: vec![],
+                    }],
+                    properties: vec![],
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
+            AttributedItem {
+                item: Item::CategoryDef(CategoryDef {
+                    name: None,
+                    class: "A".to_string(),
+                    adopted_protocols: vec![],
+                    methods: vec![ObjCMethod {
+                        name: "firstUnnamedCategoryMethod".to_string(),
+                        kind: ObjCMethodKind::Instance,
+                        params: vec![],
+                        result: ObjCType::Void,
+                        attrs: vec![],
+                    }],
+                    properties: vec![],
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
+            AttributedItem {
+                item: Item::CategoryDef(CategoryDef {
+                    name: None,
+                    class: "A".to_string(),
+                    adopted_protocols: vec![],
+                    methods: vec![ObjCMethod {
+                        name: "secondUnnamedCategoryMethod".to_string(),
+                        kind: ObjCMethodKind::Instance,
+                        params: vec![],
+                        result: ObjCType::Void,
+                        attrs: vec![],
+                    }],
+                    properties: vec![Property {
+                        name: "propertyOnUnnamedCategory".to_string(),
+                        value: ObjCType::Num(NumKind::Int),
+                        is_atomic: true,
+                        is_writable: false,
+                        is_class: false,
+                        ownership: PropOwnership::Strong,
+                        custom_getter_name: None,
+                        custom_setter_name: None,
+                        attrs: vec![],
+                    }],
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
         ];
 
-        let parsed_decls = ast_from_str(source).unwrap();
-        assert_eq!(parsed_decls, expected_decls);
+        let parsed_items = ast_from_str(source).unwrap();
+        assert_eq!(parsed_items, expected_items);
     }
 
     #[test]
@@ -2304,53 +2447,56 @@ mod tests {
             @end
         ";
 
-        let expected_decls = vec![Decl::InterfaceDef(InterfaceDef {
-            name: "A".to_string(),
-            superclass: None,
-            adopted_protocols: vec![],
-            template_params: vec![],
-            methods: vec![
-                ObjCMethod {
-                    name: "x".to_string(),
-                    kind: ObjCMethodKind::Instance,
-                    params: vec![],
-                    result: ObjCType::ObjPtr(ObjPtr {
-                        kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
-                        nullability: Nullability::Unspecified,
-                    }),
-                    attrs: vec![],
-                },
-                ObjCMethod {
-                    name: "y".to_string(),
-                    kind: ObjCMethodKind::Instance,
-                    params: vec![],
-                    result: ObjCType::ObjPtr(ObjPtr {
-                        kind: ObjPtrKind::Id(IdObjPtr {
-                            protocols: vec!["P".to_string()],
+        let expected_items = vec![AttributedItem {
+            item: Item::InterfaceDef(InterfaceDef {
+                name: "A".to_string(),
+                superclass: None,
+                adopted_protocols: vec![],
+                template_params: vec![],
+                methods: vec![
+                    ObjCMethod {
+                        name: "x".to_string(),
+                        kind: ObjCMethodKind::Instance,
+                        params: vec![],
+                        result: ObjCType::ObjPtr(ObjPtr {
+                            kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
+                            nullability: None,
                         }),
-                        nullability: Nullability::Unspecified,
-                    }),
-                    attrs: vec![],
-                },
-                ObjCMethod {
-                    name: "z".to_string(),
-                    kind: ObjCMethodKind::Instance,
-                    params: vec![],
-                    result: ObjCType::ObjPtr(ObjPtr {
-                        kind: ObjPtrKind::Id(IdObjPtr {
-                            protocols: vec!["P".to_string()],
+                        attrs: vec![],
+                    },
+                    ObjCMethod {
+                        name: "y".to_string(),
+                        kind: ObjCMethodKind::Instance,
+                        params: vec![],
+                        result: ObjCType::ObjPtr(ObjPtr {
+                            kind: ObjPtrKind::Id(IdObjPtr {
+                                protocols: vec!["P".to_string()],
+                            }),
+                            nullability: None,
                         }),
-                        nullability: Nullability::NonNull,
-                    }),
-                    attrs: vec![],
-                },
-            ],
-            properties: vec![],
-            origin: None,
-        })];
+                        attrs: vec![],
+                    },
+                    ObjCMethod {
+                        name: "z".to_string(),
+                        kind: ObjCMethodKind::Instance,
+                        params: vec![],
+                        result: ObjCType::ObjPtr(ObjPtr {
+                            kind: ObjPtrKind::Id(IdObjPtr {
+                                protocols: vec!["P".to_string()],
+                            }),
+                            nullability: Some(Nullability::NonNull),
+                        }),
+                        attrs: vec![],
+                    },
+                ],
+                properties: vec![],
+                origin: None,
+            }),
+            attrs: vec![],
+        }];
 
-        let parsed_decls = ast_from_str(source).unwrap();
-        assert_eq!(parsed_decls, expected_decls);
+        let parsed_items = ast_from_str(source).unwrap();
+        assert_eq!(parsed_items, expected_items);
     }
 
     #[test]
@@ -2362,13 +2508,52 @@ mod tests {
             @end
         ";
 
-        let expected_decls = vec![
-            Decl::TypedefDecl(TypedefDecl {
-                name: "I".to_string(),
-                underlying: ObjCType::Num(NumKind::Int),
-                origin: None,
-            }),
-            Decl::InterfaceDef(InterfaceDef {
+        let expected_items = vec![
+            AttributedItem {
+                item: Item::TypedefDecl(TypedefDecl {
+                    name: "I".to_string(),
+                    underlying: ObjCType::Num(NumKind::Int),
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
+            AttributedItem {
+                item: Item::InterfaceDef(InterfaceDef {
+                    name: "A".to_string(),
+                    superclass: None,
+                    adopted_protocols: vec![],
+                    template_params: vec![],
+                    methods: vec![ObjCMethod {
+                        name: "foo".to_string(),
+                        kind: ObjCMethodKind::Instance,
+                        params: vec![],
+                        result: ObjCType::Typedef(TypedefRef {
+                            name: "I".to_string(),
+                            nullability: None,
+                        }),
+                        attrs: vec![],
+                    }],
+                    properties: vec![],
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
+        ];
+
+        let parsed_items = ast_from_str(source).unwrap();
+        assert_eq!(parsed_items, expected_items);
+    }
+
+    #[test]
+    fn test_instancetype() {
+        let source = "
+            @interface A
+            - (_Nonnull instancetype)foo;
+            @end
+        ";
+
+        let expected_items = vec![AttributedItem {
+            item: Item::InterfaceDef(InterfaceDef {
                 name: "A".to_string(),
                 superclass: None,
                 adopted_protocols: vec![],
@@ -2377,18 +2562,20 @@ mod tests {
                     name: "foo".to_string(),
                     kind: ObjCMethodKind::Instance,
                     params: vec![],
-                    result: ObjCType::Typedef(TypedefRef {
-                        name: "I".to_string(),
+                    result: ObjCType::ObjPtr(ObjPtr {
+                        kind: ObjPtrKind::Instancetype,
+                        nullability: Some(Nullability::NonNull),
                     }),
                     attrs: vec![],
                 }],
                 properties: vec![],
                 origin: None,
             }),
-        ];
+            attrs: vec![],
+        }];
 
-        let parsed_decls = ast_from_str(source).unwrap();
-        assert_eq!(parsed_decls, expected_decls);
+        let parsed_items = ast_from_str(source).unwrap();
+        assert_eq!(parsed_items, expected_items);
     }
 
     #[test]
@@ -2405,138 +2592,163 @@ mod tests {
             struct DeclaredAfterwards { char c; };
         ";
 
-        let expected_decls = vec![
-            Decl::RecordDef(RecordDef {
-                id: TagId::Named("S".to_string()),
-                fields: vec![Field {
-                    name: Some("x".to_string()),
-                    objc_type: ObjCType::Num(NumKind::Int),
-                }],
-                kind: RecordKind::Struct,
-                origin: None,
-            }),
-            Decl::TypedefDecl(TypedefDecl {
-                name: "T".to_string(),
-                underlying: ObjCType::Tag(TagRef {
+        let expected_items = vec![
+            AttributedItem {
+                item: Item::RecordDef(RecordDef {
                     id: TagId::Named("S".to_string()),
-                    kind: TagKind::Struct,
-                }),
-                origin: None,
-            }),
-            Decl::InterfaceDef(InterfaceDef {
-                name: "A".to_string(),
-                superclass: None,
-                adopted_protocols: vec![],
-                template_params: vec![],
-                methods: vec![
-                    ObjCMethod {
-                        name: "standardStruct".to_string(),
-                        kind: ObjCMethodKind::Instance,
-                        params: vec![],
-                        result: ObjCType::Tag(TagRef {
-                            id: TagId::Named("S".to_string()),
-                            kind: TagKind::Struct,
-                        }),
-                        attrs: vec![],
-                    },
-                    ObjCMethod {
-                        name: "inlineUnnamedStruct".to_string(),
-                        kind: ObjCMethodKind::Instance,
-                        params: vec![],
-                        result: ObjCType::Tag(TagRef {
-                            id: TagId::Unnamed(1),
-                            kind: TagKind::Struct,
-                        }),
-                        attrs: vec![],
-                    },
-                    ObjCMethod {
-                        name: "pointerToStructTypedef".to_string(),
-                        kind: ObjCMethodKind::Instance,
-                        params: vec![],
-                        result: ObjCType::Pointer(Pointer {
-                            pointee: Box::new(ObjCType::Typedef(TypedefRef {
-                                name: "T".to_string(),
-                            })),
-                            nullability: Nullability::Unspecified,
-                        }),
-                        attrs: vec![],
-                    },
-                    ObjCMethod {
-                        name: "pointerToUndeclaredStruct".to_string(),
-                        kind: ObjCMethodKind::Instance,
-                        params: vec![],
-                        result: ObjCType::Pointer(Pointer {
-                            pointee: Box::new(ObjCType::Tag(TagRef {
-                                id: TagId::Named("Undeclared".to_string()),
-                                kind: TagKind::Struct,
-                            })),
-                            nullability: Nullability::Unspecified,
-                        }),
-                        attrs: vec![],
-                    },
-                    ObjCMethod {
-                        name: "pointerToStructDeclaredAfterwards".to_string(),
-                        kind: ObjCMethodKind::Instance,
-                        params: vec![],
-                        result: ObjCType::Pointer(Pointer {
-                            pointee: Box::new(ObjCType::Tag(TagRef {
-                                id: TagId::Named("DeclaredAfterwards".to_string()),
-                                kind: TagKind::Struct,
-                            })),
-                            nullability: Nullability::Unspecified,
-                        }),
-                        attrs: vec![],
-                    },
-                ],
-                properties: vec![],
-                origin: None,
-            }),
-            Decl::RecordDef(RecordDef {
-                id: TagId::Unnamed(1),
-                kind: RecordKind::Struct,
-                fields: vec![
-                    Field {
-                        name: Some("f".to_string()),
-                        objc_type: ObjCType::Num(NumKind::Float),
-                    },
-                    Field {
-                        name: None,
-                        objc_type: ObjCType::Tag(TagRef {
-                            id: TagId::Unnamed(2),
-                            kind: TagKind::Union,
-                        }),
-                    },
-                ],
-                origin: None,
-            }),
-            Decl::RecordDef(RecordDef {
-                id: TagId::Unnamed(2),
-                kind: RecordKind::Union,
-                fields: vec![
-                    Field {
-                        name: Some("i".to_string()),
+                    fields: vec![Field {
+                        name: Some("x".to_string()),
                         objc_type: ObjCType::Num(NumKind::Int),
-                    },
-                    Field {
-                        name: Some("d".to_string()),
-                        objc_type: ObjCType::Num(NumKind::Double),
-                    },
-                ],
-                origin: None,
-            }),
-            Decl::RecordDef(RecordDef {
-                id: TagId::Named("DeclaredAfterwards".to_string()),
-                fields: vec![Field {
-                    name: Some("c".to_string()),
-                    objc_type: ObjCType::Num(NumKind::SChar),
-                }],
-                kind: RecordKind::Struct,
-                origin: None,
-            }),
+                    }],
+                    kind: RecordKind::Struct,
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
+            AttributedItem {
+                item: Item::TypedefDecl(TypedefDecl {
+                    name: "T".to_string(),
+                    underlying: ObjCType::Tag(TagRef {
+                        id: TagId::Named("S".to_string()),
+                        kind: TagKind::Struct,
+                        attrs: vec![],
+                    }),
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
+            AttributedItem {
+                item: Item::InterfaceDef(InterfaceDef {
+                    name: "A".to_string(),
+                    superclass: None,
+                    adopted_protocols: vec![],
+                    template_params: vec![],
+                    methods: vec![
+                        ObjCMethod {
+                            name: "standardStruct".to_string(),
+                            kind: ObjCMethodKind::Instance,
+                            params: vec![],
+                            result: ObjCType::Tag(TagRef {
+                                id: TagId::Named("S".to_string()),
+                                kind: TagKind::Struct,
+                                attrs: vec![],
+                            }),
+                            attrs: vec![],
+                        },
+                        ObjCMethod {
+                            name: "inlineUnnamedStruct".to_string(),
+                            kind: ObjCMethodKind::Instance,
+                            params: vec![],
+                            result: ObjCType::Tag(TagRef {
+                                id: TagId::Unnamed(1),
+                                kind: TagKind::Struct,
+                                attrs: vec![],
+                            }),
+                            attrs: vec![],
+                        },
+                        ObjCMethod {
+                            name: "pointerToStructTypedef".to_string(),
+                            kind: ObjCMethodKind::Instance,
+                            params: vec![],
+                            result: ObjCType::Pointer(Pointer {
+                                pointee: Box::new(ObjCType::Typedef(TypedefRef {
+                                    name: "T".to_string(),
+                                    nullability: None,
+                                })),
+                                nullability: None,
+                            }),
+                            attrs: vec![],
+                        },
+                        ObjCMethod {
+                            name: "pointerToUndeclaredStruct".to_string(),
+                            kind: ObjCMethodKind::Instance,
+                            params: vec![],
+                            result: ObjCType::Pointer(Pointer {
+                                pointee: Box::new(ObjCType::Tag(TagRef {
+                                    id: TagId::Named("Undeclared".to_string()),
+                                    kind: TagKind::Struct,
+                                    attrs: vec![],
+                                })),
+                                nullability: None,
+                            }),
+                            attrs: vec![],
+                        },
+                        ObjCMethod {
+                            name: "pointerToStructDeclaredAfterwards".to_string(),
+                            kind: ObjCMethodKind::Instance,
+                            params: vec![],
+                            result: ObjCType::Pointer(Pointer {
+                                pointee: Box::new(ObjCType::Tag(TagRef {
+                                    id: TagId::Named("DeclaredAfterwards".to_string()),
+                                    kind: TagKind::Struct,
+                                    attrs: vec![],
+                                })),
+                                nullability: None,
+                            }),
+                            attrs: vec![],
+                        },
+                    ],
+                    properties: vec![],
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
+            AttributedItem {
+                item: Item::RecordDef(RecordDef {
+                    id: TagId::Unnamed(1),
+                    kind: RecordKind::Struct,
+                    fields: vec![
+                        Field {
+                            name: Some("f".to_string()),
+                            objc_type: ObjCType::Num(NumKind::Float),
+                        },
+                        Field {
+                            name: None,
+                            objc_type: ObjCType::Tag(TagRef {
+                                id: TagId::Unnamed(2),
+                                kind: TagKind::Union,
+                                attrs: vec![],
+                            }),
+                        },
+                    ],
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
+            AttributedItem {
+                item: Item::RecordDef(RecordDef {
+                    id: TagId::Unnamed(2),
+                    kind: RecordKind::Union,
+                    fields: vec![
+                        Field {
+                            name: Some("i".to_string()),
+                            objc_type: ObjCType::Num(NumKind::Int),
+                        },
+                        Field {
+                            name: Some("d".to_string()),
+                            objc_type: ObjCType::Num(NumKind::Double),
+                        },
+                    ],
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
+            AttributedItem {
+                item: Item::RecordDef(RecordDef {
+                    id: TagId::Named("DeclaredAfterwards".to_string()),
+                    fields: vec![Field {
+                        name: Some("c".to_string()),
+                        objc_type: ObjCType::Num(NumKind::SChar),
+                    }],
+                    kind: RecordKind::Struct,
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
         ];
 
-        let parsed_decls = ast_from_str(source).unwrap();
-        assert_eq!(parsed_decls, expected_decls);
+        let parsed_items = ast_from_str(source).unwrap();
+        assert_eq!(parsed_items, expected_items);
     }
 
     #[test]
@@ -2553,217 +2765,229 @@ mod tests {
             @end
         ";
 
-        let expected_decls = vec![
-            Decl::TypedefDecl(TypedefDecl {
-                name: "T".to_string(),
-                underlying: ObjCType::Pointer(Pointer {
-                    pointee: Box::new(ObjCType::Function(CallableDesc {
-                        result: Box::new(ObjCType::Void),
-                        params: Some(vec![Param {
-                            name: Some("typedefParam".to_string()),
-                            objc_type: ObjCType::Num(NumKind::Int),
+        let expected_items = vec![
+            AttributedItem {
+                item: Item::TypedefDecl(TypedefDecl {
+                    name: "T".to_string(),
+                    underlying: ObjCType::Pointer(Pointer {
+                        pointee: Box::new(ObjCType::Function(CallableDesc {
+                            result: Box::new(ObjCType::Void),
+                            params: Some(vec![Param {
+                                name: Some("typedefParam".to_string()),
+                                objc_type: ObjCType::Num(NumKind::Int),
+                                attrs: vec![],
+                            }]),
+                            is_variadic: false,
                             attrs: vec![],
-                        }]),
-                        is_variadic: false,
-                        attrs: vec![],
-                    })),
-                    nullability: Nullability::Unspecified,
+                        })),
+                        nullability: None,
+                    }),
+                    origin: None,
                 }),
-                origin: None,
-            }),
-            Decl::InterfaceDef(InterfaceDef {
-                name: "A".to_string(),
-                superclass: None,
-                adopted_protocols: vec![],
-                template_params: vec![],
-                methods: vec![
-                    // - (int(*)())returningFunctionPointerWithUndefinedParameters;
-                    ObjCMethod {
-                        name: "returningFunctionPointerWithUndefinedParameters".to_string(),
-                        kind: ObjCMethodKind::Instance,
-                        params: vec![],
-                        result: ObjCType::Pointer(Pointer {
-                            pointee: Box::new(ObjCType::Function(CallableDesc {
-                                result: Box::new(ObjCType::Num(NumKind::Int)),
-                                params: None,
-                                is_variadic: true,
-                                attrs: vec![],
-                            })),
-                            nullability: Nullability::Unspecified,
-                        }),
-                        attrs: vec![],
-                    },
-                    // - (int(*)(float, ...))returningFunctionPointerVariadic;
-                    ObjCMethod {
-                        name: "returningFunctionPointerVariadic".to_string(),
-                        kind: ObjCMethodKind::Instance,
-                        params: vec![],
-                        result: ObjCType::Pointer(Pointer {
-                            pointee: Box::new(ObjCType::Function(CallableDesc {
-                                result: Box::new(ObjCType::Num(NumKind::Int)),
-                                params: Some(vec![Param {
-                                    name: None,
-                                    objc_type: ObjCType::Num(NumKind::Float),
+                attrs: vec![],
+            },
+            AttributedItem {
+                item: Item::InterfaceDef(InterfaceDef {
+                    name: "A".to_string(),
+                    superclass: None,
+                    adopted_protocols: vec![],
+                    template_params: vec![],
+                    methods: vec![
+                        // - (int(*)())returningFunctionPointerWithUndefinedParameters;
+                        ObjCMethod {
+                            name: "returningFunctionPointerWithUndefinedParameters".to_string(),
+                            kind: ObjCMethodKind::Instance,
+                            params: vec![],
+                            result: ObjCType::Pointer(Pointer {
+                                pointee: Box::new(ObjCType::Function(CallableDesc {
+                                    result: Box::new(ObjCType::Num(NumKind::Int)),
+                                    params: None,
+                                    is_variadic: true,
                                     attrs: vec![],
-                                }]),
-                                is_variadic: true,
-                                attrs: vec![],
-                            })),
-                            nullability: Nullability::Unspecified,
-                        }),
-                        attrs: vec![],
-                    },
-                    // - (int(*)(void))returningFunctionPointerWithNoParameters;
-                    ObjCMethod {
-                        name: "returningFunctionPointerWithNoParameters".to_string(),
-                        kind: ObjCMethodKind::Instance,
-                        params: vec![],
-                        result: ObjCType::Pointer(Pointer {
-                            pointee: Box::new(ObjCType::Function(CallableDesc {
-                                result: Box::new(ObjCType::Num(NumKind::Int)),
-                                params: Some(vec![]),
-                                is_variadic: false,
-                                attrs: vec![],
-                            })),
-                            nullability: Nullability::Unspecified,
-                        }),
-                        attrs: vec![],
-                    },
-                    // - (T)returningFunctionPointerTypedef;
-                    ObjCMethod {
-                        name: "returningFunctionPointerTypedef".to_string(),
-                        kind: ObjCMethodKind::Instance,
-                        params: vec![],
-                        result: ObjCType::Typedef(TypedefRef {
-                            name: "T".to_string(),
-                        }),
-                        attrs: vec![],
-                    },
-                    // - (char (*(*)(double innerParam))(float outerParam))returningFunctionPointerReturningFunctionPointer;
-                    ObjCMethod {
-                        name: "returningFunctionPointerReturningFunctionPointer".to_string(),
-                        kind: ObjCMethodKind::Instance,
-                        params: vec![],
-                        result: ObjCType::Pointer(Pointer {
-                            pointee: Box::new(ObjCType::Function(CallableDesc {
-                                result: Box::new(ObjCType::Pointer(Pointer {
-                                    pointee: Box::new(ObjCType::Function(CallableDesc {
-                                        result: Box::new(ObjCType::Num(NumKind::SChar)),
-                                        params: Some(vec![Param {
-                                            name: Some("outerParam".to_string()),
-                                            objc_type: ObjCType::Num(NumKind::Float),
-                                            attrs: vec![],
-                                        }]),
-                                        is_variadic: false,
-                                        attrs: vec![],
-                                    })),
-                                    nullability: Nullability::Unspecified,
                                 })),
-                                params: Some(vec![Param {
-                                    name: Some("innerParam".to_string()),
-                                    objc_type: ObjCType::Num(NumKind::Double),
+                                nullability: None,
+                            }),
+                            attrs: vec![],
+                        },
+                        // - (int(*)(float, ...))returningFunctionPointerVariadic;
+                        ObjCMethod {
+                            name: "returningFunctionPointerVariadic".to_string(),
+                            kind: ObjCMethodKind::Instance,
+                            params: vec![],
+                            result: ObjCType::Pointer(Pointer {
+                                pointee: Box::new(ObjCType::Function(CallableDesc {
+                                    result: Box::new(ObjCType::Num(NumKind::Int)),
+                                    params: Some(vec![Param {
+                                        name: None,
+                                        objc_type: ObjCType::Num(NumKind::Float),
+                                        attrs: vec![],
+                                    }]),
+                                    is_variadic: true,
                                     attrs: vec![],
-                                }]),
-                                is_variadic: false,
-                                attrs: vec![],
-                            })),
-                            nullability: Nullability::Unspecified,
-                        }),
-                        attrs: vec![],
-                    },
-                    // - (A *(*)(short returnedFunctionParameter))takingTypedef:(T)typedefParam andFunctionPointersTakingFunctionPointers:(A *(*)(float someFloat, int (*functionPointerParam)(char someChar)))complicatedParam;
-                    ObjCMethod {
-                        name: "takingTypedef:andFunctionPointersTakingFunctionPointers:"
-                            .to_string(),
-                        kind: ObjCMethodKind::Instance,
-                        params: vec![
-                            ObjCParam {
-                                name: "typedefParam".to_string(),
-                                objc_type: ObjCType::Typedef(TypedefRef {
-                                    name: "T".to_string(),
-                                }),
-                                attrs: vec![],
-                            },
-                            ObjCParam {
-                                name: "complicatedParam".to_string(),
-                                objc_type: ObjCType::Pointer(Pointer {
-                                    pointee: Box::new(ObjCType::Function(CallableDesc {
-                                        result: Box::new(ObjCType::ObjPtr(ObjPtr {
-                                            kind: ObjPtrKind::SomeInstance(SomeInstanceObjPtr {
-                                                interface: "A".to_string(),
-                                                protocols: vec![],
-                                                type_args: vec![],
-                                            }),
-                                            nullability: Nullability::Unspecified,
-                                        })),
-                                        params: Some(vec![
-                                            Param {
-                                                name: Some("someFloat".to_string()),
+                                })),
+                                nullability: None,
+                            }),
+                            attrs: vec![],
+                        },
+                        // - (int(*)(void))returningFunctionPointerWithNoParameters;
+                        ObjCMethod {
+                            name: "returningFunctionPointerWithNoParameters".to_string(),
+                            kind: ObjCMethodKind::Instance,
+                            params: vec![],
+                            result: ObjCType::Pointer(Pointer {
+                                pointee: Box::new(ObjCType::Function(CallableDesc {
+                                    result: Box::new(ObjCType::Num(NumKind::Int)),
+                                    params: Some(vec![]),
+                                    is_variadic: false,
+                                    attrs: vec![],
+                                })),
+                                nullability: None,
+                            }),
+                            attrs: vec![],
+                        },
+                        // - (T)returningFunctionPointerTypedef;
+                        ObjCMethod {
+                            name: "returningFunctionPointerTypedef".to_string(),
+                            kind: ObjCMethodKind::Instance,
+                            params: vec![],
+                            result: ObjCType::Typedef(TypedefRef {
+                                name: "T".to_string(),
+                                nullability: None,
+                            }),
+                            attrs: vec![],
+                        },
+                        // - (char (*(*)(double innerParam))(float outerParam))returningFunctionPointerReturningFunctionPointer;
+                        ObjCMethod {
+                            name: "returningFunctionPointerReturningFunctionPointer".to_string(),
+                            kind: ObjCMethodKind::Instance,
+                            params: vec![],
+                            result: ObjCType::Pointer(Pointer {
+                                pointee: Box::new(ObjCType::Function(CallableDesc {
+                                    result: Box::new(ObjCType::Pointer(Pointer {
+                                        pointee: Box::new(ObjCType::Function(CallableDesc {
+                                            result: Box::new(ObjCType::Num(NumKind::SChar)),
+                                            params: Some(vec![Param {
+                                                name: Some("outerParam".to_string()),
                                                 objc_type: ObjCType::Num(NumKind::Float),
                                                 attrs: vec![],
-                                            },
-                                            Param {
-                                                name: Some("functionPointerParam".to_string()),
-                                                objc_type: ObjCType::Pointer(Pointer {
-                                                    pointee: Box::new(ObjCType::Function(
-                                                        CallableDesc {
-                                                            result: Box::new(ObjCType::Num(
-                                                                NumKind::Int,
-                                                            )),
-                                                            params: Some(vec![Param {
-                                                                name: Some("someChar".to_string()),
-                                                                objc_type: ObjCType::Num(
-                                                                    NumKind::SChar,
-                                                                ),
-                                                                attrs: vec![],
-                                                            }]),
-                                                            is_variadic: false,
-                                                            attrs: vec![],
-                                                        },
-                                                    )),
-                                                    nullability: Nullability::Unspecified,
-                                                }),
-                                                attrs: vec![],
-                                            },
-                                        ]),
-                                        is_variadic: false,
-                                        attrs: vec![],
+                                            }]),
+                                            is_variadic: false,
+                                            attrs: vec![],
+                                        })),
+                                        nullability: None,
                                     })),
-                                    nullability: Nullability::Unspecified,
-                                }),
-                                attrs: vec![],
-                            },
-                        ],
-                        result: ObjCType::Pointer(Pointer {
-                            pointee: Box::new(ObjCType::Function(CallableDesc {
-                                result: Box::new(ObjCType::ObjPtr(ObjPtr {
-                                    kind: ObjPtrKind::SomeInstance(SomeInstanceObjPtr {
-                                        interface: "A".to_string(),
-                                        protocols: vec![],
-                                        type_args: vec![],
-                                    }),
-                                    nullability: Nullability::Unspecified,
-                                })),
-                                params: Some(vec![Param {
-                                    name: Some("returnedFunctionParameter".to_string()),
-                                    objc_type: ObjCType::Num(NumKind::Short),
+                                    params: Some(vec![Param {
+                                        name: Some("innerParam".to_string()),
+                                        objc_type: ObjCType::Num(NumKind::Double),
+                                        attrs: vec![],
+                                    }]),
+                                    is_variadic: false,
                                     attrs: vec![],
-                                }]),
-                                is_variadic: false,
-                                attrs: vec![],
-                            })),
-                            nullability: Nullability::Unspecified,
-                        }),
-                        attrs: vec![],
-                    },
-                ],
-                properties: vec![],
-                origin: None,
-            }),
+                                })),
+                                nullability: None,
+                            }),
+                            attrs: vec![],
+                        },
+                        // - (A *(*)(short returnedFunctionParameter))takingTypedef:(T)typedefParam andFunctionPointersTakingFunctionPointers:(A *(*)(float someFloat, int (*functionPointerParam)(char someChar)))complicatedParam;
+                        ObjCMethod {
+                            name: "takingTypedef:andFunctionPointersTakingFunctionPointers:"
+                                .to_string(),
+                            kind: ObjCMethodKind::Instance,
+                            params: vec![
+                                ObjCParam {
+                                    name: "typedefParam".to_string(),
+                                    objc_type: ObjCType::Typedef(TypedefRef {
+                                        name: "T".to_string(),
+                                        nullability: None,
+                                    }),
+                                    attrs: vec![],
+                                },
+                                ObjCParam {
+                                    name: "complicatedParam".to_string(),
+                                    objc_type: ObjCType::Pointer(Pointer {
+                                        pointee: Box::new(ObjCType::Function(CallableDesc {
+                                            result: Box::new(ObjCType::ObjPtr(ObjPtr {
+                                                kind: ObjPtrKind::SomeInstance(
+                                                    SomeInstanceObjPtr {
+                                                        interface: "A".to_string(),
+                                                        protocols: vec![],
+                                                        type_args: vec![],
+                                                    },
+                                                ),
+                                                nullability: None,
+                                            })),
+                                            params: Some(vec![
+                                                Param {
+                                                    name: Some("someFloat".to_string()),
+                                                    objc_type: ObjCType::Num(NumKind::Float),
+                                                    attrs: vec![],
+                                                },
+                                                Param {
+                                                    name: Some("functionPointerParam".to_string()),
+                                                    objc_type: ObjCType::Pointer(Pointer {
+                                                        pointee: Box::new(ObjCType::Function(
+                                                            CallableDesc {
+                                                                result: Box::new(ObjCType::Num(
+                                                                    NumKind::Int,
+                                                                )),
+                                                                params: Some(vec![Param {
+                                                                    name: Some(
+                                                                        "someChar".to_string(),
+                                                                    ),
+                                                                    objc_type: ObjCType::Num(
+                                                                        NumKind::SChar,
+                                                                    ),
+                                                                    attrs: vec![],
+                                                                }]),
+                                                                is_variadic: false,
+                                                                attrs: vec![],
+                                                            },
+                                                        )),
+                                                        nullability: None,
+                                                    }),
+                                                    attrs: vec![],
+                                                },
+                                            ]),
+                                            is_variadic: false,
+                                            attrs: vec![],
+                                        })),
+                                        nullability: None,
+                                    }),
+                                    attrs: vec![],
+                                },
+                            ],
+                            result: ObjCType::Pointer(Pointer {
+                                pointee: Box::new(ObjCType::Function(CallableDesc {
+                                    result: Box::new(ObjCType::ObjPtr(ObjPtr {
+                                        kind: ObjPtrKind::SomeInstance(SomeInstanceObjPtr {
+                                            interface: "A".to_string(),
+                                            protocols: vec![],
+                                            type_args: vec![],
+                                        }),
+                                        nullability: None,
+                                    })),
+                                    params: Some(vec![Param {
+                                        name: Some("returnedFunctionParameter".to_string()),
+                                        objc_type: ObjCType::Num(NumKind::Short),
+                                        attrs: vec![],
+                                    }]),
+                                    is_variadic: false,
+                                    attrs: vec![],
+                                })),
+                                nullability: None,
+                            }),
+                            attrs: vec![],
+                        },
+                    ],
+                    properties: vec![],
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
         ];
 
-        let parsed_decls = ast_from_str(source).unwrap();
-        assert_eq!(parsed_decls, expected_decls);
+        let parsed_items = ast_from_str(source).unwrap();
+        assert_eq!(parsed_items, expected_items);
     }
 
     #[test]
@@ -2783,108 +3007,130 @@ mod tests {
             @end
         ";
 
-        let expected_decls = vec![
-            Decl::TypedefDecl(TypedefDecl {
-                name: "Class".to_string(),
-                underlying: ObjCType::Pointer(Pointer {
-                    pointee: Box::new(ObjCType::Tag(TagRef {
-                        id: TagId::Named("objc_class".to_string()),
-                        kind: TagKind::Struct,
-                    })),
-                    nullability: Nullability::Unspecified,
-                }),
-                origin: None,
-            }),
-            Decl::RecordDef(RecordDef {
-                id: TagId::Named("objc_object".to_string()),
-                fields: vec![Field {
-                    name: Some("isa".to_string()),
-                    objc_type: ObjCType::ObjPtr(ObjPtr {
-                        kind: ObjPtrKind::Class,
-                        nullability: Nullability::NonNull,
-                    }),
-                }],
-                kind: RecordKind::Struct,
-                origin: None,
-            }),
-            Decl::TypedefDecl(TypedefDecl {
-                name: "id".to_string(),
-                underlying: ObjCType::Pointer(Pointer {
-                    pointee: Box::new(ObjCType::Tag(TagRef {
-                        id: TagId::Named("objc_object".to_string()),
-                        kind: TagKind::Struct,
-                    })),
-                    nullability: Nullability::Unspecified,
-                }),
-                origin: None,
-            }),
-            Decl::TypedefDecl(TypedefDecl {
-                name: "SEL".to_string(),
-                underlying: ObjCType::Pointer(Pointer {
-                    pointee: Box::new(ObjCType::Tag(TagRef {
-                        id: TagId::Named("objc_selector".to_string()),
-                        kind: TagKind::Struct,
-                    })),
-                    nullability: Nullability::Unspecified,
-                }),
-                origin: None,
-            }),
-            Decl::TypedefDecl(TypedefDecl {
-                name: "IMP".to_string(),
-                underlying: ObjCType::Pointer(Pointer {
-                    pointee: Box::new(ObjCType::Function(CallableDesc {
-                        result: Box::new(ObjCType::ObjPtr(ObjPtr {
-                            kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
-                            nullability: Nullability::Nullable,
-                        })),
-                        params: Some(vec![
-                            Param {
-                                name: None,
-                                objc_type: ObjCType::ObjPtr(ObjPtr {
-                                    kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
-                                    nullability: Nullability::NonNull,
-                                }),
-                                attrs: vec![],
-                            },
-                            Param {
-                                name: None,
-                                objc_type: ObjCType::ObjCSel(Nullability::NonNull),
-                                attrs: vec![],
-                            },
-                        ]),
-                        is_variadic: true,
-                        attrs: vec![],
-                    })),
-                    nullability: Nullability::Unspecified,
-                }),
-                origin: None,
-            }),
-            Decl::ProtocolDef(ProtocolDef {
-                name: "P".to_string(),
-                inherited_protocols: vec![],
-                methods: vec![ProtocolMethod {
-                    method: ObjCMethod {
-                        name: "methodForSelector:".to_string(),
-                        kind: ObjCMethodKind::Instance,
-                        params: vec![ObjCParam {
-                            name: "aSelector".to_string(),
-                            objc_type: ObjCType::ObjCSel(Nullability::Unspecified),
+        let expected_items = vec![
+            AttributedItem {
+                item: Item::TypedefDecl(TypedefDecl {
+                    name: "Class".to_string(),
+                    underlying: ObjCType::Pointer(Pointer {
+                        pointee: Box::new(ObjCType::Tag(TagRef {
+                            id: TagId::Named("objc_class".to_string()),
+                            kind: TagKind::Struct,
                             attrs: vec![],
-                        }],
-                        result: ObjCType::Typedef(TypedefRef {
-                            name: "IMP".to_string(),
+                        })),
+                        nullability: None,
+                    }),
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
+            AttributedItem {
+                item: Item::RecordDef(RecordDef {
+                    id: TagId::Named("objc_object".to_string()),
+                    fields: vec![Field {
+                        name: Some("isa".to_string()),
+                        objc_type: ObjCType::ObjPtr(ObjPtr {
+                            kind: ObjPtrKind::Class,
+                            nullability: Some(Nullability::NonNull),
                         }),
-                        attrs: vec![],
-                    },
-                    is_optional: false,
-                }],
-                properties: vec![],
-                origin: None,
-            }),
+                    }],
+                    kind: RecordKind::Struct,
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
+            AttributedItem {
+                item: Item::TypedefDecl(TypedefDecl {
+                    name: "id".to_string(),
+                    underlying: ObjCType::Pointer(Pointer {
+                        pointee: Box::new(ObjCType::Tag(TagRef {
+                            id: TagId::Named("objc_object".to_string()),
+                            kind: TagKind::Struct,
+                            attrs: vec![],
+                        })),
+                        nullability: None,
+                    }),
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
+            AttributedItem {
+                item: Item::TypedefDecl(TypedefDecl {
+                    name: "SEL".to_string(),
+                    underlying: ObjCType::Pointer(Pointer {
+                        pointee: Box::new(ObjCType::Tag(TagRef {
+                            id: TagId::Named("objc_selector".to_string()),
+                            kind: TagKind::Struct,
+                            attrs: vec![],
+                        })),
+                        nullability: None,
+                    }),
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
+            AttributedItem {
+                item: Item::TypedefDecl(TypedefDecl {
+                    name: "IMP".to_string(),
+                    underlying: ObjCType::Pointer(Pointer {
+                        pointee: Box::new(ObjCType::Function(CallableDesc {
+                            result: Box::new(ObjCType::ObjPtr(ObjPtr {
+                                kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
+                                nullability: Some(Nullability::Nullable),
+                            })),
+                            params: Some(vec![
+                                Param {
+                                    name: None,
+                                    objc_type: ObjCType::ObjPtr(ObjPtr {
+                                        kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
+                                        nullability: Some(Nullability::NonNull),
+                                    }),
+                                    attrs: vec![],
+                                },
+                                Param {
+                                    name: None,
+                                    objc_type: ObjCType::ObjCSel(Some(Nullability::NonNull)),
+                                    attrs: vec![],
+                                },
+                            ]),
+                            is_variadic: true,
+                            attrs: vec![],
+                        })),
+                        nullability: None,
+                    }),
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
+            AttributedItem {
+                item: Item::ProtocolDef(ProtocolDef {
+                    name: "P".to_string(),
+                    inherited_protocols: vec![],
+                    methods: vec![ProtocolMethod {
+                        method: ObjCMethod {
+                            name: "methodForSelector:".to_string(),
+                            kind: ObjCMethodKind::Instance,
+                            params: vec![ObjCParam {
+                                name: "aSelector".to_string(),
+                                objc_type: ObjCType::ObjCSel(None),
+                                attrs: vec![],
+                            }],
+                            result: ObjCType::Typedef(TypedefRef {
+                                name: "IMP".to_string(),
+                                nullability: None,
+                            }),
+                            attrs: vec![],
+                        },
+                        is_optional: false,
+                    }],
+                    properties: vec![],
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
         ];
 
-        let parsed_decls = ast_from_str(source).unwrap();
-        assert_eq!(parsed_decls, expected_decls);
+        let parsed_items = ast_from_str(source).unwrap();
+        assert_eq!(parsed_items, expected_items);
     }
 
     #[test]
@@ -2895,30 +3141,33 @@ mod tests {
             extern void NSLog(NSString *format, ...);
         ";
 
-        let expected_decls = vec![Decl::FuncDecl(FuncDecl {
-            name: "NSLog".to_string(),
-            desc: CallableDesc {
-                result: Box::new(ObjCType::Void),
-                params: Some(vec![Param {
-                    name: Some("format".to_string()),
-                    objc_type: ObjCType::ObjPtr(ObjPtr {
-                        kind: ObjPtrKind::SomeInstance(SomeInstanceObjPtr {
-                            interface: "NSString".to_string(),
-                            protocols: vec![],
-                            type_args: vec![],
+        let expected_items = vec![AttributedItem {
+            item: Item::FuncDecl(FuncDecl {
+                name: "NSLog".to_string(),
+                desc: CallableDesc {
+                    result: Box::new(ObjCType::Void),
+                    params: Some(vec![Param {
+                        name: Some("format".to_string()),
+                        objc_type: ObjCType::ObjPtr(ObjPtr {
+                            kind: ObjPtrKind::SomeInstance(SomeInstanceObjPtr {
+                                interface: "NSString".to_string(),
+                                protocols: vec![],
+                                type_args: vec![],
+                            }),
+                            nullability: None,
                         }),
-                        nullability: Nullability::Unspecified,
-                    }),
+                        attrs: vec![],
+                    }]),
+                    is_variadic: true,
                     attrs: vec![],
-                }]),
-                is_variadic: true,
-                attrs: vec![],
-            },
-            origin: None,
-        })];
+                },
+                origin: None,
+            }),
+            attrs: vec![],
+        }];
 
-        let parsed_decls = ast_from_str(source).unwrap();
-        assert_eq!(parsed_decls, expected_decls);
+        let parsed_items = ast_from_str(source).unwrap();
+        assert_eq!(parsed_items, expected_items);
     }
 
     #[test]
@@ -2933,32 +3182,80 @@ mod tests {
             void function_with_noescape_block(void (__attribute__((__noescape__)) ^)(void));
         ";
 
-        let expected_decls = vec![
-            Decl::InterfaceDef(InterfaceDef {
-                name: "I".to_string(),
-                superclass: None,
-                adopted_protocols: vec![],
-                template_params: vec![],
-                methods: vec![
-                    ObjCMethod {
-                        name: "methodWithConsumedParam:".to_string(),
-                        kind: ObjCMethodKind::Instance,
-                        params: vec![ObjCParam {
-                            name: "consumedParam".to_string(),
+        let expected_items = vec![
+            AttributedItem {
+                item: Item::InterfaceDef(InterfaceDef {
+                    name: "I".to_string(),
+                    superclass: None,
+                    adopted_protocols: vec![],
+                    template_params: vec![],
+                    methods: vec![
+                        ObjCMethod {
+                            name: "methodWithConsumedParam:".to_string(),
+                            kind: ObjCMethodKind::Instance,
+                            params: vec![ObjCParam {
+                                name: "consumedParam".to_string(),
+                                objc_type: ObjCType::ObjPtr(ObjPtr {
+                                    kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
+                                    nullability: None,
+                                }),
+                                attrs: vec![Attr::NSConsumed],
+                            }],
+                            result: ObjCType::Void,
+                            attrs: vec![],
+                        },
+                        ObjCMethod {
+                            name: "methodWithNoescapeBlock:".to_string(),
+                            kind: ObjCMethodKind::Instance,
+                            params: vec![ObjCParam {
+                                name: "block".to_string(),
+                                objc_type: ObjCType::ObjPtr(ObjPtr {
+                                    kind: ObjPtrKind::Block(CallableDesc {
+                                        result: Box::new(ObjCType::Void),
+                                        params: Some(vec![]),
+                                        is_variadic: false,
+                                        attrs: vec![],
+                                    }),
+                                    nullability: None,
+                                }),
+                                attrs: vec![Attr::Noescape],
+                            }],
+                            result: ObjCType::Void,
+                            attrs: vec![],
+                        },
+                    ],
+                    properties: vec![],
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
+            AttributedItem {
+                item: Item::FuncDecl(FuncDecl {
+                    name: "function_with_consumed_param".to_string(),
+                    desc: CallableDesc {
+                        result: Box::new(ObjCType::Void),
+                        params: Some(vec![Param {
+                            name: Some("consumedParam".to_string()),
                             objc_type: ObjCType::ObjPtr(ObjPtr {
                                 kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
-                                nullability: Nullability::Unspecified,
+                                nullability: None,
                             }),
-                            attrs: vec![Attr::Consumed],
-                        }],
-                        result: ObjCType::Void,
+                            attrs: vec![Attr::NSConsumed],
+                        }]),
+                        is_variadic: false,
                         attrs: vec![],
                     },
-                    ObjCMethod {
-                        name: "methodWithNoescapeBlock:".to_string(),
-                        kind: ObjCMethodKind::Instance,
-                        params: vec![ObjCParam {
-                            name: "block".to_string(),
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
+            AttributedItem {
+                item: Item::FuncDecl(FuncDecl {
+                    name: "function_with_noescape_block".to_string(),
+                    desc: CallableDesc {
+                        result: Box::new(ObjCType::Void),
+                        params: Some(vec![Param {
+                            name: None,
                             objc_type: ObjCType::ObjPtr(ObjPtr {
                                 kind: ObjPtrKind::Block(CallableDesc {
                                     result: Box::new(ObjCType::Void),
@@ -2966,65 +3263,25 @@ mod tests {
                                     is_variadic: false,
                                     attrs: vec![],
                                 }),
-                                nullability: Nullability::Unspecified,
+                                nullability: None,
                             }),
                             attrs: vec![Attr::Noescape],
-                        }],
-                        result: ObjCType::Void,
+                        }]),
+                        is_variadic: false,
                         attrs: vec![],
                     },
-                ],
-                properties: vec![],
-                origin: None,
-            }),
-            Decl::FuncDecl(FuncDecl {
-                name: "function_with_consumed_param".to_string(),
-                desc: CallableDesc {
-                    result: Box::new(ObjCType::Void),
-                    params: Some(vec![Param {
-                        name: Some("consumedParam".to_string()),
-                        objc_type: ObjCType::ObjPtr(ObjPtr {
-                            kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
-                            nullability: Nullability::Unspecified,
-                        }),
-                        attrs: vec![Attr::Consumed],
-                    }]),
-                    is_variadic: false,
-                    attrs: vec![],
-                },
-                origin: None,
-            }),
-            Decl::FuncDecl(FuncDecl {
-                name: "function_with_noescape_block".to_string(),
-                desc: CallableDesc {
-                    result: Box::new(ObjCType::Void),
-                    params: Some(vec![Param {
-                        name: None,
-                        objc_type: ObjCType::ObjPtr(ObjPtr {
-                            kind: ObjPtrKind::Block(CallableDesc {
-                                result: Box::new(ObjCType::Void),
-                                params: Some(vec![]),
-                                is_variadic: false,
-                                attrs: vec![],
-                            }),
-                            nullability: Nullability::Unspecified,
-                        }),
-                        attrs: vec![Attr::Noescape],
-                    }]),
-                    is_variadic: false,
-                    attrs: vec![],
-                },
-                origin: None,
-            }),
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
         ];
 
-        let parsed_decls = ast_from_str(source).unwrap();
-        assert_eq!(parsed_decls, expected_decls);
+        let parsed_items = ast_from_str(source).unwrap();
+        assert_eq!(parsed_items, expected_items);
     }
 
     #[test]
     fn test_return_attributes() {
-        // NSLog seems to be already known by the compiler so handled a bit differently by it.
         let source = r#"
             @interface I
             - (id)methodWithRetainedReturn __attribute__((__ns_returns_retained__));
@@ -3033,51 +3290,200 @@ mod tests {
             __attribute__((ns_returns_retained)) id function_with_retained_return(void);
         "#;
 
-        let expected_decls = vec![
-            Decl::InterfaceDef(InterfaceDef {
+        let expected_items = vec![
+            AttributedItem {
+                item: Item::InterfaceDef(InterfaceDef {
+                    name: "I".to_string(),
+                    superclass: None,
+                    adopted_protocols: vec![],
+                    template_params: vec![],
+                    methods: vec![
+                        ObjCMethod {
+                            name: "methodWithRetainedReturn".to_string(),
+                            kind: ObjCMethodKind::Instance,
+                            params: vec![],
+                            result: ObjCType::ObjPtr(ObjPtr {
+                                kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
+                                nullability: None,
+                            }),
+                            attrs: vec![Attr::NSReturnsRetained],
+                        },
+                        ObjCMethod {
+                            name: "unavailableMethod".to_string(),
+                            kind: ObjCMethodKind::Instance,
+                            params: vec![],
+                            result: ObjCType::Void,
+                            attrs: vec![Attr::Unavailable],
+                        },
+                    ],
+                    properties: vec![],
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
+            AttributedItem {
+                item: Item::FuncDecl(FuncDecl {
+                    name: "function_with_retained_return".to_string(),
+                    desc: CallableDesc {
+                        result: Box::new(ObjCType::ObjPtr(ObjPtr {
+                            kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
+                            nullability: None,
+                        })),
+                        params: Some(vec![]),
+                        is_variadic: false,
+                        attrs: vec![Attr::NSReturnsRetained],
+                    },
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
+        ];
+
+        let parsed_items = ast_from_str(source).unwrap();
+        assert_eq!(parsed_items, expected_items);
+    }
+
+    #[test]
+    fn test_implicit_attributes() {
+        // From the ARC rules, methods of the alloc, copy, init, mutableCopy, or new method family
+        // (https://clang.llvm.org/docs/AutomaticReferenceCounting.html#method-families)
+        // returns implicitly return a retained object.
+        // clang kindly adds to those an implicit ReturnsRetained attribute.
+        let source = r#"
+            @interface I
+            + (instancetype)alloc;
+            - (instancetype)init;
+            - (instancetype)initWithSomething:(int)something;
+            - (instancetype)initAnything;
+            - (instancetype)initReturningAutoreleased __attribute__((ns_returns_autoreleased));
+            - (instancetype)initReturningNotRetained __attribute__((ns_returns_not_retained));
+            + (instancetype)new;
+            - (id)copy;
+            - (id)mutableCopy;
+            + (instancetype)normalClassMethod;
+            @end
+        "#;
+
+        let expected_items = vec![AttributedItem {
+            item: Item::InterfaceDef(InterfaceDef {
                 name: "I".to_string(),
                 superclass: None,
                 adopted_protocols: vec![],
                 template_params: vec![],
                 methods: vec![
                     ObjCMethod {
-                        name: "methodWithRetainedReturn".to_string(),
+                        name: "alloc".to_string(),
+                        kind: ObjCMethodKind::Class,
+                        params: vec![],
+                        result: ObjCType::ObjPtr(ObjPtr {
+                            kind: ObjPtrKind::Instancetype,
+                            nullability: None,
+                        }),
+                        attrs: vec![Attr::NSReturnsRetained],
+                    },
+                    ObjCMethod {
+                        name: "init".to_string(),
+                        kind: ObjCMethodKind::Instance,
+                        params: vec![],
+                        result: ObjCType::ObjPtr(ObjPtr {
+                            kind: ObjPtrKind::Instancetype,
+                            nullability: None,
+                        }),
+                        attrs: vec![Attr::NSConsumesSelf, Attr::NSReturnsRetained],
+                    },
+                    ObjCMethod {
+                        name: "initWithSomething:".to_string(),
+                        kind: ObjCMethodKind::Instance,
+                        params: vec![ObjCParam {
+                            name: "something".to_string(),
+                            objc_type: ObjCType::Num(NumKind::Int),
+                            attrs: vec![],
+                        }],
+                        result: ObjCType::ObjPtr(ObjPtr {
+                            kind: ObjPtrKind::Instancetype,
+                            nullability: None,
+                        }),
+                        attrs: vec![Attr::NSConsumesSelf, Attr::NSReturnsRetained],
+                    },
+                    ObjCMethod {
+                        name: "initAnything".to_string(),
+                        kind: ObjCMethodKind::Instance,
+                        params: vec![],
+                        result: ObjCType::ObjPtr(ObjPtr {
+                            kind: ObjPtrKind::Instancetype,
+                            nullability: None,
+                        }),
+                        attrs: vec![Attr::NSConsumesSelf, Attr::NSReturnsRetained],
+                    },
+                    ObjCMethod {
+                        name: "initReturningAutoreleased".to_string(),
+                        kind: ObjCMethodKind::Instance,
+                        params: vec![],
+                        result: ObjCType::ObjPtr(ObjPtr {
+                            kind: ObjPtrKind::Instancetype,
+                            nullability: None,
+                        }),
+                        attrs: vec![Attr::NSReturnsAutoreleased, Attr::NSConsumesSelf],
+                    },
+                    ObjCMethod {
+                        name: "initReturningNotRetained".to_string(),
+                        kind: ObjCMethodKind::Instance,
+                        params: vec![],
+                        result: ObjCType::ObjPtr(ObjPtr {
+                            kind: ObjPtrKind::Instancetype,
+                            nullability: None,
+                        }),
+                        attrs: vec![Attr::NSReturnsNotRetained, Attr::NSConsumesSelf],
+                    },
+                    ObjCMethod {
+                        name: "new".to_string(),
+                        kind: ObjCMethodKind::Class,
+                        params: vec![],
+                        result: ObjCType::ObjPtr(ObjPtr {
+                            kind: ObjPtrKind::Instancetype,
+                            nullability: None,
+                        }),
+                        attrs: vec![Attr::NSReturnsRetained],
+                    },
+                    ObjCMethod {
+                        name: "copy".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
                         result: ObjCType::ObjPtr(ObjPtr {
                             kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
-                            nullability: Nullability::Unspecified,
+                            nullability: None,
                         }),
-                        attrs: vec![Attr::ReturnsRetained],
+                        attrs: vec![Attr::NSReturnsRetained],
                     },
                     ObjCMethod {
-                        name: "unavailableMethod".to_string(),
+                        name: "mutableCopy".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
-                        result: ObjCType::Void,
-                        attrs: vec![Attr::Unavailable],
+                        result: ObjCType::ObjPtr(ObjPtr {
+                            kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
+                            nullability: None,
+                        }),
+                        attrs: vec![Attr::NSReturnsRetained],
+                    },
+                    ObjCMethod {
+                        name: "normalClassMethod".to_string(),
+                        kind: ObjCMethodKind::Class,
+                        params: vec![],
+                        result: ObjCType::ObjPtr(ObjPtr {
+                            kind: ObjPtrKind::Instancetype,
+                            nullability: None,
+                        }),
+                        attrs: vec![],
                     },
                 ],
                 properties: vec![],
                 origin: None,
             }),
-            Decl::FuncDecl(FuncDecl {
-                name: "function_with_retained_return".to_string(),
-                desc: CallableDesc {
-                    result: Box::new(ObjCType::ObjPtr(ObjPtr {
-                        kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
-                        nullability: Nullability::Unspecified,
-                    })),
-                    params: Some(vec![]),
-                    is_variadic: false,
-                    attrs: vec![Attr::ReturnsRetained],
-                },
-                origin: None,
-            }),
-        ];
+            attrs: vec![],
+        }];
 
-        let parsed_decls = ast_from_str(source).unwrap();
-        assert_eq!(parsed_decls, expected_decls);
+        let parsed_items = ast_from_str(source).unwrap();
+        assert_eq!(parsed_items, expected_items);
     }
 
     #[test]
@@ -3091,40 +3497,49 @@ mod tests {
             } __attribute__((swift_name("CIDataMatrixCodeDescriptor.ECCVersion")));
         "#;
 
-        let expected_decls = vec![Decl::EnumDef(EnumDef {
-            id: TagId::Named("CIDataMatrixCodeECCVersion".to_string()),
-            underlying: ObjCType::Num(NumKind::Long),
-            values: vec![
-                EnumValue {
-                    name: "CIDataMatrixCodeECCVersion000".to_string(),
-                    value: SignedOrNotInt::Signed(0),
-                    attrs: vec![Attr::SwiftName("v000".to_string())],
-                },
-                EnumValue {
-                    name: "CIDataMatrixCodeECCVersion050".to_string(),
-                    value: SignedOrNotInt::Signed(50),
-                    attrs: vec![Attr::SwiftName("v050".to_string())],
-                },
-                EnumValue {
-                    name: "CIDataMatrixCodeECCVersion080".to_string(),
-                    value: SignedOrNotInt::Signed(80),
-                    attrs: vec![Attr::SwiftName("v080".to_string())],
-                },
-            ],
+        let expected_items = vec![AttributedItem {
+            item: Item::EnumDef(EnumDef {
+                id: TagId::Named("CIDataMatrixCodeECCVersion".to_string()),
+                underlying: ObjCType::Num(NumKind::Long),
+                values: vec![
+                    EnumValue {
+                        name: "CIDataMatrixCodeECCVersion000".to_string(),
+                        value: SignedOrNotInt::Signed(0),
+                        attrs: vec![Attr::SwiftName("v000".to_string())],
+                    },
+                    EnumValue {
+                        name: "CIDataMatrixCodeECCVersion050".to_string(),
+                        value: SignedOrNotInt::Signed(50),
+                        attrs: vec![Attr::SwiftName("v050".to_string())],
+                    },
+                    EnumValue {
+                        name: "CIDataMatrixCodeECCVersion080".to_string(),
+                        value: SignedOrNotInt::Signed(80),
+                        attrs: vec![Attr::SwiftName("v080".to_string())],
+                    },
+                ],
+                origin: None,
+            }),
             attrs: vec![Attr::SwiftName(
                 "CIDataMatrixCodeDescriptor.ECCVersion".to_string(),
             )],
-            origin: None,
-        })];
+        }];
 
-        let parsed_decls = ast_from_str(source).unwrap();
-        assert_eq!(parsed_decls, expected_decls);
+        let parsed_items = ast_from_str(source).unwrap();
+        assert_eq!(parsed_items, expected_items);
     }
 
     #[test]
     fn test_enum_attrs() {
+        // Attributes must work even even they are defined via preprocessor macros.
+        // The way we get some attributes is very brittle.
         let source = r#"
-            typedef enum __attribute__((flag_enum,enum_extensibility(open))) MTLIndirectCommandType : unsigned long MTLIndirectCommandType;
+            #define ATTR_START __attribute__((
+            #define ATTR_END ))
+            #define ATTR_VAL_PART1 flag_enum,enum_extensibility
+            #define ATTR_VAL_PART2 (open)
+            #define ATTRS ATTR_START ATTR_VAL_PART1 ATTR_VAL_PART2 ATTR_END
+            typedef enum ATTRS MTLIndirectCommandType : unsigned long MTLIndirectCommandType;
             enum MTLIndirectCommandType: unsigned long {
                 MTLIndirectCommandTypeDraw = (1 << 0),
                 MTLIndirectCommandTypeDrawIndexed = (1 << 1),
@@ -3133,100 +3548,134 @@ mod tests {
             } __attribute__((availability(macos,introduced=10.14))) __attribute__((availability(ios,introduced=12.0)));
         "#;
 
-        let expected_decls = vec![
-            Decl::TypedefDecl(TypedefDecl {
-                name: "MTLIndirectCommandType".to_string(),
-                underlying: ObjCType::Tag(TagRef {
-                    id: TagId::Named("MTLIndirectCommandType".to_string()),
-                    kind: TagKind::Enum,
+        let expected_items = vec![
+            AttributedItem {
+                item: Item::TypedefDecl(TypedefDecl {
+                    name: "MTLIndirectCommandType".to_string(),
+                    underlying: ObjCType::Tag(TagRef {
+                        id: TagId::Named("MTLIndirectCommandType".to_string()),
+                        kind: TagKind::Enum,
+                        attrs: vec![
+                            Attr::FlagEnum,
+                            Attr::EnumExtensib(EnumExtensib::Open),
+                            Attr::PlatformAvailability(vec![
+                                PlatformAvailability {
+                                    platform: "ios".to_string(),
+                                    introduced: Some(Version::Minor {
+                                        major: 12,
+                                        minor: 0,
+                                    }),
+                                    deprecated: None,
+                                    obsoleted: None,
+                                    unavailable: false,
+                                    message: None,
+                                },
+                                PlatformAvailability {
+                                    platform: "macos".to_string(),
+                                    introduced: Some(Version::Minor {
+                                        major: 10,
+                                        minor: 14,
+                                    }),
+                                    deprecated: None,
+                                    obsoleted: None,
+                                    unavailable: false,
+                                    message: None,
+                                },
+                            ]),
+                        ],
+                    }),
+                    origin: None,
                 }),
-                origin: None,
-            }),
-            Decl::EnumDef(EnumDef {
-                id: TagId::Named("MTLIndirectCommandType".to_string()),
-                underlying: ObjCType::Num(NumKind::ULong),
-                values: vec![
-                    EnumValue {
-                        name: "MTLIndirectCommandTypeDraw".to_string(),
-                        value: SignedOrNotInt::Unsigned(1),
-                        attrs: vec![Attr::PlatformAvailability(vec![
-                            PlatformAvailability {
-                                platform: "ios".to_string(),
-                                introduced: Some(Version::Minor {
-                                    major: 12,
-                                    minor: 0,
-                                }),
+                attrs: vec![],
+            },
+            AttributedItem {
+                item: Item::EnumDef(EnumDef {
+                    id: TagId::Named("MTLIndirectCommandType".to_string()),
+                    underlying: ObjCType::Num(NumKind::ULong),
+                    values: vec![
+                        EnumValue {
+                            name: "MTLIndirectCommandTypeDraw".to_string(),
+                            value: SignedOrNotInt::Unsigned(1),
+                            attrs: vec![Attr::PlatformAvailability(vec![
+                                PlatformAvailability {
+                                    platform: "ios".to_string(),
+                                    introduced: Some(Version::Minor {
+                                        major: 12,
+                                        minor: 0,
+                                    }),
+                                    deprecated: None,
+                                    obsoleted: None,
+                                    unavailable: false,
+                                    message: None,
+                                },
+                                PlatformAvailability {
+                                    platform: "macos".to_string(),
+                                    introduced: Some(Version::Minor {
+                                        major: 10,
+                                        minor: 14,
+                                    }),
+                                    deprecated: None,
+                                    obsoleted: None,
+                                    unavailable: false,
+                                    message: None,
+                                },
+                            ])],
+                        },
+                        EnumValue {
+                            name: "MTLIndirectCommandTypeDrawIndexed".to_string(),
+                            value: SignedOrNotInt::Unsigned(2),
+                            attrs: vec![Attr::PlatformAvailability(vec![
+                                PlatformAvailability {
+                                    platform: "ios".to_string(),
+                                    introduced: Some(Version::Minor {
+                                        major: 12,
+                                        minor: 0,
+                                    }),
+                                    deprecated: None,
+                                    obsoleted: None,
+                                    unavailable: false,
+                                    message: None,
+                                },
+                                PlatformAvailability {
+                                    platform: "macos".to_string(),
+                                    introduced: Some(Version::Minor {
+                                        major: 10,
+                                        minor: 14,
+                                    }),
+                                    deprecated: None,
+                                    obsoleted: None,
+                                    unavailable: false,
+                                    message: None,
+                                },
+                            ])],
+                        },
+                        EnumValue {
+                            name: "MTLIndirectCommandTypeDrawPatches".to_string(),
+                            value: SignedOrNotInt::Unsigned(4),
+                            attrs: vec![Attr::PlatformAvailability(vec![PlatformAvailability {
+                                platform: "tvos".to_string(),
+                                introduced: None,
                                 deprecated: None,
                                 obsoleted: None,
-                                unavailable: false,
+                                unavailable: true,
                                 message: None,
-                            },
-                            PlatformAvailability {
-                                platform: "macos".to_string(),
-                                introduced: Some(Version::Minor {
-                                    major: 10,
-                                    minor: 14,
-                                }),
+                            }])],
+                        },
+                        EnumValue {
+                            name: "MTLIndirectCommandTypeDrawIndexedPatches".to_string(),
+                            value: SignedOrNotInt::Unsigned(8),
+                            attrs: vec![Attr::PlatformAvailability(vec![PlatformAvailability {
+                                platform: "tvos".to_string(),
+                                introduced: None,
                                 deprecated: None,
                                 obsoleted: None,
-                                unavailable: false,
+                                unavailable: true,
                                 message: None,
-                            },
-                        ])],
-                    },
-                    EnumValue {
-                        name: "MTLIndirectCommandTypeDrawIndexed".to_string(),
-                        value: SignedOrNotInt::Unsigned(2),
-                        attrs: vec![Attr::PlatformAvailability(vec![
-                            PlatformAvailability {
-                                platform: "ios".to_string(),
-                                introduced: Some(Version::Minor {
-                                    major: 12,
-                                    minor: 0,
-                                }),
-                                deprecated: None,
-                                obsoleted: None,
-                                unavailable: false,
-                                message: None,
-                            },
-                            PlatformAvailability {
-                                platform: "macos".to_string(),
-                                introduced: Some(Version::Minor {
-                                    major: 10,
-                                    minor: 14,
-                                }),
-                                deprecated: None,
-                                obsoleted: None,
-                                unavailable: false,
-                                message: None,
-                            },
-                        ])],
-                    },
-                    EnumValue {
-                        name: "MTLIndirectCommandTypeDrawPatches".to_string(),
-                        value: SignedOrNotInt::Unsigned(4),
-                        attrs: vec![Attr::PlatformAvailability(vec![PlatformAvailability {
-                            platform: "tvos".to_string(),
-                            introduced: None,
-                            deprecated: None,
-                            obsoleted: None,
-                            unavailable: true,
-                            message: None,
-                        }])],
-                    },
-                    EnumValue {
-                        name: "MTLIndirectCommandTypeDrawIndexedPatches".to_string(),
-                        value: SignedOrNotInt::Unsigned(8),
-                        attrs: vec![Attr::PlatformAvailability(vec![PlatformAvailability {
-                            platform: "tvos".to_string(),
-                            introduced: None,
-                            deprecated: None,
-                            obsoleted: None,
-                            unavailable: true,
-                            message: None,
-                        }])],
-                    },
-                ],
+                            }])],
+                        },
+                    ],
+                    origin: None,
+                }),
                 attrs: vec![
                     Attr::FlagEnum,
                     Attr::EnumExtensib(EnumExtensib::Open),
@@ -3255,11 +3704,69 @@ mod tests {
                         },
                     ]),
                 ],
-                origin: None,
-            }),
+            },
         ];
 
-        let parsed_decls = ast_from_str(source).unwrap();
-        assert_eq!(parsed_decls, expected_decls);
+        let parsed_items = ast_from_str(source).unwrap();
+        assert_eq!(parsed_items, expected_items);
+    }
+
+    #[test]
+    fn test_nsobject_attr() {
+        let source = "
+            typedef const struct __attribute__((objc_bridge(id))) opaqueCFSomething *CFSomethingRef;
+            @interface I
+            @property (nonatomic, readonly, nullable) __attribute__((NSObject)) CFSomethingRef prop;
+            @end        
+        ";
+
+        let expected_items = vec![
+            AttributedItem {
+                item: Item::TypedefDecl(TypedefDecl {
+                    name: "CFSomethingRef".to_string(),
+                    underlying: ObjCType::Pointer(Pointer {
+                        pointee: Box::new(ObjCType::Tag(TagRef {
+                            id: TagId::Named("opaqueCFSomething".to_string()),
+                            kind: TagKind::Struct,
+                            attrs: vec![Attr::ObjCBridge {
+                                ty_name: "id".to_string(),
+                                is_mutable: false,
+                            }],
+                        })),
+                        nullability: None,
+                    }),
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
+            AttributedItem {
+                item: Item::InterfaceDef(InterfaceDef {
+                    name: "I".to_string(),
+                    superclass: None,
+                    adopted_protocols: vec![],
+                    template_params: vec![],
+                    methods: vec![],
+                    properties: vec![Property {
+                        name: "prop".to_string(),
+                        value: ObjCType::Typedef(TypedefRef {
+                            name: "CFSomethingRef".to_string(),
+                            nullability: Some(Nullability::Nullable),
+                        }),
+                        is_atomic: false,
+                        is_writable: false,
+                        is_class: false,
+                        ownership: PropOwnership::Strong,
+                        custom_getter_name: None,
+                        custom_setter_name: None,
+                        attrs: vec![Attr::NSObject],
+                    }],
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
+        ];
+
+        let parsed_items = ast_from_str(source).unwrap();
+        assert_eq!(parsed_items, expected_items);
     }
 }

@@ -40,8 +40,8 @@ struct TypeIndex {
 }
 
 impl TypeIndex {
-    fn from(decls: &[ast::Decl]) -> Self {
-        use ast::{Decl, RecordKind};
+    fn from(items: &[ast::AttributedItem]) -> Self {
+        use ast::{Item, RecordKind};
 
         let mut enums = HashMap::new();
         let mut structs = HashMap::new();
@@ -52,19 +52,19 @@ impl TypeIndex {
         let mut categories = HashMap::new();
         let mut functions = HashMap::new();
 
-        for decl in decls {
-            match decl {
-                Decl::ProtocolDef(def) => {
+        for item in items {
+            match &item.item {
+                Item::ProtocolDef(def) => {
                     protocols.insert(def.name.clone(), def.clone());
                 }
-                Decl::InterfaceDef(def) => {
+                Item::InterfaceDef(def) => {
                     interfaces.insert(def.name.clone(), def.clone());
                 }
-                Decl::CategoryDef(def) => {
+                Item::CategoryDef(def) => {
                     let vec = categories.entry(def.class.clone()).or_insert_with(Vec::new);
                     vec.push(def.clone());
                 }
-                Decl::RecordDef(def) => match def.kind {
+                Item::RecordDef(def) => match def.kind {
                     RecordKind::Union => {
                         unions.insert(def.id.clone(), def.clone());
                     }
@@ -72,13 +72,13 @@ impl TypeIndex {
                         structs.insert(def.id.clone(), def.clone());
                     }
                 },
-                Decl::EnumDef(def) => {
+                Item::EnumDef(def) => {
                     enums.insert(def.id.clone(), def.clone());
                 }
-                Decl::TypedefDecl(decl) => {
+                Item::TypedefDecl(decl) => {
                     typedefs.insert(decl.name.clone(), decl.clone());
                 }
-                Decl::FuncDecl(decl) => {
+                Item::FuncDecl(decl) => {
                     functions.insert(decl.name.clone(), decl.clone());
                 }
             }
@@ -260,7 +260,7 @@ impl OutputHandler {
 
 pub(crate) struct Generator {
     index: TypeIndex,
-    decls: Vec<ast::Decl>,
+    items: Vec<ast::AttributedItem>,
     output_handler: OutputHandler,
 }
 
@@ -291,12 +291,12 @@ fn stable_group_by<T, K: std::hash::Hash + Eq, F: Fn(&T) -> K>(vec: &Vec<T>, f: 
 }
 
 impl Generator {
-    pub(crate) fn new(decls: Vec<ast::Decl>) -> Self {
-        let index = TypeIndex::from(&decls);
+    pub(crate) fn new(items: Vec<ast::AttributedItem>) -> Self {
+        let index = TypeIndex::from(&items);
         let output_handler = OutputHandler::new();
         Generator {
             index,
-            decls,
+            items,
             output_handler,
         }
     }
@@ -465,7 +465,7 @@ impl {base_objc_trait} for {struct_name} {{
         Some(code)
     }
 
-    fn generate_enum(&self, def: &ast::EnumDef) -> Option<String> {
+    fn generate_enum(&self, def: &ast::EnumDef, attrs: &[ast::Attr]) -> Option<String> {
         use ast::TagId;
 
         // TODO: We should only generate code for enums that are used in the generated code.
@@ -480,7 +480,7 @@ impl {base_objc_trait} for {struct_name} {{
             return None;
         }
 
-        let is_flag_enum = def.attrs.contains(&ast::Attr::FlagEnum);
+        let is_flag_enum = attrs.contains(&ast::Attr::FlagEnum);
 
         // Clean-up deprecated and non deprecated names separately, as they can use different naming schemes.
         let mut cleaned_up_names: HashMap<&str, &str> = HashMap::new();
@@ -875,18 +875,18 @@ impl Drop for {untyped_objc_ptr} {{
     }
 
     pub(crate) fn generate(&mut self) {
-        use ast::Decl;
+        use ast::Item;
         use std::io::Write;
 
         self.generate_core_base_code();
 
-        for decl in &self.decls {
-            let gen = match decl {
-                Decl::EnumDef(def) => self.generate_enum(&def).map(|code| (&def.origin, code)),
-                Decl::ProtocolDef(def) => {
+        for item in &self.items {
+            let gen = match &item.item {
+                Item::EnumDef(def) => self.generate_enum(&def, &item.attrs).map(|code| (&def.origin, code)),
+                Item::ProtocolDef(def) => {
                     self.generate_protocol(&def).map(|code| (&def.origin, code))
                 }
-                Decl::InterfaceDef(def) => {
+                Item::InterfaceDef(def) => {
                     self.generate_class(&def).map(|code| (&def.origin, code))
                 }
 
