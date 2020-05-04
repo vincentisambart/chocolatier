@@ -1310,8 +1310,8 @@ pub struct Property {
     pub is_writable: bool,
     pub is_class: bool,
     pub ownership: PropOwnership,
-    pub custom_getter_name: Option<String>,
-    pub custom_setter_name: Option<String>,
+    pub custom_getter_sel: Option<String>,
+    pub custom_setter_sel: Option<String>,
     pub attrs: Vec<Attr>,
 }
 
@@ -1375,8 +1375,8 @@ impl Property {
                 PropOwnership::Strong
             }
         };
-        let custom_getter_name;
-        let custom_setter_name;
+        let custom_getter_sel;
+        let custom_setter_sel;
         if objc_attrs.contains(ObjCAttributes::GETTER)
             || objc_attrs.contains(ObjCAttributes::SETTER)
         {
@@ -1395,7 +1395,7 @@ impl Property {
                 })
                 .collect();
             if objc_attrs.contains(ObjCAttributes::GETTER) {
-                custom_getter_name = Some(
+                custom_getter_sel = Some(
                     methods_at_same_location
                         .iter()
                         .find(|method| method.arguments().unwrap().len() == 0)
@@ -1404,10 +1404,10 @@ impl Property {
                         .unwrap(),
                 );
             } else {
-                custom_getter_name = None;
+                custom_getter_sel = None;
             }
             if objc_attrs.contains(ObjCAttributes::SETTER) {
-                custom_setter_name = Some(
+                custom_setter_sel = Some(
                     methods_at_same_location
                         .iter()
                         .find(|method| method.arguments().unwrap().len() > 0)
@@ -1416,11 +1416,11 @@ impl Property {
                         .unwrap(),
                 );
             } else {
-                custom_setter_name = None;
+                custom_setter_sel = None;
             }
         } else {
-            custom_getter_name = None;
-            custom_setter_name = None;
+            custom_getter_sel = None;
+            custom_setter_sel = None;
         };
 
         let attrs = Attr::from_decl(&cursor);
@@ -1432,8 +1432,8 @@ impl Property {
             is_writable,
             is_class,
             ownership,
-            custom_getter_name,
-            custom_setter_name,
+            custom_getter_sel,
+            custom_setter_sel,
             attrs,
         }
     }
@@ -2422,8 +2422,8 @@ mod tests {
                         is_writable: false,
                         is_class: false,
                         ownership: PropOwnership::Strong,
-                        custom_getter_name: None,
-                        custom_setter_name: None,
+                        custom_getter_sel: None,
+                        custom_setter_sel: None,
                         attrs: vec![],
                     }],
                     origin: None,
@@ -3756,8 +3756,8 @@ mod tests {
                         is_writable: false,
                         is_class: false,
                         ownership: PropOwnership::Strong,
-                        custom_getter_name: None,
-                        custom_setter_name: None,
+                        custom_getter_sel: None,
+                        custom_setter_sel: None,
                         attrs: vec![Attr::NSObject],
                     }],
                     origin: None,
