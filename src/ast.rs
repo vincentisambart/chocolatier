@@ -712,18 +712,18 @@ impl TagRef {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct Param {
-    name: Option<String>,
-    objc_type: ObjCType,
-    attrs: Vec<Attr>,
+pub struct Param {
+    pub name: Option<String>,
+    pub objc_type: ObjCType,
+    pub attrs: Vec<Attr>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CallableDesc {
-    result: Box<ObjCType>,
-    params: Option<Vec<Param>>,
-    is_variadic: bool,
-    attrs: Vec<Attr>,
+    pub result: Box<ObjCType>,
+    pub params: Option<Vec<Param>>,
+    pub is_variadic: bool,
+    pub attrs: Vec<Attr>,
 }
 
 impl CallableDesc {
@@ -822,8 +822,8 @@ impl TypedefRef {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Pointer {
-    pointee: Box<ObjCType>,
-    nullability: Option<Nullability>,
+    pub pointee: Box<ObjCType>,
+    pub nullability: Option<Nullability>,
 }
 
 impl Pointer {
@@ -837,8 +837,8 @@ impl Pointer {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Array {
-    size: Option<usize>,
-    element: Box<ObjCType>,
+    pub size: Option<usize>,
+    pub element: Box<ObjCType>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -1507,10 +1507,10 @@ impl InterfaceDef {
 pub struct CategoryDef {
     pub name: Option<String>,
     pub class: String,
-    adopted_protocols: Vec<String>,
-    methods: Vec<ObjCMethod>,
-    properties: Vec<Property>,
-    origin: Option<Origin>,
+    pub adopted_protocols: Vec<String>,
+    pub methods: Vec<ObjCMethod>,
+    pub properties: Vec<Property>,
+    pub origin: Option<Origin>,
 }
 
 impl CategoryDef {
@@ -1716,8 +1716,8 @@ impl RecordDef {
 #[derive(Clone, Debug, PartialEq)]
 pub struct FuncDecl {
     pub name: String,
-    desc: CallableDesc,
-    origin: Option<Origin>,
+    pub desc: CallableDesc,
+    pub origin: Option<Origin>,
 }
 
 impl FuncDecl {
