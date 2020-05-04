@@ -28,7 +28,7 @@ impl Origin {
 
         if let Some(caps) = FRAMEWORK_PATH_RE.captures(path) {
             let framework = caps.get(1).unwrap().as_str().to_owned();
-            return Some(Origin::Framework(framework));
+            return Some(Self::Framework(framework));
         }
 
         if path.contains("/usr/include/") {
@@ -37,14 +37,14 @@ impl Origin {
             if let Some(caps) = LIBRARY_PATH_RE.captures(path) {
                 let library = caps.get(1).unwrap().as_str();
                 if library == "objc" {
-                    return Some(Origin::ObjCCore);
+                    return Some(Self::ObjCCore);
                 } else if library == "sys" || library == "i386" {
-                    return Some(Origin::System);
+                    return Some(Self::System);
                 } else {
-                    return Some(Origin::Library(library.to_owned()));
+                    return Some(Self::Library(library.to_owned()));
                 }
             } else {
-                return Some(Origin::System);
+                return Some(Self::System);
             }
         }
 
@@ -638,7 +638,7 @@ pub struct Field {
 impl Field {
     fn from_cursor(cursor: &clang::Cursor<'_>, unnamed_tag_ids: &TagIdMap) -> Self {
         assert_eq!(cursor.kind(), CursorKind::FieldDecl);
-        Field {
+        Self {
             name: cursor.spelling(),
             objc_type: ObjCType::from_type(
                 &cursor.type_().unwrap(),
@@ -665,9 +665,9 @@ impl TagId {
         .contains(&decl.kind()));
 
         if let Some(name) = decl.spelling() {
-            TagId::Named(name)
+            Self::Named(name)
         } else {
-            TagId::Unnamed(
+            Self::Unnamed(
                 *unnamed_tag_ids
                     .get(&decl.usr().unwrap())
                     .expect("all unnamed tag should have an id assigned"),
@@ -707,7 +707,7 @@ impl TagRef {
         let id = TagId::from_cursor(&decl, unnamed_tag_ids);
         let attrs = Attr::from_decl(&decl);
 
-        TagRef { id, kind, attrs }
+        Self { id, kind, attrs }
     }
 }
 
@@ -789,7 +789,7 @@ impl CallableDesc {
             ),
         };
 
-        CallableDesc {
+        Self {
             result,
             params,
             is_variadic: clang_type.is_variadic_function(),
@@ -809,7 +809,7 @@ impl TypedefRef {
         assert_eq!(clang_type.kind(), TypeKind::Typedef);
         let name = clang_type.spelling();
         let nullability = clang_type.nullability().and_then(Into::into);
-        TypedefRef { name, nullability }
+        Self { name, nullability }
     }
 
     fn with_nullability(self, nullability: Option<Nullability>) -> Self {
@@ -1191,7 +1191,7 @@ impl Location {
         let line = location.line;
         let column = location.column;
 
-        Location {
+        Self {
             file_kind,
             line,
             column,
@@ -1216,7 +1216,7 @@ impl ObjCParam {
             unnamed_tag_ids,
         );
         let attrs = Attr::from_decl(&decl);
-        ObjCParam {
+        Self {
             name,
             objc_type,
             attrs,
@@ -1261,7 +1261,7 @@ impl ObjCMethod {
 
         let attrs = Attr::from_decl(cursor);
 
-        ObjCMethod {
+        Self {
             name: cursor.spelling().unwrap(),
             kind,
             params,
@@ -1425,7 +1425,7 @@ impl Property {
 
         let attrs = Attr::from_decl(&cursor);
 
-        Property {
+        Self {
             name,
             value,
             is_atomic,
@@ -1491,7 +1491,7 @@ impl InterfaceDef {
             .collect();
         let origin = Origin::from_cursor(cursor);
 
-        InterfaceDef {
+        Self {
             name,
             superclass,
             adopted_protocols,
@@ -1556,7 +1556,7 @@ impl CategoryDef {
 
         let origin = Origin::from_cursor(cursor);
 
-        CategoryDef {
+        Self {
             name,
             class,
             adopted_protocols,
@@ -1628,7 +1628,7 @@ impl ProtocolDef {
 
         let origin = Origin::from_cursor(cursor);
 
-        ProtocolDef {
+        Self {
             name: cursor.spelling().unwrap(),
             inherited_protocols,
             methods,
@@ -1657,7 +1657,7 @@ impl TypedefDecl {
         );
         let origin = Origin::from_cursor(decl);
 
-        TypedefDecl {
+        Self {
             name,
             underlying,
             origin,
@@ -1704,7 +1704,7 @@ impl RecordDef {
 
         let origin = Origin::from_cursor(decl);
 
-        RecordDef {
+        Self {
             id,
             kind,
             fields,
@@ -1730,7 +1730,7 @@ impl FuncDecl {
             CallableDesc::from_type(&clang_type, &mut parm_decl_children(&decl), unnamed_tag_ids);
         let origin = Origin::from_cursor(decl);
 
-        FuncDecl { name, desc, origin }
+        Self { name, desc, origin }
     }
 }
 
@@ -1776,7 +1776,7 @@ impl EnumDef {
             .collect();
         let origin = Origin::from_cursor(decl);
 
-        EnumDef {
+        Self {
             id,
             underlying,
             values,
@@ -1811,7 +1811,7 @@ pub enum ParseError {
 
 impl From<clang::ClangError> for ParseError {
     fn from(err: clang::ClangError) -> Self {
-        ParseError::ClangError(err)
+        Self::ClangError(err)
     }
 }
 
