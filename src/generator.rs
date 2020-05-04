@@ -272,7 +272,7 @@ fn interface_trait_name(class_name: &str) -> String {
     format!("{}Interface", class_name)
 }
 
-fn stable_group_by<T, K: std::hash::Hash + Eq, F: Fn(&T) -> K>(vec: &Vec<T>, f: F) -> Vec<Vec<&T>> {
+fn stable_group_by<T, K: std::hash::Hash + Eq, F: Fn(&T) -> K>(vec: &[T], f: F) -> Vec<Vec<&T>> {
     let mut indices: HashMap<K, usize> = HashMap::new();
     let mut groups: Vec<Vec<&T>> = Vec::new();
 
@@ -566,13 +566,7 @@ impl {struct_name} {{
             .unwrap();
         }
 
-        write!(
-            &mut code,
-            "\
-}}
-"
-        )
-        .unwrap();
+        writeln!(&mut code, "}}").unwrap();
 
         let mut values_for_fmt = Vec::new();
         for num_value in values_per_num_val.keys() {
@@ -882,7 +876,9 @@ impl Drop for {untyped_objc_ptr} {{
 
         for item in &self.items {
             let gen = match &item.item {
-                Item::EnumDef(def) => self.generate_enum(&def, &item.attrs).map(|code| (&def.origin, code)),
+                Item::EnumDef(def) => self
+                    .generate_enum(&def, &item.attrs)
+                    .map(|code| (&def.origin, code)),
                 Item::ProtocolDef(def) => {
                     self.generate_protocol(&def).map(|code| (&def.origin, code))
                 }

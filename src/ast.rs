@@ -1,5 +1,6 @@
 use crate::clang::{self, CursorKind, TypeKind};
-use crate::xcode;
+use crate::xcode::{self, AppleSdk};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 // TODO:
@@ -352,7 +353,7 @@ pub enum Attr {
 
 // Gets the next token, expecting there is one.
 // Ugly but it seems to work – but only because we preprocess the code in advance.
-fn next_token<'a>(token: clang::Token<'a>) -> clang::Token<'a> {
+fn next_token(token: clang::Token<'_>) -> clang::Token<'_> {
     let extent = token.extent();
     let end = extent.end();
     let range = end.range_to(end);
@@ -472,11 +473,11 @@ impl Attr {
                         }
                         "swift_name" => {
                             let name = extract_attr_lit_value(attr_name, &tokens);
-                            Some(Self::SwiftName(name.into()))
+                            Some(Self::SwiftName(name))
                         }
                         "objc_runtime_name" => {
                             let name = extract_attr_lit_value(attr_name, &tokens);
-                            Some(Self::ObjCRuntimeName(name.into()))
+                            Some(Self::ObjCRuntimeName(name))
                         }
                         "enum_extensibility" => {
                             let kind = extract_attr_ident_value(attr_name, &tokens);
@@ -1784,14 +1785,14 @@ type TagIdMap = HashMap<String, u32>;
 /// Prints the full clang AST.
 ///
 /// Should only be used for debugging purpose. Definitions with cycles can end up in a stack overflow.
-pub fn print_full_clang_ast(source: &str) {
+pub fn print_full_clang_ast(sdk: AppleSdk, source: &str) {
     // Preprocess before to get more easily interesting tokens coming from #defines.
-    let source: &str = &xcode::preprocess_objc(source);
+    let source: &str = &xcode::preprocess_objc(source, sdk);
 
     // The documentation says that files specified as unsaved must exist so create a dummy temporary empty file
     let file = tempfile::NamedTempFile::new().unwrap();
     let index = clang::Index::new(false, true);
-    let (args, options) = parser_configuration();
+    let (args, options) = parser_configuration(sdk);
 
     let tu = index
         .parse(
@@ -1804,30 +1805,24 @@ pub fn print_full_clang_ast(source: &str) {
     show_tree(&tu.cursor(), 0);
 }
 
-fn parser_configuration() -> (Vec<String>, clang::TuOptions) {
+fn parser_configuration(sdk: AppleSdk) -> (Vec<Cow<'static, str>>, clang::TuOptions) {
     use clang::TuOptions;
     (
-        vec![
-            "-x".to_string(),
-            "objective-c".to_string(), // The file doesn't have an Objective-C extension so set the language explicitely (for some reason -ObjC doesn't work properly)
-            "-fobjc-arc".to_string(),
-            "-isysroot".to_string(),
-            xcode::sdk_path(xcode::AppleSdk::MacOs),
-        ],
+        xcode::clang_options(sdk),
         TuOptions::SKIP_FUNCTION_BODIES
             | TuOptions::INCLUDE_ATTRIBUTED_TYPES // Needed to get nullability
             | TuOptions::VISIT_IMPLICIT_ATTRIBUTES, // TODO: Check if needed
     )
 }
 
-pub fn ast_from_str(source: &str) -> Result<Vec<AttributedItem>, ParseError> {
+pub fn ast_from_str(sdk: AppleSdk, source: &str) -> Result<Vec<AttributedItem>, ParseError> {
     // Preprocess before to get more easily interesting tokens coming from #defines.
-    let source: &str = &xcode::preprocess_objc(source);
+    let source: &str = &xcode::preprocess_objc(source, sdk);
 
     // The documentation says that files specified as unsaved must exist so create a dummy temporary empty file
     let file = tempfile::NamedTempFile::new().unwrap();
     let index = clang::Index::new(false, true);
-    let (args, options) = parser_configuration();
+    let (args, options) = parser_configuration(sdk);
 
     let tu = index.parse(
         &args,
@@ -2017,7 +2012,7 @@ mod tests {
             attrs: vec![],
         }];
 
-        let parsed_items = ast_from_str(source).unwrap();
+        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -2104,7 +2099,7 @@ mod tests {
             attrs: vec![],
         }];
 
-        let parsed_items = ast_from_str(source).unwrap();
+        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -2144,7 +2139,7 @@ mod tests {
             },
         ];
 
-        let parsed_items = ast_from_str(source).unwrap();
+        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -2194,7 +2189,7 @@ mod tests {
             },
         ];
 
-        let parsed_items = ast_from_str(source).unwrap();
+        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -2266,7 +2261,7 @@ mod tests {
             },
         ];
 
-        let parsed_items = ast_from_str(source).unwrap();
+        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -2364,7 +2359,7 @@ mod tests {
             },
         ];
 
-        let parsed_items = ast_from_str(source).unwrap();
+        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -2427,7 +2422,7 @@ mod tests {
             attrs: vec![],
         }];
 
-        let parsed_items = ast_from_str(source).unwrap();
+        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -2472,7 +2467,7 @@ mod tests {
             },
         ];
 
-        let parsed_items = ast_from_str(source).unwrap();
+        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -2506,7 +2501,7 @@ mod tests {
             attrs: vec![],
         }];
 
-        let parsed_items = ast_from_str(source).unwrap();
+        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -2679,7 +2674,7 @@ mod tests {
             },
         ];
 
-        let parsed_items = ast_from_str(source).unwrap();
+        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -2918,7 +2913,7 @@ mod tests {
             },
         ];
 
-        let parsed_items = ast_from_str(source).unwrap();
+        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -3061,7 +3056,7 @@ mod tests {
             },
         ];
 
-        let parsed_items = ast_from_str(source).unwrap();
+        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -3098,7 +3093,7 @@ mod tests {
             attrs: vec![],
         }];
 
-        let parsed_items = ast_from_str(source).unwrap();
+        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -3208,7 +3203,7 @@ mod tests {
             },
         ];
 
-        let parsed_items = ast_from_str(source).unwrap();
+        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -3271,7 +3266,7 @@ mod tests {
             },
         ];
 
-        let parsed_items = ast_from_str(source).unwrap();
+        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -3414,7 +3409,7 @@ mod tests {
             attrs: vec![],
         }];
 
-        let parsed_items = ast_from_str(source).unwrap();
+        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -3457,7 +3452,7 @@ mod tests {
             )],
         }];
 
-        let parsed_items = ast_from_str(source).unwrap();
+        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -3639,7 +3634,7 @@ mod tests {
             },
         ];
 
-        let parsed_items = ast_from_str(source).unwrap();
+        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -3698,7 +3693,7 @@ mod tests {
             },
         ];
 
-        let parsed_items = ast_from_str(source).unwrap();
+        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 }

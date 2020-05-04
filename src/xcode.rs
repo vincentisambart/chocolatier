@@ -1,4 +1,5 @@
 use once_cell::sync::Lazy;
+use std::borrow::Cow;
 use std::process::Command;
 
 #[derive(Copy, Clone)]
@@ -39,7 +40,11 @@ pub fn libclang_path() -> std::path::PathBuf {
     // Instead of hard-coding it, using `xcodebuild -find-library libclang.dylib` might be better?
     let path = std::path::Path::new(DEVELOPER_DIR.as_str())
         .join("Toolchains/XcodeDefault.xctoolchain/usr/lib/libclang.dylib");
-    assert!(path.exists(), "Could not find libclang at {}", path.to_string_lossy());
+    assert!(
+        path.exists(),
+        "Could not find libclang at {}",
+        path.to_string_lossy()
+    );
     path
 }
 
@@ -52,21 +57,30 @@ pub static DEVELOPER_DIR: Lazy<String> = Lazy::new(|| {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 });
 
-pub fn preprocess_objc(source: &str) -> String {
+pub fn clang_options(sdk: AppleSdk) -> Vec<Cow<'static, str>> {
+    vec![
+        // Our temporary files don't have an Objective-C extension so set the language explicitely
+        // (for some reason -ObjC doesn't seem to work properly)
+        Cow::Borrowed("-x"),
+        Cow::Borrowed("objective-c"),
+        // We want ARC (Automatic Reference Counting) ON.
+        Cow::Borrowed("-fobjc-arc"),
+        Cow::Borrowed("-isysroot"),
+        Cow::Owned(sdk_path(sdk)),
+    ]
+}
+
+pub fn preprocess_objc(source: &str, sdk: AppleSdk) -> String {
     use std::io::Write;
     use std::process::Stdio;
 
+    let clang_opts = clang_options(sdk);
+    // "-E" means only do preprocessing.
+    let mut xcrun_args = vec!["clang", "-E"];
+    xcrun_args.extend(clang_opts.iter().map(|opt| opt.as_ref()));
+    xcrun_args.push("-"); // read from stdin
     let mut child = Command::new("xcrun")
-        .args(&[
-            "clang",
-            "-E",
-            "-x",
-            "objective-c",
-            "-fobjc-arc",
-            "-isysroot",
-            &sdk_path(AppleSdk::MacOs),
-            "-", // read from stdin
-        ])
+        .args(&xcrun_args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

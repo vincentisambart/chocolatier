@@ -46,9 +46,9 @@ impl Index {
         Self::from_ptr(ptr).unwrap()
     }
 
-    pub fn parse(
+    pub fn parse<S: AsRef<str>>(
         &self,
-        args: &[String],
+        args: &[S],
         file_path: &std::path::Path,
         unsaved: &[UnsavedFile],
         options: TuOptions,
@@ -58,7 +58,7 @@ impl Index {
 
         let cstr_args: Vec<CString> = args
             .iter()
-            .map(|arg| CString::new(arg.clone()).unwrap())
+            .map(|arg| CString::new(arg.as_ref()).unwrap())
             .collect();
         let c_args: Vec<*const _> = cstr_args.iter().map(|cstr| cstr.as_ptr()).collect();
 
