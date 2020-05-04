@@ -1,4 +1,5 @@
 use crate::clang::{self, CursorKind, TypeKind};
+use crate::xcode;
 use std::collections::{HashMap, HashSet};
 
 // TODO:
@@ -8,7 +9,6 @@ use std::collections::{HashMap, HashSet};
 // - try getting the best definition of a function (unfortunately libclang's "canonical" seems to just be the first one)
 // - real ObjC type encoding of C blocks
 // - variable decl
-// - force the libclang library path so that we don't have warnings at start and we are sure the use is using the Xcode version.
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Origin {
@@ -56,42 +56,6 @@ impl Origin {
         let path = cursor.location()?.presumed_location().file;
         Self::from_path(&path)
     }
-}
-
-#[derive(Copy, Clone)]
-enum AppleSdk {
-    MacOs,
-    IOs,
-    IOsSimulator,
-    TvOs,
-    TvOsSimulator,
-    WatchOs,
-    WatchOsSimulator,
-}
-
-impl AppleSdk {
-    fn sdk_name(&self) -> &str {
-        match *self {
-            AppleSdk::MacOs => "macosx",
-            AppleSdk::IOs => "iphoneos",
-            AppleSdk::IOsSimulator => "iphonesimulator",
-            AppleSdk::TvOs => "appletvos",
-            AppleSdk::TvOsSimulator => "appletvsimulator",
-            AppleSdk::WatchOs => "watchos",
-            AppleSdk::WatchOsSimulator => "watchsimulator",
-        }
-    }
-}
-
-fn sdk_path(sdk: AppleSdk) -> String {
-    use std::process::Command;
-
-    let output = Command::new("xcrun")
-        .args(&["--sdk", sdk.sdk_name(), "--show-sdk-path"])
-        .output()
-        .expect("xcrun command failed to start");
-    assert!(output.status.success());
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
 fn show_type(desc: &str, clang_type: &clang::Type<'_>, indent_level: usize) {
@@ -677,7 +641,7 @@ impl TagId {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-enum TagKind {
+pub enum TagKind {
     Union,
     Struct,
     Enum,
@@ -685,9 +649,9 @@ enum TagKind {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TagRef {
-    id: TagId,
-    kind: TagKind,
-    attrs: Vec<Attr>,
+    pub id: TagId,
+    pub kind: TagKind,
+    pub attrs: Vec<Attr>,
 }
 
 impl TagRef {
@@ -1817,44 +1781,12 @@ impl From<clang::ClangError> for ParseError {
 
 type TagIdMap = HashMap<String, u32>;
 
-fn preprocess_objc(source: &str) -> String {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-
-    let mut child = Command::new("xcrun")
-        .args(&[
-            "clang",
-            "-E",
-            "-x",
-            "objective-c",
-            "-fobjc-arc",
-            "-isysroot",
-            &sdk_path(AppleSdk::MacOs),
-            "-", // read from stdin
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("clang command failed to start");
-
-    {
-        let stdin = child.stdin.as_mut().expect("Failed to open stdin");
-        stdin
-            .write_all(source.as_bytes())
-            .expect("Failed to write to stdin");
-    }
-
-    let output = child.wait_with_output().expect("Failed to read stdout");
-    assert!(output.status.success());
-    String::from_utf8_lossy(&output.stdout).to_string()
-}
-
 /// Prints the full clang AST.
 ///
 /// Should only be used for debugging purpose. Definitions with cycles can end up in a stack overflow.
 pub fn print_full_clang_ast(source: &str) {
     // Preprocess before to get more easily interesting tokens coming from #defines.
-    let source: &str = &preprocess_objc(source);
+    let source: &str = &xcode::preprocess_objc(source);
 
     // The documentation says that files specified as unsaved must exist so create a dummy temporary empty file
     let file = tempfile::NamedTempFile::new().unwrap();
@@ -1880,7 +1812,7 @@ fn parser_configuration() -> (Vec<String>, clang::TuOptions) {
             "objective-c".to_string(), // The file doesn't have an Objective-C extension so set the language explicitely (for some reason -ObjC doesn't work properly)
             "-fobjc-arc".to_string(),
             "-isysroot".to_string(),
-            sdk_path(AppleSdk::MacOs),
+            xcode::sdk_path(xcode::AppleSdk::MacOs),
         ],
         TuOptions::SKIP_FUNCTION_BODIES
             | TuOptions::INCLUDE_ATTRIBUTED_TYPES // Needed to get nullability
@@ -1890,7 +1822,7 @@ fn parser_configuration() -> (Vec<String>, clang::TuOptions) {
 
 pub fn ast_from_str(source: &str) -> Result<Vec<AttributedItem>, ParseError> {
     // Preprocess before to get more easily interesting tokens coming from #defines.
-    let source: &str = &preprocess_objc(source);
+    let source: &str = &xcode::preprocess_objc(source);
 
     // The documentation says that files specified as unsaved must exist so create a dummy temporary empty file
     let file = tempfile::NamedTempFile::new().unwrap();

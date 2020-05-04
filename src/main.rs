@@ -5,6 +5,7 @@
 mod ast;
 mod clang;
 mod generator;
+mod xcode;
 
 fn main() {
     let source = r#"
@@ -41,8 +42,9 @@ fn main() {
         // struct ll { struct ll *nextl; };
         // struct { float f; union { int i; double d; }; } a;
   "#;
-    // ast::print_full_clang_ast(source);
-    let items = ast::ast_from_str(source).unwrap();
+    let sdk = xcode::AppleSdk::MacOs;
+    // ast::print_full_clang_ast(sdk, source);
+    let items = ast::ast_from_str(sdk, source).unwrap();
     // println!("{:#?}", items);
     let mut generator = generator::Generator::new(items);
     generator.generate();

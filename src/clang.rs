@@ -1,5 +1,6 @@
 // Heavily based on the clang crate, with naming closer to the original libclang.
 
+use crate::xcode;
 use bitflags::bitflags;
 use std::convert::TryInto;
 use std::ffi::{CStr, CString};
@@ -13,6 +14,9 @@ fn ensure_libclang_loaded() {
     use once_cell::sync::Lazy;
     use std::sync::Arc;
     static LIBCLANG: Lazy<Arc<clang_sys::SharedLibrary>> = Lazy::new(|| {
+        // Force clang-sys to use the libclang from the active Xcode.
+        // A libclang built by yourself might not be able to handle code preprocessed by Xcode's clang.
+        std::env::set_var("LIBCLANG_PATH", xcode::libclang_path());
         clang_sys::load().expect("could to find libclang");
         let library = clang_sys::get_library().expect("could not find the library we just loaded");
         println!("loaded libclang from {}", library.path().display());
