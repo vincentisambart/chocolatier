@@ -4,9 +4,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 // TODO:
-// - alignment, packing, sizes
-//  - check size of undeclared struct
-// - const
+// - const -> test needed
 // - real ObjC type encoding of C blocks
 // - variable decl
 
@@ -603,7 +601,7 @@ fn parm_decl_children<'a>(cursor: &clang::Cursor<'a>) -> impl Iterator<Item = cl
 #[derive(Clone, Debug, PartialEq)]
 pub struct Field {
     pub name: Option<String>,
-    pub ty: Type,
+    pub ty: AttributedType,
     pub bit_offset: usize,
 }
 
@@ -611,7 +609,7 @@ impl Field {
     fn from_cursor(cursor: &clang::Cursor<'_>, unnamed_tag_ids: &TagIdMap) -> Self {
         assert_eq!(cursor.kind(), CursorKind::FieldDecl);
         let name = cursor.spelling();
-        let ty = Type::from_clang_ty(
+        let ty = AttributedType::from_clang_ty(
             &cursor.type_().unwrap(),
             &mut parm_decl_children(cursor),
             unnamed_tag_ids,
@@ -690,13 +688,13 @@ impl TagRef {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Param {
     pub name: Option<String>,
-    pub ty: Type,
+    pub ty: AttributedType,
     pub attrs: Vec<Attr>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CallableDesc {
-    pub result: Box<Type>,
+    pub result: Box<AttributedType>,
     pub params: Option<Vec<Param>>,
     pub is_variadic: bool,
     pub attrs: Vec<Attr>,
@@ -726,7 +724,7 @@ impl CallableDesc {
         }
 
         // result must be processed before parameters due to the order the entities are in base_parm_decls.
-        let result = Box::new(Type::from_clang_ty(
+        let result = Box::new(AttributedType::from_clang_ty(
             &clang_ty.result_type().unwrap(),
             base_parm_decls,
             unnamed_tag_ids,
@@ -742,7 +740,7 @@ impl CallableDesc {
                         // Not using the value of argument types, only their count.
                         // The param decl taken from the cursor seems to always have better information.
                         let parm_decl = base_parm_decls.next().unwrap();
-                        let ty = Type::from_clang_ty(
+                        let ty = AttributedType::from_clang_ty(
                             &parm_decl.type_().unwrap(),
                             &mut parm_decl_children(&parm_decl),
                             unnamed_tag_ids,
@@ -795,7 +793,7 @@ impl TypedefRef {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Pointer {
-    pub pointee: Box<Type>,
+    pub pointee: Box<AttributedType>,
     pub nullability: Option<Nullability>,
 }
 
@@ -811,7 +809,7 @@ impl Pointer {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Array {
     pub size: Option<usize>,
-    pub element: Box<Type>,
+    pub element: Box<AttributedType>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -954,7 +952,7 @@ impl Type {
             TypeKind::Pointer => {
                 let pointee_type = clang_ty.pointee_type().unwrap();
                 Self::Pointer(Pointer {
-                    pointee: Box::new(Self::from_clang_ty(
+                    pointee: Box::new(AttributedType::from_clang_ty(
                         &pointee_type,
                         base_parm_decls,
                         unnamed_tag_ids,
@@ -1093,7 +1091,7 @@ impl Type {
             ),
             TypeKind::ConstantArray => Self::Array(Array {
                 size: Some(clang_ty.num_elements().unwrap()),
-                element: Box::new(Self::from_clang_ty(
+                element: Box::new(AttributedType::from_clang_ty(
                     &clang_ty.element_type().unwrap(),
                     base_parm_decls,
                     unnamed_tag_ids,
@@ -1101,7 +1099,7 @@ impl Type {
             }),
             TypeKind::IncompleteArray => Self::Array(Array {
                 size: None,
-                element: Box::new(Self::from_clang_ty(
+                element: Box::new(AttributedType::from_clang_ty(
                     &clang_ty.element_type().unwrap(),
                     base_parm_decls,
                     unnamed_tag_ids,
@@ -1121,6 +1119,34 @@ impl Type {
             TypeKind::Complex => Self::Unsupported(Unsupported::Complex),
             TypeKind::ExtVector => Self::Unsupported(Unsupported::ExtVector),
             unknown_kind => panic!("Unhandled type kind {:?}: {:?}", unknown_kind, clang_ty),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AttributedType {
+    pub ty: Type,
+    pub is_const_qualified: bool,
+    // An undeclared struct, or void, won't have any alignment or size.
+    pub alignment: Option<usize>,
+    pub size: Option<usize>,
+}
+
+impl AttributedType {
+    fn from_clang_ty<'a>(
+        clang_ty: &clang::Type<'_>,
+        base_parm_decls: &mut impl Iterator<Item = clang::Cursor<'a>>,
+        unnamed_tag_ids: &TagIdMap,
+    ) -> Self {
+        let ty = Type::from_clang_ty(clang_ty, base_parm_decls, unnamed_tag_ids);
+        let is_const_qualified = clang_ty.is_const_qualified();
+        let alignment = clang_ty.align_of();
+        let size = clang_ty.size_of();
+        Self {
+            ty,
+            is_const_qualified,
+            alignment,
+            size,
         }
     }
 }
@@ -1179,7 +1205,7 @@ impl Location {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObjCParam {
     pub name: String,
-    pub ty: Type,
+    pub ty: AttributedType,
     pub attrs: Vec<Attr>,
 }
 
@@ -1187,7 +1213,7 @@ impl ObjCParam {
     fn from_cursor(decl: &clang::Cursor<'_>, unnamed_tag_ids: &TagIdMap) -> Self {
         assert_eq!(decl.kind(), CursorKind::ParmDecl);
         let name = decl.spelling().unwrap();
-        let ty = Type::from_clang_ty(
+        let ty = AttributedType::from_clang_ty(
             &decl.type_().unwrap(),
             &mut parm_decl_children(decl),
             unnamed_tag_ids,
@@ -1208,7 +1234,7 @@ pub struct ObjCMethod {
     pub name: String,
     pub kind: ObjCMethodKind,
     pub params: Vec<ObjCParam>,
-    pub result: Type,
+    pub result: AttributedType,
     pub attrs: Vec<Attr>,
     pub type_encoding: String,
 }
@@ -1227,7 +1253,7 @@ impl ObjCMethod {
             .map(|arg| ObjCParam::from_cursor(&arg, unnamed_tag_ids))
             .collect();
 
-        let result = Type::from_clang_ty(
+        let result = AttributedType::from_clang_ty(
             &cursor.result_type().unwrap(),
             &mut parm_decl_children(cursor),
             unnamed_tag_ids,
@@ -1282,7 +1308,7 @@ pub enum PropOwnership {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Property {
     pub name: String,
-    pub value: Type,
+    pub value: AttributedType,
     pub is_atomic: bool,
     pub is_writable: bool,
     pub is_class: bool,
@@ -1297,7 +1323,7 @@ impl Property {
         assert_eq!(cursor.kind(), CursorKind::ObjCPropertyDecl);
 
         let name = cursor.spelling().unwrap();
-        let value = Type::from_clang_ty(
+        let value = AttributedType::from_clang_ty(
             &cursor.type_().unwrap(),
             &mut parm_decl_children(&cursor),
             unnamed_tag_ids,
@@ -1618,7 +1644,7 @@ impl ProtocolDef {
 #[derive(Clone, Debug, PartialEq)]
 pub struct TypedefDecl {
     pub name: String,
-    pub underlying: Type,
+    pub underlying: AttributedType,
     pub origin: Option<Origin>,
 }
 
@@ -1627,7 +1653,7 @@ impl TypedefDecl {
         assert_eq!(decl.kind(), CursorKind::TypedefDecl);
 
         let name = decl.spelling().unwrap();
-        let underlying = Type::from_clang_ty(
+        let underlying = AttributedType::from_clang_ty(
             &decl.typedef_decl_underlying_type().unwrap(),
             &mut parm_decl_children(&decl),
             unnamed_tag_ids,
@@ -2018,7 +2044,12 @@ mod tests {
         let expected_items = vec![AttributedItem {
             item: Item::TypedefDecl(TypedefDecl {
                 name: "I".to_string(),
-                underlying: Type::Num(NumKind::Int),
+                underlying: AttributedType {
+                    ty: Type::Num(NumKind::Int),
+                    is_const_qualified: false,
+                    alignment: Some(4),
+                    size: Some(4),
+                },
                 origin: Some(Origin::Framework("Foundation".to_string())),
             }),
             attrs: vec![],
@@ -2052,15 +2083,25 @@ mod tests {
                         kind: ObjCMethodKind::Instance,
                         params: vec![ObjCParam {
                             name: "x".to_string(),
-                            ty: Type::ObjPtr(ObjPtr {
-                                kind: ObjPtrKind::Id(IdObjPtr {
-                                    protocols: vec!["P1".to_string(), "P2".to_string()],
+                            ty: AttributedType {
+                                ty: Type::ObjPtr(ObjPtr {
+                                    kind: ObjPtrKind::Id(IdObjPtr {
+                                        protocols: vec!["P1".to_string(), "P2".to_string()],
+                                    }),
+                                    nullability: None,
                                 }),
-                                nullability: None,
-                            }),
+                                is_const_qualified: false,
+                                alignment: Some(8),
+                                size: Some(8),
+                            },
                             attrs: vec![],
                         }],
-                        result: Type::Void,
+                        result: AttributedType {
+                            ty: Type::Void,
+                            is_const_qualified: false,
+                            alignment: None,
+                            size: None,
+                        },
                         attrs: vec![],
                         type_encoding: "v24@0:8@16".to_string(),
                     },
@@ -2069,17 +2110,27 @@ mod tests {
                         kind: ObjCMethodKind::Class,
                         params: vec![ObjCParam {
                             name: "y".to_string(),
-                            ty: Type::ObjPtr(ObjPtr {
-                                kind: ObjPtrKind::SomeInstance(SomeInstanceObjPtr {
-                                    interface: "B".to_string(),
-                                    protocols: vec!["P2".to_string()],
-                                    type_args: vec![],
+                            ty: AttributedType {
+                                ty: Type::ObjPtr(ObjPtr {
+                                    kind: ObjPtrKind::SomeInstance(SomeInstanceObjPtr {
+                                        interface: "B".to_string(),
+                                        protocols: vec!["P2".to_string()],
+                                        type_args: vec![],
+                                    }),
+                                    nullability: Some(Nullability::NonNull),
                                 }),
-                                nullability: Some(Nullability::NonNull),
-                            }),
+                                is_const_qualified: false,
+                                alignment: Some(8),
+                                size: Some(8),
+                            },
                             attrs: vec![],
                         }],
-                        result: Type::Void,
+                        result: AttributedType {
+                            ty: Type::Void,
+                            is_const_qualified: false,
+                            alignment: None,
+                            size: None,
+                        },
                         attrs: vec![],
                         type_encoding: "v24@0:8@16".to_string(),
                     },
@@ -2088,22 +2139,32 @@ mod tests {
                         kind: ObjCMethodKind::Instance,
                         params: vec![ObjCParam {
                             name: "z".to_string(),
+                            ty: AttributedType {
+                                ty: Type::ObjPtr(ObjPtr {
+                                    kind: ObjPtrKind::SomeInstance(SomeInstanceObjPtr {
+                                        interface: "B".to_string(),
+                                        protocols: vec!["P2".to_string()],
+                                        type_args: vec![],
+                                    }),
+                                    nullability: None,
+                                }),
+                                is_const_qualified: false,
+                                alignment: Some(8),
+                                size: Some(8),
+                            },
+                            attrs: vec![],
+                        }],
+                        result: AttributedType {
                             ty: Type::ObjPtr(ObjPtr {
-                                kind: ObjPtrKind::SomeInstance(SomeInstanceObjPtr {
-                                    interface: "B".to_string(),
-                                    protocols: vec!["P2".to_string()],
-                                    type_args: vec![],
+                                kind: ObjPtrKind::Id(IdObjPtr {
+                                    protocols: vec!["P1".to_string(), "P2".to_string()],
                                 }),
                                 nullability: None,
                             }),
-                            attrs: vec![],
-                        }],
-                        result: Type::ObjPtr(ObjPtr {
-                            kind: ObjPtrKind::Id(IdObjPtr {
-                                protocols: vec!["P1".to_string(), "P2".to_string()],
-                            }),
-                            nullability: None,
-                        }),
+                            is_const_qualified: false,
+                            alignment: Some(8),
+                            size: Some(8),
+                        },
                         attrs: vec![],
                         type_encoding: "@24@0:8@16".to_string(),
                     },
@@ -2191,10 +2252,15 @@ mod tests {
                         name: "x".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
-                        result: Type::ObjPtr(ObjPtr {
-                            kind: ObjPtrKind::TypeParam("X".to_string()),
-                            nullability: Some(Nullability::NonNull),
-                        }),
+                        result: AttributedType {
+                            ty: Type::ObjPtr(ObjPtr {
+                                kind: ObjPtrKind::TypeParam("X".to_string()),
+                                nullability: Some(Nullability::NonNull),
+                            }),
+                            is_const_qualified: false,
+                            alignment: Some(8),
+                            size: Some(8),
+                        },
                         attrs: vec![],
                         type_encoding: "@16@0:8".to_string(),
                     }],
@@ -2244,7 +2310,12 @@ mod tests {
                                 name: "x".to_string(),
                                 kind: ObjCMethodKind::Instance,
                                 params: vec![],
-                                result: Type::Void,
+                                result: AttributedType {
+                                    ty: Type::Void,
+                                    is_const_qualified: false,
+                                    alignment: None,
+                                    size: None,
+                                },
                                 attrs: vec![],
                                 type_encoding: "v16@0:8".to_string(),
                             },
@@ -2255,7 +2326,12 @@ mod tests {
                                 name: "y".to_string(),
                                 kind: ObjCMethodKind::Class,
                                 params: vec![],
-                                result: Type::Void,
+                                result: AttributedType {
+                                    ty: Type::Void,
+                                    is_const_qualified: false,
+                                    alignment: None,
+                                    size: None,
+                                },
                                 attrs: vec![],
                                 type_encoding: "v16@0:8".to_string(),
                             },
@@ -2266,7 +2342,12 @@ mod tests {
                                 name: "z".to_string(),
                                 kind: ObjCMethodKind::Instance,
                                 params: vec![],
-                                result: Type::Num(NumKind::Int),
+                                result: AttributedType {
+                                    ty: Type::Num(NumKind::Int),
+                                    is_const_qualified: false,
+                                    alignment: Some(4),
+                                    size: Some(4),
+                                },
                                 attrs: vec![],
                                 type_encoding: "i16@0:8".to_string(),
                             },
@@ -2324,7 +2405,12 @@ mod tests {
                         name: "foo".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
-                        result: Type::Void,
+                        result: AttributedType {
+                            ty: Type::Void,
+                            is_const_qualified: false,
+                            alignment: None,
+                            size: None,
+                        },
                         attrs: vec![],
                         type_encoding: "v16@0:8".to_string(),
                     }],
@@ -2342,7 +2428,12 @@ mod tests {
                         name: "firstUnnamedCategoryMethod".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
-                        result: Type::Void,
+                        result: AttributedType {
+                            ty: Type::Void,
+                            is_const_qualified: false,
+                            alignment: None,
+                            size: None,
+                        },
                         attrs: vec![],
                         type_encoding: "v16@0:8".to_string(),
                     }],
@@ -2360,13 +2451,23 @@ mod tests {
                         name: "secondUnnamedCategoryMethod".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
-                        result: Type::Void,
+                        result: AttributedType {
+                            ty: Type::Void,
+                            is_const_qualified: false,
+                            alignment: None,
+                            size: None,
+                        },
                         attrs: vec![],
                         type_encoding: "v16@0:8".to_string(),
                     }],
                     properties: vec![Property {
                         name: "propertyOnUnnamedCategory".to_string(),
-                        value: Type::Num(NumKind::Int),
+                        value: AttributedType {
+                            ty: Type::Num(NumKind::Int),
+                            is_const_qualified: false,
+                            alignment: Some(4),
+                            size: Some(4),
+                        },
                         is_atomic: true,
                         is_writable: false,
                         is_class: false,
@@ -2407,10 +2508,15 @@ mod tests {
                         name: "x".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
-                        result: Type::ObjPtr(ObjPtr {
-                            kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
-                            nullability: None,
-                        }),
+                        result: AttributedType {
+                            ty: Type::ObjPtr(ObjPtr {
+                                kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
+                                nullability: None,
+                            }),
+                            is_const_qualified: false,
+                            alignment: Some(8),
+                            size: Some(8),
+                        },
                         attrs: vec![],
                         type_encoding: "@16@0:8".to_string(),
                     },
@@ -2418,12 +2524,17 @@ mod tests {
                         name: "y".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
-                        result: Type::ObjPtr(ObjPtr {
-                            kind: ObjPtrKind::Id(IdObjPtr {
-                                protocols: vec!["P".to_string()],
+                        result: AttributedType {
+                            ty: Type::ObjPtr(ObjPtr {
+                                kind: ObjPtrKind::Id(IdObjPtr {
+                                    protocols: vec!["P".to_string()],
+                                }),
+                                nullability: None,
                             }),
-                            nullability: None,
-                        }),
+                            is_const_qualified: false,
+                            alignment: Some(8),
+                            size: Some(8),
+                        },
                         attrs: vec![],
                         type_encoding: "@16@0:8".to_string(),
                     },
@@ -2431,12 +2542,17 @@ mod tests {
                         name: "z".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
-                        result: Type::ObjPtr(ObjPtr {
-                            kind: ObjPtrKind::Id(IdObjPtr {
-                                protocols: vec!["P".to_string()],
+                        result: AttributedType {
+                            ty: Type::ObjPtr(ObjPtr {
+                                kind: ObjPtrKind::Id(IdObjPtr {
+                                    protocols: vec!["P".to_string()],
+                                }),
+                                nullability: Some(Nullability::NonNull),
                             }),
-                            nullability: Some(Nullability::NonNull),
-                        }),
+                            is_const_qualified: false,
+                            alignment: Some(8),
+                            size: Some(8),
+                        },
                         attrs: vec![],
                         type_encoding: "@16@0:8".to_string(),
                     },
@@ -2464,7 +2580,12 @@ mod tests {
             AttributedItem {
                 item: Item::TypedefDecl(TypedefDecl {
                     name: "I".to_string(),
-                    underlying: Type::Num(NumKind::Int),
+                    underlying: AttributedType {
+                        ty: Type::Num(NumKind::Int),
+                        is_const_qualified: false,
+                        alignment: Some(4),
+                        size: Some(4),
+                    },
                     origin: None,
                 }),
                 attrs: vec![],
@@ -2479,10 +2600,15 @@ mod tests {
                         name: "foo".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
-                        result: Type::Typedef(TypedefRef {
-                            name: "I".to_string(),
-                            nullability: None,
-                        }),
+                        result: AttributedType {
+                            ty: Type::Typedef(TypedefRef {
+                                name: "I".to_string(),
+                                nullability: None,
+                            }),
+                            is_const_qualified: false,
+                            alignment: Some(4),
+                            size: Some(4),
+                        },
                         attrs: vec![],
                         type_encoding: "i16@0:8".to_string(),
                     }],
@@ -2515,10 +2641,15 @@ mod tests {
                     name: "foo".to_string(),
                     kind: ObjCMethodKind::Instance,
                     params: vec![],
-                    result: Type::ObjPtr(ObjPtr {
-                        kind: ObjPtrKind::Instancetype,
-                        nullability: Some(Nullability::NonNull),
-                    }),
+                    result: AttributedType {
+                        ty: Type::ObjPtr(ObjPtr {
+                            kind: ObjPtrKind::Instancetype,
+                            nullability: Some(Nullability::NonNull),
+                        }),
+                        is_const_qualified: false,
+                        alignment: Some(8),
+                        size: Some(8),
+                    },
                     attrs: vec![],
                     type_encoding: "@16@0:8".to_string(),
                 }],
@@ -2552,7 +2683,12 @@ mod tests {
                     id: TagId::Named("S".to_string()),
                     fields: vec![Field {
                         name: Some("x".to_string()),
-                        ty: Type::Num(NumKind::Int),
+                        ty: AttributedType {
+                            ty: Type::Num(NumKind::Int),
+                            is_const_qualified: false,
+                            alignment: Some(4),
+                            size: Some(4),
+                        },
                         bit_offset: 0,
                     }],
                     kind: RecordKind::Struct,
@@ -2563,11 +2699,16 @@ mod tests {
             AttributedItem {
                 item: Item::TypedefDecl(TypedefDecl {
                     name: "T".to_string(),
-                    underlying: Type::Tag(TagRef {
-                        id: TagId::Named("S".to_string()),
-                        kind: TagKind::Struct,
-                        attrs: vec![],
-                    }),
+                    underlying: AttributedType {
+                        ty: Type::Tag(TagRef {
+                            id: TagId::Named("S".to_string()),
+                            kind: TagKind::Struct,
+                            attrs: vec![],
+                        }),
+                        is_const_qualified: false,
+                        alignment: Some(4),
+                        size: Some(4),
+                    },
                     origin: None,
                 }),
                 attrs: vec![],
@@ -2583,11 +2724,16 @@ mod tests {
                             name: "standardStruct".to_string(),
                             kind: ObjCMethodKind::Instance,
                             params: vec![],
-                            result: Type::Tag(TagRef {
-                                id: TagId::Named("S".to_string()),
-                                kind: TagKind::Struct,
-                                attrs: vec![],
-                            }),
+                            result: AttributedType {
+                                ty: Type::Tag(TagRef {
+                                    id: TagId::Named("S".to_string()),
+                                    kind: TagKind::Struct,
+                                    attrs: vec![],
+                                }),
+                                is_const_qualified: false,
+                                alignment: Some(4),
+                                size: Some(4),
+                            },
                             attrs: vec![],
                             type_encoding: "{S=i}16@0:8".to_string(),
                         },
@@ -2595,11 +2741,16 @@ mod tests {
                             name: "inlineUnnamedStruct".to_string(),
                             kind: ObjCMethodKind::Instance,
                             params: vec![],
-                            result: Type::Tag(TagRef {
-                                id: TagId::Unnamed(1),
-                                kind: TagKind::Struct,
-                                attrs: vec![],
-                            }),
+                            result: AttributedType {
+                                ty: Type::Tag(TagRef {
+                                    id: TagId::Unnamed(1),
+                                    kind: TagKind::Struct,
+                                    attrs: vec![],
+                                }),
+                                is_const_qualified: false,
+                                alignment: Some(8),
+                                size: Some(16),
+                            },
                             attrs: vec![],
                             type_encoding: "{?=f(?=id)}16@0:8".to_string(),
                         },
@@ -2607,13 +2758,23 @@ mod tests {
                             name: "pointerToStructTypedef".to_string(),
                             kind: ObjCMethodKind::Instance,
                             params: vec![],
-                            result: Type::Pointer(Pointer {
-                                pointee: Box::new(Type::Typedef(TypedefRef {
-                                    name: "T".to_string(),
+                            result: AttributedType {
+                                ty: Type::Pointer(Pointer {
+                                    pointee: Box::new(AttributedType {
+                                        ty: Type::Typedef(TypedefRef {
+                                            name: "T".to_string(),
+                                            nullability: None,
+                                        }),
+                                        is_const_qualified: false,
+                                        alignment: Some(4),
+                                        size: Some(4),
+                                    }),
                                     nullability: None,
-                                })),
-                                nullability: None,
-                            }),
+                                }),
+                                is_const_qualified: false,
+                                alignment: Some(8),
+                                size: Some(8),
+                            },
                             attrs: vec![],
                             type_encoding: "^{S=i}16@0:8".to_string(),
                         },
@@ -2621,14 +2782,24 @@ mod tests {
                             name: "pointerToUndeclaredStruct".to_string(),
                             kind: ObjCMethodKind::Instance,
                             params: vec![],
-                            result: Type::Pointer(Pointer {
-                                pointee: Box::new(Type::Tag(TagRef {
-                                    id: TagId::Named("Undeclared".to_string()),
-                                    kind: TagKind::Struct,
-                                    attrs: vec![],
-                                })),
-                                nullability: None,
-                            }),
+                            result: AttributedType {
+                                ty: Type::Pointer(Pointer {
+                                    pointee: Box::new(AttributedType {
+                                        ty: Type::Tag(TagRef {
+                                            id: TagId::Named("Undeclared".to_string()),
+                                            kind: TagKind::Struct,
+                                            attrs: vec![],
+                                        }),
+                                        is_const_qualified: false,
+                                        alignment: None,
+                                        size: None,
+                                    }),
+                                    nullability: None,
+                                }),
+                                is_const_qualified: false,
+                                alignment: Some(8),
+                                size: Some(8),
+                            },
                             attrs: vec![],
                             type_encoding: "^{Undeclared=}16@0:8".to_string(),
                         },
@@ -2636,14 +2807,24 @@ mod tests {
                             name: "pointerToStructDeclaredAfterwards".to_string(),
                             kind: ObjCMethodKind::Instance,
                             params: vec![],
-                            result: Type::Pointer(Pointer {
-                                pointee: Box::new(Type::Tag(TagRef {
-                                    id: TagId::Named("DeclaredAfterwards".to_string()),
-                                    kind: TagKind::Struct,
-                                    attrs: vec![],
-                                })),
-                                nullability: None,
-                            }),
+                            result: AttributedType {
+                                ty: Type::Pointer(Pointer {
+                                    pointee: Box::new(AttributedType {
+                                        ty: Type::Tag(TagRef {
+                                            id: TagId::Named("DeclaredAfterwards".to_string()),
+                                            kind: TagKind::Struct,
+                                            attrs: vec![],
+                                        }),
+                                        is_const_qualified: false,
+                                        alignment: Some(1),
+                                        size: Some(1),
+                                    }),
+                                    nullability: None,
+                                }),
+                                is_const_qualified: false,
+                                alignment: Some(8),
+                                size: Some(8),
+                            },
                             attrs: vec![],
                             type_encoding: "^{DeclaredAfterwards=c}16@0:8".to_string(),
                         },
@@ -2660,16 +2841,26 @@ mod tests {
                     fields: vec![
                         Field {
                             name: Some("f".to_string()),
-                            ty: Type::Num(NumKind::Float),
+                            ty: AttributedType {
+                                ty: Type::Num(NumKind::Float),
+                                is_const_qualified: false,
+                                alignment: Some(4),
+                                size: Some(4),
+                            },
                             bit_offset: 0,
                         },
                         Field {
                             name: None,
-                            ty: Type::Tag(TagRef {
-                                id: TagId::Unnamed(2),
-                                kind: TagKind::Union,
-                                attrs: vec![],
-                            }),
+                            ty: AttributedType {
+                                ty: Type::Tag(TagRef {
+                                    id: TagId::Unnamed(2),
+                                    kind: TagKind::Union,
+                                    attrs: vec![],
+                                }),
+                                is_const_qualified: false,
+                                alignment: Some(8),
+                                size: Some(8),
+                            },
                             bit_offset: 64,
                         },
                     ],
@@ -2684,12 +2875,22 @@ mod tests {
                     fields: vec![
                         Field {
                             name: Some("i".to_string()),
-                            ty: Type::Num(NumKind::Int),
+                            ty: AttributedType {
+                                ty: Type::Num(NumKind::Int),
+                                is_const_qualified: false,
+                                alignment: Some(4),
+                                size: Some(4),
+                            },
                             bit_offset: 0,
                         },
                         Field {
                             name: Some("d".to_string()),
-                            ty: Type::Num(NumKind::Double),
+                            ty: AttributedType {
+                                ty: Type::Num(NumKind::Double),
+                                is_const_qualified: false,
+                                alignment: Some(8),
+                                size: Some(8),
+                            },
                             bit_offset: 0,
                         },
                     ],
@@ -2702,7 +2903,12 @@ mod tests {
                     id: TagId::Named("DeclaredAfterwards".to_string()),
                     fields: vec![Field {
                         name: Some("c".to_string()),
-                        ty: Type::Num(NumKind::SChar),
+                        ty: AttributedType {
+                            ty: Type::Num(NumKind::SChar),
+                            is_const_qualified: false,
+                            alignment: Some(1),
+                            size: Some(1),
+                        },
                         bit_offset: 0,
                     }],
                     kind: RecordKind::Struct,
@@ -2730,23 +2936,129 @@ mod tests {
             @end
         ";
 
+        // Moved it out of expected_items because in its original place,
+        // rustfmt will refuse formatting due to lines too long.
+        let complicated_param = ObjCParam {
+            name: "complicatedParam".to_string(),
+            ty: AttributedType {
+                ty: Type::Pointer(Pointer {
+                    pointee: Box::new(AttributedType {
+                        ty: Type::Function(CallableDesc {
+                            result: Box::new(AttributedType {
+                                ty: Type::ObjPtr(ObjPtr {
+                                    kind: ObjPtrKind::SomeInstance(SomeInstanceObjPtr {
+                                        interface: "A".to_string(),
+                                        protocols: vec![],
+                                        type_args: vec![],
+                                    }),
+                                    nullability: None,
+                                }),
+                                is_const_qualified: false,
+                                alignment: Some(8),
+                                size: Some(8),
+                            }),
+                            params: Some(vec![
+                                Param {
+                                    name: Some("someFloat".to_string()),
+                                    ty: AttributedType {
+                                        ty: Type::Num(NumKind::Float),
+                                        is_const_qualified: false,
+                                        alignment: Some(4),
+                                        size: Some(4),
+                                    },
+                                    attrs: vec![],
+                                },
+                                Param {
+                                    name: Some("functionPointerParam".to_string()),
+                                    ty: AttributedType {
+                                        ty: Type::Pointer(Pointer {
+                                            pointee: Box::new(AttributedType {
+                                                ty: Type::Function(CallableDesc {
+                                                    result: Box::new(AttributedType {
+                                                        ty: Type::Num(NumKind::Int),
+                                                        is_const_qualified: false,
+                                                        alignment: Some(4),
+                                                        size: Some(4),
+                                                    }),
+                                                    params: Some(vec![Param {
+                                                        name: Some("someChar".to_string()),
+                                                        ty: AttributedType {
+                                                            ty: Type::Num(NumKind::SChar),
+                                                            is_const_qualified: false,
+                                                            alignment: Some(1),
+                                                            size: Some(1),
+                                                        },
+                                                        attrs: vec![],
+                                                    }]),
+                                                    is_variadic: false,
+                                                    attrs: vec![],
+                                                }),
+                                                is_const_qualified: false,
+                                                alignment: Some(4),
+                                                size: Some(1),
+                                            }),
+                                            nullability: None,
+                                        }),
+                                        is_const_qualified: false,
+                                        alignment: Some(8),
+                                        size: Some(8),
+                                    },
+                                    attrs: vec![],
+                                },
+                            ]),
+                            is_variadic: false,
+                            attrs: vec![],
+                        }),
+                        is_const_qualified: false,
+                        alignment: Some(4),
+                        size: Some(1),
+                    }),
+                    nullability: None,
+                }),
+                is_const_qualified: false,
+                alignment: Some(8),
+                size: Some(8),
+            },
+            attrs: vec![],
+        };
+
         let expected_items = vec![
             AttributedItem {
                 item: Item::TypedefDecl(TypedefDecl {
                     name: "T".to_string(),
-                    underlying: Type::Pointer(Pointer {
-                        pointee: Box::new(Type::Function(CallableDesc {
-                            result: Box::new(Type::Void),
-                            params: Some(vec![Param {
-                                name: Some("typedefParam".to_string()),
-                                ty: Type::Num(NumKind::Int),
-                                attrs: vec![],
-                            }]),
-                            is_variadic: false,
-                            attrs: vec![],
-                        })),
-                        nullability: None,
-                    }),
+                    underlying: AttributedType {
+                        ty: Type::Pointer(Pointer {
+                            pointee: Box::new(AttributedType {
+                                ty: Type::Function(CallableDesc {
+                                    result: Box::new(AttributedType {
+                                        ty: Type::Void,
+                                        is_const_qualified: false,
+                                        alignment: None,
+                                        size: None,
+                                    }),
+                                    params: Some(vec![Param {
+                                        name: Some("typedefParam".to_string()),
+                                        ty: AttributedType {
+                                            ty: Type::Num(NumKind::Int),
+                                            is_const_qualified: false,
+                                            alignment: Some(4),
+                                            size: Some(4),
+                                        },
+                                        attrs: vec![],
+                                    }]),
+                                    is_variadic: false,
+                                    attrs: vec![],
+                                }),
+                                is_const_qualified: false,
+                                alignment: Some(4),
+                                size: Some(1),
+                            }),
+                            nullability: None,
+                        }),
+                        is_const_qualified: false,
+                        alignment: Some(8),
+                        size: Some(8),
+                    },
                     origin: None,
                 }),
                 attrs: vec![],
@@ -2763,15 +3075,30 @@ mod tests {
                             name: "returningFunctionPointerWithUndefinedParameters".to_string(),
                             kind: ObjCMethodKind::Instance,
                             params: vec![],
-                            result: Type::Pointer(Pointer {
-                                pointee: Box::new(Type::Function(CallableDesc {
-                                    result: Box::new(Type::Num(NumKind::Int)),
-                                    params: None,
-                                    is_variadic: true,
-                                    attrs: vec![],
-                                })),
-                                nullability: None,
-                            }),
+                            result: AttributedType {
+                                ty: Type::Pointer(Pointer {
+                                    pointee: Box::new(AttributedType {
+                                        ty: Type::Function(CallableDesc {
+                                            result: Box::new(AttributedType {
+                                                ty: Type::Num(NumKind::Int),
+                                                is_const_qualified: false,
+                                                alignment: Some(4),
+                                                size: Some(4),
+                                            }),
+                                            params: None,
+                                            is_variadic: true,
+                                            attrs: vec![],
+                                        }),
+                                        is_const_qualified: false,
+                                        alignment: Some(4),
+                                        size: Some(1),
+                                    }),
+                                    nullability: None,
+                                }),
+                                is_const_qualified: false,
+                                alignment: Some(8),
+                                size: Some(8),
+                            },
                             attrs: vec![],
                             type_encoding: "^?16@0:8".to_string(),
                         },
@@ -2780,19 +3107,39 @@ mod tests {
                             name: "returningFunctionPointerVariadic".to_string(),
                             kind: ObjCMethodKind::Instance,
                             params: vec![],
-                            result: Type::Pointer(Pointer {
-                                pointee: Box::new(Type::Function(CallableDesc {
-                                    result: Box::new(Type::Num(NumKind::Int)),
-                                    params: Some(vec![Param {
-                                        name: None,
-                                        ty: Type::Num(NumKind::Float),
-                                        attrs: vec![],
-                                    }]),
-                                    is_variadic: true,
-                                    attrs: vec![],
-                                })),
-                                nullability: None,
-                            }),
+                            result: AttributedType {
+                                ty: Type::Pointer(Pointer {
+                                    pointee: Box::new(AttributedType {
+                                        ty: Type::Function(CallableDesc {
+                                            result: Box::new(AttributedType {
+                                                ty: Type::Num(NumKind::Int),
+                                                is_const_qualified: false,
+                                                alignment: Some(4),
+                                                size: Some(4),
+                                            }),
+                                            params: Some(vec![Param {
+                                                name: None,
+                                                ty: AttributedType {
+                                                    ty: Type::Num(NumKind::Float),
+                                                    is_const_qualified: false,
+                                                    alignment: Some(4),
+                                                    size: Some(4),
+                                                },
+                                                attrs: vec![],
+                                            }]),
+                                            is_variadic: true,
+                                            attrs: vec![],
+                                        }),
+                                        is_const_qualified: false,
+                                        alignment: Some(4),
+                                        size: Some(1),
+                                    }),
+                                    nullability: None,
+                                }),
+                                is_const_qualified: false,
+                                alignment: Some(8),
+                                size: Some(8),
+                            },
                             attrs: vec![],
                             type_encoding: "^?16@0:8".to_string(),
                         },
@@ -2801,15 +3148,30 @@ mod tests {
                             name: "returningFunctionPointerWithNoParameters".to_string(),
                             kind: ObjCMethodKind::Instance,
                             params: vec![],
-                            result: Type::Pointer(Pointer {
-                                pointee: Box::new(Type::Function(CallableDesc {
-                                    result: Box::new(Type::Num(NumKind::Int)),
-                                    params: Some(vec![]),
-                                    is_variadic: false,
-                                    attrs: vec![],
-                                })),
-                                nullability: None,
-                            }),
+                            result: AttributedType {
+                                ty: Type::Pointer(Pointer {
+                                    pointee: Box::new(AttributedType {
+                                        ty: Type::Function(CallableDesc {
+                                            result: Box::new(AttributedType {
+                                                ty: Type::Num(NumKind::Int),
+                                                is_const_qualified: false,
+                                                alignment: Some(4),
+                                                size: Some(4),
+                                            }),
+                                            params: Some(vec![]),
+                                            is_variadic: false,
+                                            attrs: vec![],
+                                        }),
+                                        is_const_qualified: false,
+                                        alignment: Some(4),
+                                        size: Some(1),
+                                    }),
+                                    nullability: None,
+                                }),
+                                is_const_qualified: false,
+                                alignment: Some(8),
+                                size: Some(8),
+                            },
                             attrs: vec![],
                             type_encoding: "^?16@0:8".to_string(),
                         },
@@ -2818,10 +3180,15 @@ mod tests {
                             name: "returningFunctionPointerTypedef".to_string(),
                             kind: ObjCMethodKind::Instance,
                             params: vec![],
-                            result: Type::Typedef(TypedefRef {
-                                name: "T".to_string(),
-                                nullability: None,
-                            }),
+                            result: AttributedType {
+                                ty: Type::Typedef(TypedefRef {
+                                    name: "T".to_string(),
+                                    nullability: None,
+                                }),
+                                is_const_qualified: false,
+                                alignment: Some(8),
+                                size: Some(8),
+                            },
                             attrs: vec![],
                             type_encoding: "^?16@0:8".to_string(),
                         },
@@ -2830,31 +3197,68 @@ mod tests {
                             name: "returningFunctionPointerReturningFunctionPointer".to_string(),
                             kind: ObjCMethodKind::Instance,
                             params: vec![],
-                            result: Type::Pointer(Pointer {
-                                pointee: Box::new(Type::Function(CallableDesc {
-                                    result: Box::new(Type::Pointer(Pointer {
-                                        pointee: Box::new(Type::Function(CallableDesc {
-                                            result: Box::new(Type::Num(NumKind::SChar)),
+                            result: AttributedType {
+                                ty: Type::Pointer(Pointer {
+                                    pointee: Box::new(AttributedType {
+                                        ty: Type::Function(CallableDesc {
+                                            result: Box::new(AttributedType {
+                                                ty: Type::Pointer(Pointer {
+                                                    pointee: Box::new(AttributedType {
+                                                        ty: Type::Function(CallableDesc {
+                                                            result: Box::new(AttributedType {
+                                                                ty: Type::Num(NumKind::SChar),
+                                                                is_const_qualified: false,
+                                                                alignment: Some(1),
+                                                                size: Some(1),
+                                                            }),
+                                                            params: Some(vec![Param {
+                                                                name: Some(
+                                                                    "outerParam".to_string(),
+                                                                ),
+                                                                ty: AttributedType {
+                                                                    ty: Type::Num(NumKind::Float),
+                                                                    is_const_qualified: false,
+                                                                    alignment: Some(4),
+                                                                    size: Some(4),
+                                                                },
+                                                                attrs: vec![],
+                                                            }]),
+                                                            is_variadic: false,
+                                                            attrs: vec![],
+                                                        }),
+                                                        is_const_qualified: false,
+                                                        alignment: Some(4),
+                                                        size: Some(1),
+                                                    }),
+                                                    nullability: None,
+                                                }),
+                                                is_const_qualified: false,
+                                                alignment: Some(8),
+                                                size: Some(8),
+                                            }),
                                             params: Some(vec![Param {
-                                                name: Some("outerParam".to_string()),
-                                                ty: Type::Num(NumKind::Float),
+                                                name: Some("innerParam".to_string()),
+                                                ty: AttributedType {
+                                                    ty: Type::Num(NumKind::Double),
+                                                    is_const_qualified: false,
+                                                    alignment: Some(8),
+                                                    size: Some(8),
+                                                },
                                                 attrs: vec![],
                                             }]),
                                             is_variadic: false,
                                             attrs: vec![],
-                                        })),
-                                        nullability: None,
-                                    })),
-                                    params: Some(vec![Param {
-                                        name: Some("innerParam".to_string()),
-                                        ty: Type::Num(NumKind::Double),
-                                        attrs: vec![],
-                                    }]),
-                                    is_variadic: false,
-                                    attrs: vec![],
-                                })),
-                                nullability: None,
-                            }),
+                                        }),
+                                        is_const_qualified: false,
+                                        alignment: Some(4),
+                                        size: Some(1),
+                                    }),
+                                    nullability: None,
+                                }),
+                                is_const_qualified: false,
+                                alignment: Some(8),
+                                size: Some(8),
+                            },
                             attrs: vec![],
                             type_encoding: "^?16@0:8".to_string(),
                         },
@@ -2866,84 +3270,61 @@ mod tests {
                             params: vec![
                                 ObjCParam {
                                     name: "typedefParam".to_string(),
-                                    ty: Type::Typedef(TypedefRef {
-                                        name: "T".to_string(),
-                                        nullability: None,
-                                    }),
+                                    ty: AttributedType {
+                                        ty: Type::Typedef(TypedefRef {
+                                            name: "T".to_string(),
+                                            nullability: None,
+                                        }),
+                                        is_const_qualified: false,
+                                        alignment: Some(8),
+                                        size: Some(8),
+                                    },
                                     attrs: vec![],
                                 },
-                                ObjCParam {
-                                    name: "complicatedParam".to_string(),
-                                    ty: Type::Pointer(Pointer {
-                                        pointee: Box::new(Type::Function(CallableDesc {
-                                            result: Box::new(Type::ObjPtr(ObjPtr {
-                                                kind: ObjPtrKind::SomeInstance(
-                                                    SomeInstanceObjPtr {
-                                                        interface: "A".to_string(),
-                                                        protocols: vec![],
-                                                        type_args: vec![],
-                                                    },
-                                                ),
-                                                nullability: None,
-                                            })),
-                                            params: Some(vec![
-                                                Param {
-                                                    name: Some("someFloat".to_string()),
-                                                    ty: Type::Num(NumKind::Float),
-                                                    attrs: vec![],
+                                complicated_param,
+                            ],
+                            result: AttributedType {
+                                ty: Type::Pointer(Pointer {
+                                    pointee: Box::new(AttributedType {
+                                        ty: Type::Function(CallableDesc {
+                                            result: Box::new(AttributedType {
+                                                ty: Type::ObjPtr(ObjPtr {
+                                                    kind: ObjPtrKind::SomeInstance(
+                                                        SomeInstanceObjPtr {
+                                                            interface: "A".to_string(),
+                                                            protocols: vec![],
+                                                            type_args: vec![],
+                                                        },
+                                                    ),
+                                                    nullability: None,
+                                                }),
+                                                is_const_qualified: false,
+                                                alignment: Some(8),
+                                                size: Some(8),
+                                            }),
+                                            params: Some(vec![Param {
+                                                name: Some("returnedFunctionParameter".to_string()),
+                                                ty: AttributedType {
+                                                    ty: Type::Num(NumKind::Short),
+                                                    is_const_qualified: false,
+                                                    alignment: Some(2),
+                                                    size: Some(2),
                                                 },
-                                                Param {
-                                                    name: Some("functionPointerParam".to_string()),
-                                                    ty: Type::Pointer(Pointer {
-                                                        pointee: Box::new(Type::Function(
-                                                            CallableDesc {
-                                                                result: Box::new(Type::Num(
-                                                                    NumKind::Int,
-                                                                )),
-                                                                params: Some(vec![Param {
-                                                                    name: Some(
-                                                                        "someChar".to_string(),
-                                                                    ),
-                                                                    ty: Type::Num(NumKind::SChar),
-                                                                    attrs: vec![],
-                                                                }]),
-                                                                is_variadic: false,
-                                                                attrs: vec![],
-                                                            },
-                                                        )),
-                                                        nullability: None,
-                                                    }),
-                                                    attrs: vec![],
-                                                },
-                                            ]),
+                                                attrs: vec![],
+                                            }]),
                                             is_variadic: false,
                                             attrs: vec![],
-                                        })),
-                                        nullability: None,
-                                    }),
-                                    attrs: vec![],
-                                },
-                            ],
-                            result: Type::Pointer(Pointer {
-                                pointee: Box::new(Type::Function(CallableDesc {
-                                    result: Box::new(Type::ObjPtr(ObjPtr {
-                                        kind: ObjPtrKind::SomeInstance(SomeInstanceObjPtr {
-                                            interface: "A".to_string(),
-                                            protocols: vec![],
-                                            type_args: vec![],
                                         }),
-                                        nullability: None,
-                                    })),
-                                    params: Some(vec![Param {
-                                        name: Some("returnedFunctionParameter".to_string()),
-                                        ty: Type::Num(NumKind::Short),
-                                        attrs: vec![],
-                                    }]),
-                                    is_variadic: false,
-                                    attrs: vec![],
-                                })),
-                                nullability: None,
-                            }),
+                                        is_const_qualified: false,
+                                        alignment: Some(4),
+                                        size: Some(1),
+                                    }),
+                                    nullability: None,
+                                }),
+                                is_const_qualified: false,
+                                alignment: Some(8),
+                                size: Some(8),
+                            },
                             attrs: vec![],
                             type_encoding: "^?32@0:8^?16^?24".to_string(),
                         },
@@ -2980,14 +3361,24 @@ mod tests {
             AttributedItem {
                 item: Item::TypedefDecl(TypedefDecl {
                     name: "Class".to_string(),
-                    underlying: Type::Pointer(Pointer {
-                        pointee: Box::new(Type::Tag(TagRef {
-                            id: TagId::Named("objc_class".to_string()),
-                            kind: TagKind::Struct,
-                            attrs: vec![],
-                        })),
-                        nullability: None,
-                    }),
+                    underlying: AttributedType {
+                        ty: Type::Pointer(Pointer {
+                            pointee: Box::new(AttributedType {
+                                ty: Type::Tag(TagRef {
+                                    id: TagId::Named("objc_class".to_string()),
+                                    kind: TagKind::Struct,
+                                    attrs: vec![],
+                                }),
+                                is_const_qualified: false,
+                                alignment: None,
+                                size: None,
+                            }),
+                            nullability: None,
+                        }),
+                        is_const_qualified: false,
+                        alignment: Some(8),
+                        size: Some(8),
+                    },
                     origin: None,
                 }),
                 attrs: vec![],
@@ -2997,10 +3388,15 @@ mod tests {
                     id: TagId::Named("objc_object".to_string()),
                     fields: vec![Field {
                         name: Some("isa".to_string()),
-                        ty: Type::ObjPtr(ObjPtr {
-                            kind: ObjPtrKind::Class,
-                            nullability: Some(Nullability::NonNull),
-                        }),
+                        ty: AttributedType {
+                            ty: Type::ObjPtr(ObjPtr {
+                                kind: ObjPtrKind::Class,
+                                nullability: Some(Nullability::NonNull),
+                            }),
+                            is_const_qualified: false,
+                            alignment: Some(8),
+                            size: Some(8),
+                        },
                         bit_offset: 0,
                     }],
                     kind: RecordKind::Struct,
@@ -3011,14 +3407,24 @@ mod tests {
             AttributedItem {
                 item: Item::TypedefDecl(TypedefDecl {
                     name: "id".to_string(),
-                    underlying: Type::Pointer(Pointer {
-                        pointee: Box::new(Type::Tag(TagRef {
-                            id: TagId::Named("objc_object".to_string()),
-                            kind: TagKind::Struct,
-                            attrs: vec![],
-                        })),
-                        nullability: None,
-                    }),
+                    underlying: AttributedType {
+                        ty: Type::Pointer(Pointer {
+                            pointee: Box::new(AttributedType {
+                                ty: Type::Tag(TagRef {
+                                    id: TagId::Named("objc_object".to_string()),
+                                    kind: TagKind::Struct,
+                                    attrs: vec![],
+                                }),
+                                is_const_qualified: false,
+                                alignment: Some(8),
+                                size: Some(8),
+                            }),
+                            nullability: None,
+                        }),
+                        is_const_qualified: false,
+                        alignment: Some(8),
+                        size: Some(8),
+                    },
                     origin: None,
                 }),
                 attrs: vec![],
@@ -3026,14 +3432,24 @@ mod tests {
             AttributedItem {
                 item: Item::TypedefDecl(TypedefDecl {
                     name: "SEL".to_string(),
-                    underlying: Type::Pointer(Pointer {
-                        pointee: Box::new(Type::Tag(TagRef {
-                            id: TagId::Named("objc_selector".to_string()),
-                            kind: TagKind::Struct,
-                            attrs: vec![],
-                        })),
-                        nullability: None,
-                    }),
+                    underlying: AttributedType {
+                        ty: Type::Pointer(Pointer {
+                            pointee: Box::new(AttributedType {
+                                ty: Type::Tag(TagRef {
+                                    id: TagId::Named("objc_selector".to_string()),
+                                    kind: TagKind::Struct,
+                                    attrs: vec![],
+                                }),
+                                is_const_qualified: false,
+                                alignment: None,
+                                size: None,
+                            }),
+                            nullability: None,
+                        }),
+                        is_const_qualified: false,
+                        alignment: Some(8),
+                        size: Some(8),
+                    },
                     origin: None,
                 }),
                 attrs: vec![],
@@ -3041,32 +3457,59 @@ mod tests {
             AttributedItem {
                 item: Item::TypedefDecl(TypedefDecl {
                     name: "IMP".to_string(),
-                    underlying: Type::Pointer(Pointer {
-                        pointee: Box::new(Type::Function(CallableDesc {
-                            result: Box::new(Type::ObjPtr(ObjPtr {
-                                kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
-                                nullability: Some(Nullability::Nullable),
-                            })),
-                            params: Some(vec![
-                                Param {
-                                    name: None,
-                                    ty: Type::ObjPtr(ObjPtr {
-                                        kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
-                                        nullability: Some(Nullability::NonNull),
+                    underlying: AttributedType {
+                        ty: Type::Pointer(Pointer {
+                            pointee: Box::new(AttributedType {
+                                ty: Type::Function(CallableDesc {
+                                    result: Box::new(AttributedType {
+                                        ty: Type::ObjPtr(ObjPtr {
+                                            kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
+                                            nullability: Some(Nullability::Nullable),
+                                        }),
+                                        is_const_qualified: false,
+                                        alignment: Some(8),
+                                        size: Some(8),
                                     }),
+                                    params: Some(vec![
+                                        Param {
+                                            name: None,
+                                            ty: AttributedType {
+                                                ty: Type::ObjPtr(ObjPtr {
+                                                    kind: ObjPtrKind::Id(IdObjPtr {
+                                                        protocols: vec![],
+                                                    }),
+                                                    nullability: Some(Nullability::NonNull),
+                                                }),
+                                                is_const_qualified: false,
+                                                alignment: Some(8),
+                                                size: Some(8),
+                                            },
+                                            attrs: vec![],
+                                        },
+                                        Param {
+                                            name: None,
+                                            ty: AttributedType {
+                                                ty: Type::ObjCSel(Some(Nullability::NonNull)),
+                                                is_const_qualified: false,
+                                                alignment: Some(8),
+                                                size: Some(8),
+                                            },
+                                            attrs: vec![],
+                                        },
+                                    ]),
+                                    is_variadic: true,
                                     attrs: vec![],
-                                },
-                                Param {
-                                    name: None,
-                                    ty: Type::ObjCSel(Some(Nullability::NonNull)),
-                                    attrs: vec![],
-                                },
-                            ]),
-                            is_variadic: true,
-                            attrs: vec![],
-                        })),
-                        nullability: None,
-                    }),
+                                }),
+                                is_const_qualified: false,
+                                alignment: Some(4),
+                                size: Some(1),
+                            }),
+                            nullability: None,
+                        }),
+                        is_const_qualified: false,
+                        alignment: Some(8),
+                        size: Some(8),
+                    },
                     origin: None,
                 }),
                 attrs: vec![],
@@ -3081,13 +3524,23 @@ mod tests {
                             kind: ObjCMethodKind::Instance,
                             params: vec![ObjCParam {
                                 name: "aSelector".to_string(),
-                                ty: Type::ObjCSel(None),
+                                ty: AttributedType {
+                                    ty: Type::ObjCSel(None),
+                                    is_const_qualified: false,
+                                    alignment: Some(8),
+                                    size: Some(8),
+                                },
                                 attrs: vec![],
                             }],
-                            result: Type::Typedef(TypedefRef {
-                                name: "IMP".to_string(),
-                                nullability: None,
-                            }),
+                            result: AttributedType {
+                                ty: Type::Typedef(TypedefRef {
+                                    name: "IMP".to_string(),
+                                    nullability: None,
+                                }),
+                                is_const_qualified: false,
+                                alignment: Some(8),
+                                size: Some(8),
+                            },
                             attrs: vec![],
                             type_encoding: "^?24@0:8:16".to_string(),
                         },
@@ -3116,17 +3569,27 @@ mod tests {
             item: Item::FuncDecl(FuncDecl {
                 name: "NSLog".to_string(),
                 desc: CallableDesc {
-                    result: Box::new(Type::Void),
+                    result: Box::new(AttributedType {
+                        ty: Type::Void,
+                        is_const_qualified: false,
+                        alignment: None,
+                        size: None,
+                    }),
                     params: Some(vec![Param {
                         name: Some("format".to_string()),
-                        ty: Type::ObjPtr(ObjPtr {
-                            kind: ObjPtrKind::SomeInstance(SomeInstanceObjPtr {
-                                interface: "NSString".to_string(),
-                                protocols: vec![],
-                                type_args: vec![],
+                        ty: AttributedType {
+                            ty: Type::ObjPtr(ObjPtr {
+                                kind: ObjPtrKind::SomeInstance(SomeInstanceObjPtr {
+                                    interface: "NSString".to_string(),
+                                    protocols: vec![],
+                                    type_args: vec![],
+                                }),
+                                nullability: None,
                             }),
-                            nullability: None,
-                        }),
+                            is_const_qualified: false,
+                            alignment: Some(8),
+                            size: Some(8),
+                        },
                         attrs: vec![],
                     }]),
                     is_variadic: true,
@@ -3166,13 +3629,23 @@ mod tests {
                             kind: ObjCMethodKind::Instance,
                             params: vec![ObjCParam {
                                 name: "consumedParam".to_string(),
-                                ty: Type::ObjPtr(ObjPtr {
-                                    kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
-                                    nullability: None,
-                                }),
+                                ty: AttributedType {
+                                    ty: Type::ObjPtr(ObjPtr {
+                                        kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
+                                        nullability: None,
+                                    }),
+                                    is_const_qualified: false,
+                                    alignment: Some(8),
+                                    size: Some(8),
+                                },
                                 attrs: vec![Attr::NSConsumed],
                             }],
-                            result: Type::Void,
+                            result: AttributedType {
+                                ty: Type::Void,
+                                is_const_qualified: false,
+                                alignment: None,
+                                size: None,
+                            },
                             attrs: vec![],
                             type_encoding: "v24@0:8@16".to_string(),
                         },
@@ -3181,18 +3654,33 @@ mod tests {
                             kind: ObjCMethodKind::Instance,
                             params: vec![ObjCParam {
                                 name: "block".to_string(),
-                                ty: Type::ObjPtr(ObjPtr {
-                                    kind: ObjPtrKind::Block(CallableDesc {
-                                        result: Box::new(Type::Void),
-                                        params: Some(vec![]),
-                                        is_variadic: false,
-                                        attrs: vec![],
+                                ty: AttributedType {
+                                    ty: Type::ObjPtr(ObjPtr {
+                                        kind: ObjPtrKind::Block(CallableDesc {
+                                            result: Box::new(AttributedType {
+                                                ty: Type::Void,
+                                                is_const_qualified: false,
+                                                alignment: None,
+                                                size: None,
+                                            }),
+                                            params: Some(vec![]),
+                                            is_variadic: false,
+                                            attrs: vec![],
+                                        }),
+                                        nullability: None,
                                     }),
-                                    nullability: None,
-                                }),
+                                    is_const_qualified: false,
+                                    alignment: Some(8),
+                                    size: Some(8),
+                                },
                                 attrs: vec![Attr::Noescape],
                             }],
-                            result: Type::Void,
+                            result: AttributedType {
+                                ty: Type::Void,
+                                is_const_qualified: false,
+                                alignment: None,
+                                size: None,
+                            },
                             attrs: vec![],
                             type_encoding: "v24@0:8@?16".to_string(),
                         },
@@ -3206,13 +3694,23 @@ mod tests {
                 item: Item::FuncDecl(FuncDecl {
                     name: "function_with_consumed_param".to_string(),
                     desc: CallableDesc {
-                        result: Box::new(Type::Void),
+                        result: Box::new(AttributedType {
+                            ty: Type::Void,
+                            is_const_qualified: false,
+                            alignment: None,
+                            size: None,
+                        }),
                         params: Some(vec![Param {
                             name: Some("consumedParam".to_string()),
-                            ty: Type::ObjPtr(ObjPtr {
-                                kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
-                                nullability: None,
-                            }),
+                            ty: AttributedType {
+                                ty: Type::ObjPtr(ObjPtr {
+                                    kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
+                                    nullability: None,
+                                }),
+                                is_const_qualified: false,
+                                alignment: Some(8),
+                                size: Some(8),
+                            },
                             attrs: vec![Attr::NSConsumed],
                         }]),
                         is_variadic: false,
@@ -3226,18 +3724,33 @@ mod tests {
                 item: Item::FuncDecl(FuncDecl {
                     name: "function_with_noescape_block".to_string(),
                     desc: CallableDesc {
-                        result: Box::new(Type::Void),
+                        result: Box::new(AttributedType {
+                            ty: Type::Void,
+                            is_const_qualified: false,
+                            alignment: None,
+                            size: None,
+                        }),
                         params: Some(vec![Param {
                             name: None,
-                            ty: Type::ObjPtr(ObjPtr {
-                                kind: ObjPtrKind::Block(CallableDesc {
-                                    result: Box::new(Type::Void),
-                                    params: Some(vec![]),
-                                    is_variadic: false,
-                                    attrs: vec![],
+                            ty: AttributedType {
+                                ty: Type::ObjPtr(ObjPtr {
+                                    kind: ObjPtrKind::Block(CallableDesc {
+                                        result: Box::new(AttributedType {
+                                            ty: Type::Void,
+                                            is_const_qualified: false,
+                                            alignment: None,
+                                            size: None,
+                                        }),
+                                        params: Some(vec![]),
+                                        is_variadic: false,
+                                        attrs: vec![],
+                                    }),
+                                    nullability: None,
                                 }),
-                                nullability: None,
-                            }),
+                                is_const_qualified: false,
+                                alignment: Some(8),
+                                size: Some(8),
+                            },
                             attrs: vec![Attr::Noescape],
                         }]),
                         is_variadic: false,
@@ -3275,10 +3788,15 @@ mod tests {
                             name: "methodWithRetainedReturn".to_string(),
                             kind: ObjCMethodKind::Instance,
                             params: vec![],
-                            result: Type::ObjPtr(ObjPtr {
-                                kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
-                                nullability: None,
-                            }),
+                            result: AttributedType {
+                                ty: Type::ObjPtr(ObjPtr {
+                                    kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
+                                    nullability: None,
+                                }),
+                                is_const_qualified: false,
+                                alignment: Some(8),
+                                size: Some(8),
+                            },
                             attrs: vec![Attr::NSReturnsRetained],
                             type_encoding: "@16@0:8".to_string(),
                         },
@@ -3286,7 +3804,12 @@ mod tests {
                             name: "unavailableMethod".to_string(),
                             kind: ObjCMethodKind::Instance,
                             params: vec![],
-                            result: Type::Void,
+                            result: AttributedType {
+                                ty: Type::Void,
+                                is_const_qualified: false,
+                                alignment: None,
+                                size: None,
+                            },
                             attrs: vec![Attr::Unavailable],
                             type_encoding: "v16@0:8".to_string(),
                         },
@@ -3300,10 +3823,15 @@ mod tests {
                 item: Item::FuncDecl(FuncDecl {
                     name: "function_with_retained_return".to_string(),
                     desc: CallableDesc {
-                        result: Box::new(Type::ObjPtr(ObjPtr {
-                            kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
-                            nullability: None,
-                        })),
+                        result: Box::new(AttributedType {
+                            ty: Type::ObjPtr(ObjPtr {
+                                kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
+                                nullability: None,
+                            }),
+                            is_const_qualified: false,
+                            alignment: Some(8),
+                            size: Some(8),
+                        }),
                         params: Some(vec![]),
                         is_variadic: false,
                         attrs: vec![Attr::NSReturnsRetained],
@@ -3350,10 +3878,15 @@ mod tests {
                         name: "alloc".to_string(),
                         kind: ObjCMethodKind::Class,
                         params: vec![],
-                        result: Type::ObjPtr(ObjPtr {
-                            kind: ObjPtrKind::Instancetype,
-                            nullability: None,
-                        }),
+                        result: AttributedType {
+                            ty: Type::ObjPtr(ObjPtr {
+                                kind: ObjPtrKind::Instancetype,
+                                nullability: None,
+                            }),
+                            is_const_qualified: false,
+                            alignment: Some(8),
+                            size: Some(8),
+                        },
                         attrs: vec![Attr::NSReturnsRetained],
                         type_encoding: "@16@0:8".to_string(),
                     },
@@ -3361,10 +3894,15 @@ mod tests {
                         name: "init".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
-                        result: Type::ObjPtr(ObjPtr {
-                            kind: ObjPtrKind::Instancetype,
-                            nullability: None,
-                        }),
+                        result: AttributedType {
+                            ty: Type::ObjPtr(ObjPtr {
+                                kind: ObjPtrKind::Instancetype,
+                                nullability: None,
+                            }),
+                            is_const_qualified: false,
+                            alignment: Some(8),
+                            size: Some(8),
+                        },
                         attrs: vec![Attr::NSConsumesSelf, Attr::NSReturnsRetained],
                         type_encoding: "@16@0:8".to_string(),
                     },
@@ -3373,13 +3911,23 @@ mod tests {
                         kind: ObjCMethodKind::Instance,
                         params: vec![ObjCParam {
                             name: "something".to_string(),
-                            ty: Type::Num(NumKind::Int),
+                            ty: AttributedType {
+                                ty: Type::Num(NumKind::Int),
+                                is_const_qualified: false,
+                                alignment: Some(4),
+                                size: Some(4),
+                            },
                             attrs: vec![],
                         }],
-                        result: Type::ObjPtr(ObjPtr {
-                            kind: ObjPtrKind::Instancetype,
-                            nullability: None,
-                        }),
+                        result: AttributedType {
+                            ty: Type::ObjPtr(ObjPtr {
+                                kind: ObjPtrKind::Instancetype,
+                                nullability: None,
+                            }),
+                            is_const_qualified: false,
+                            alignment: Some(8),
+                            size: Some(8),
+                        },
                         attrs: vec![Attr::NSConsumesSelf, Attr::NSReturnsRetained],
                         type_encoding: "@20@0:8i16".to_string(),
                     },
@@ -3387,10 +3935,15 @@ mod tests {
                         name: "initAnything".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
-                        result: Type::ObjPtr(ObjPtr {
-                            kind: ObjPtrKind::Instancetype,
-                            nullability: None,
-                        }),
+                        result: AttributedType {
+                            ty: Type::ObjPtr(ObjPtr {
+                                kind: ObjPtrKind::Instancetype,
+                                nullability: None,
+                            }),
+                            is_const_qualified: false,
+                            alignment: Some(8),
+                            size: Some(8),
+                        },
                         attrs: vec![Attr::NSConsumesSelf, Attr::NSReturnsRetained],
                         type_encoding: "@16@0:8".to_string(),
                     },
@@ -3398,10 +3951,15 @@ mod tests {
                         name: "initReturningAutoreleased".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
-                        result: Type::ObjPtr(ObjPtr {
-                            kind: ObjPtrKind::Instancetype,
-                            nullability: None,
-                        }),
+                        result: AttributedType {
+                            ty: Type::ObjPtr(ObjPtr {
+                                kind: ObjPtrKind::Instancetype,
+                                nullability: None,
+                            }),
+                            is_const_qualified: false,
+                            alignment: Some(8),
+                            size: Some(8),
+                        },
                         attrs: vec![Attr::NSReturnsAutoreleased, Attr::NSConsumesSelf],
                         type_encoding: "@16@0:8".to_string(),
                     },
@@ -3409,10 +3967,15 @@ mod tests {
                         name: "initReturningNotRetained".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
-                        result: Type::ObjPtr(ObjPtr {
-                            kind: ObjPtrKind::Instancetype,
-                            nullability: None,
-                        }),
+                        result: AttributedType {
+                            ty: Type::ObjPtr(ObjPtr {
+                                kind: ObjPtrKind::Instancetype,
+                                nullability: None,
+                            }),
+                            is_const_qualified: false,
+                            alignment: Some(8),
+                            size: Some(8),
+                        },
                         attrs: vec![Attr::NSReturnsNotRetained, Attr::NSConsumesSelf],
                         type_encoding: "@16@0:8".to_string(),
                     },
@@ -3420,10 +3983,15 @@ mod tests {
                         name: "new".to_string(),
                         kind: ObjCMethodKind::Class,
                         params: vec![],
-                        result: Type::ObjPtr(ObjPtr {
-                            kind: ObjPtrKind::Instancetype,
-                            nullability: None,
-                        }),
+                        result: AttributedType {
+                            ty: Type::ObjPtr(ObjPtr {
+                                kind: ObjPtrKind::Instancetype,
+                                nullability: None,
+                            }),
+                            is_const_qualified: false,
+                            alignment: Some(8),
+                            size: Some(8),
+                        },
                         attrs: vec![Attr::NSReturnsRetained],
                         type_encoding: "@16@0:8".to_string(),
                     },
@@ -3431,10 +3999,15 @@ mod tests {
                         name: "copy".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
-                        result: Type::ObjPtr(ObjPtr {
-                            kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
-                            nullability: None,
-                        }),
+                        result: AttributedType {
+                            ty: Type::ObjPtr(ObjPtr {
+                                kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
+                                nullability: None,
+                            }),
+                            is_const_qualified: false,
+                            alignment: Some(8),
+                            size: Some(8),
+                        },
                         attrs: vec![Attr::NSReturnsRetained],
                         type_encoding: "@16@0:8".to_string(),
                     },
@@ -3442,10 +4015,15 @@ mod tests {
                         name: "mutableCopy".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
-                        result: Type::ObjPtr(ObjPtr {
-                            kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
-                            nullability: None,
-                        }),
+                        result: AttributedType {
+                            ty: Type::ObjPtr(ObjPtr {
+                                kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
+                                nullability: None,
+                            }),
+                            is_const_qualified: false,
+                            alignment: Some(8),
+                            size: Some(8),
+                        },
                         attrs: vec![Attr::NSReturnsRetained],
                         type_encoding: "@16@0:8".to_string(),
                     },
@@ -3453,10 +4031,15 @@ mod tests {
                         name: "normalClassMethod".to_string(),
                         kind: ObjCMethodKind::Class,
                         params: vec![],
-                        result: Type::ObjPtr(ObjPtr {
-                            kind: ObjPtrKind::Instancetype,
-                            nullability: None,
-                        }),
+                        result: AttributedType {
+                            ty: Type::ObjPtr(ObjPtr {
+                                kind: ObjPtrKind::Instancetype,
+                                nullability: None,
+                            }),
+                            is_const_qualified: false,
+                            alignment: Some(8),
+                            size: Some(8),
+                        },
                         attrs: vec![],
                         type_encoding: "@16@0:8".to_string(),
                     },
@@ -3537,38 +4120,43 @@ mod tests {
             AttributedItem {
                 item: Item::TypedefDecl(TypedefDecl {
                     name: "MTLIndirectCommandType".to_string(),
-                    underlying: Type::Tag(TagRef {
-                        id: TagId::Named("MTLIndirectCommandType".to_string()),
-                        kind: TagKind::Enum,
-                        attrs: vec![
-                            Attr::FlagEnum,
-                            Attr::EnumExtensib(EnumExtensib::Open),
-                            Attr::PlatformAvailability(vec![
-                                PlatformAvailability {
-                                    platform: "ios".to_string(),
-                                    introduced: Some(Version::Minor {
-                                        major: 12,
-                                        minor: 0,
-                                    }),
-                                    deprecated: None,
-                                    obsoleted: None,
-                                    unavailable: false,
-                                    message: None,
-                                },
-                                PlatformAvailability {
-                                    platform: "macos".to_string(),
-                                    introduced: Some(Version::Minor {
-                                        major: 10,
-                                        minor: 14,
-                                    }),
-                                    deprecated: None,
-                                    obsoleted: None,
-                                    unavailable: false,
-                                    message: None,
-                                },
-                            ]),
-                        ],
-                    }),
+                    underlying: AttributedType {
+                        ty: Type::Tag(TagRef {
+                            id: TagId::Named("MTLIndirectCommandType".to_string()),
+                            kind: TagKind::Enum,
+                            attrs: vec![
+                                Attr::FlagEnum,
+                                Attr::EnumExtensib(EnumExtensib::Open),
+                                Attr::PlatformAvailability(vec![
+                                    PlatformAvailability {
+                                        platform: "ios".to_string(),
+                                        introduced: Some(Version::Minor {
+                                            major: 12,
+                                            minor: 0,
+                                        }),
+                                        deprecated: None,
+                                        obsoleted: None,
+                                        unavailable: false,
+                                        message: None,
+                                    },
+                                    PlatformAvailability {
+                                        platform: "macos".to_string(),
+                                        introduced: Some(Version::Minor {
+                                            major: 10,
+                                            minor: 14,
+                                        }),
+                                        deprecated: None,
+                                        obsoleted: None,
+                                        unavailable: false,
+                                        message: None,
+                                    },
+                                ]),
+                            ],
+                        }),
+                        is_const_qualified: false,
+                        alignment: Some(8),
+                        size: Some(8),
+                    },
                     origin: None,
                 }),
                 attrs: vec![],
@@ -3709,17 +4297,27 @@ mod tests {
             AttributedItem {
                 item: Item::TypedefDecl(TypedefDecl {
                     name: "CFSomethingRef".to_string(),
-                    underlying: Type::Pointer(Pointer {
-                        pointee: Box::new(Type::Tag(TagRef {
-                            id: TagId::Named("opaqueCFSomething".to_string()),
-                            kind: TagKind::Struct,
-                            attrs: vec![Attr::ObjCBridge {
-                                ty_name: "id".to_string(),
-                                is_mutable: false,
-                            }],
-                        })),
-                        nullability: None,
-                    }),
+                    underlying: AttributedType {
+                        ty: Type::Pointer(Pointer {
+                            pointee: Box::new(AttributedType {
+                                ty: Type::Tag(TagRef {
+                                    id: TagId::Named("opaqueCFSomething".to_string()),
+                                    kind: TagKind::Struct,
+                                    attrs: vec![Attr::ObjCBridge {
+                                        ty_name: "id".to_string(),
+                                        is_mutable: false,
+                                    }],
+                                }),
+                                is_const_qualified: true,
+                                alignment: None,
+                                size: None,
+                            }),
+                            nullability: None,
+                        }),
+                        is_const_qualified: false,
+                        alignment: Some(8),
+                        size: Some(8),
+                    },
                     origin: None,
                 }),
                 attrs: vec![],
@@ -3733,10 +4331,15 @@ mod tests {
                     methods: vec![],
                     properties: vec![Property {
                         name: "prop".to_string(),
-                        value: Type::Typedef(TypedefRef {
-                            name: "CFSomethingRef".to_string(),
-                            nullability: Some(Nullability::Nullable),
-                        }),
+                        value: AttributedType {
+                            ty: Type::Typedef(TypedefRef {
+                                name: "CFSomethingRef".to_string(),
+                                nullability: Some(Nullability::Nullable),
+                            }),
+                            is_const_qualified: false,
+                            alignment: Some(8),
+                            size: Some(8),
+                        },
                         is_atomic: false,
                         is_writable: false,
                         is_class: false,

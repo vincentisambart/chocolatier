@@ -159,10 +159,7 @@ fn rust_type_name_for_fixed_int(name: &str) -> Option<&'static str> {
 }
 
 // TODO: Special handling for CFStringEncoding, NSStringEncoding, SSLCipherSuite, ExtAudioFilePropertyID, NSTextCheckingTypes...
-fn rust_type_name_for_enum_underlying(
-    underlying: &ast::Type,
-    index: &TypeIndex,
-) -> &'static str {
+fn rust_type_name_for_enum_underlying(underlying: &ast::Type, index: &TypeIndex) -> &'static str {
     use ast::{NumKind, Type};
 
     match underlying {
@@ -170,7 +167,7 @@ fn rust_type_name_for_enum_underlying(
             Some(name) => name,
             None => {
                 let objc_type = &index.typedefs[&typedef.name].underlying;
-                rust_type_name_for_enum_underlying(&objc_type, index)
+                rust_type_name_for_enum_underlying(&objc_type.ty, index)
             }
         },
         // There are platforms the following is not true (long is 32-bit on Windows),
