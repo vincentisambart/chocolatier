@@ -2,8 +2,8 @@ use once_cell::sync::Lazy;
 use std::borrow::Cow;
 use std::process::Command;
 
-#[derive(Copy, Clone)]
-pub enum AppleSdk {
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Sdk {
     MacOs,
     IOs,
     IOsSimulator,
@@ -13,27 +13,52 @@ pub enum AppleSdk {
     WatchOsSimulator,
 }
 
-impl AppleSdk {
-    pub fn sdk_name(&self) -> &str {
+impl Sdk {
+    pub fn sdk_name(&self) -> &'static str {
         match *self {
-            AppleSdk::MacOs => "macosx",
-            AppleSdk::IOs => "iphoneos",
-            AppleSdk::IOsSimulator => "iphonesimulator",
-            AppleSdk::TvOs => "appletvos",
-            AppleSdk::TvOsSimulator => "appletvsimulator",
-            AppleSdk::WatchOs => "watchos",
-            AppleSdk::WatchOsSimulator => "watchsimulator",
+            Self::MacOs => "macosx",
+            Self::IOs => "iphoneos",
+            Self::IOsSimulator => "iphonesimulator",
+            Self::TvOs => "appletvos",
+            Self::TvOsSimulator => "appletvsimulator",
+            Self::WatchOs => "watchos",
+            Self::WatchOsSimulator => "watchsimulator",
         }
     }
 }
 
-pub fn sdk_path(sdk: AppleSdk) -> String {
+pub fn sdk_path(sdk: Sdk) -> String {
     let output = Command::new("xcrun")
         .args(&["--sdk", sdk.sdk_name(), "--show-sdk-path"])
         .output()
         .expect("xcrun command failed to start");
     assert!(output.status.success());
     String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Target {
+    MacOsX86_64,
+    IOsArm64,
+    IOsSimulatorX86_64,
+}
+
+impl Target {
+    fn triple(&self) -> &'static str {
+        match *self {
+            Self::MacOsX86_64 => "x86_64-apple-macos",
+            Self::IOsArm64 => "arm64-apple-ios",
+            Self::IOsSimulatorX86_64 => "x86_64-apple-ios-simulator",
+        }
+    }
+
+    fn sdk(&self) -> Sdk {
+        match *self {
+            Self::MacOsX86_64 => Sdk::MacOs,
+            Self::IOsArm64 => Sdk::IOs,
+            Self::IOsSimulatorX86_64 => Sdk::IOsSimulator,
+        }
+    }
 }
 
 pub fn libclang_path() -> std::path::PathBuf {
@@ -57,7 +82,7 @@ pub static DEVELOPER_DIR: Lazy<String> = Lazy::new(|| {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 });
 
-pub fn clang_options(sdk: AppleSdk) -> Vec<Cow<'static, str>> {
+pub fn clang_options(target: Target) -> Vec<Cow<'static, str>> {
     vec![
         // Our temporary files don't have an Objective-C extension so set the language explicitely
         // (for some reason -ObjC doesn't seem to work properly)
@@ -66,15 +91,17 @@ pub fn clang_options(sdk: AppleSdk) -> Vec<Cow<'static, str>> {
         // We want ARC (Automatic Reference Counting) ON.
         Cow::Borrowed("-fobjc-arc"),
         Cow::Borrowed("-isysroot"),
-        Cow::Owned(sdk_path(sdk)),
+        Cow::Owned(sdk_path(target.sdk())),
+        Cow::Borrowed("-target"),
+        Cow::Borrowed(target.triple()),
     ]
 }
 
-pub fn preprocess_objc(source: &str, sdk: AppleSdk) -> String {
+pub fn preprocess_objc(source: &str, target: Target) -> String {
     use std::io::Write;
     use std::process::Stdio;
 
-    let clang_opts = clang_options(sdk);
+    let clang_opts = clang_options(target);
     // "-E" means only do preprocessing.
     let mut xcrun_args = vec!["clang", "-E"];
     xcrun_args.extend(clang_opts.iter().map(|opt| opt.as_ref()));

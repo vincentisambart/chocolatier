@@ -42,9 +42,9 @@ fn main() {
         // struct ll { struct ll *nextl; };
         // struct { float f; union { int i; double d; }; } a;
   "#;
-    let sdk = xcode::AppleSdk::MacOs;
-    // ast::print_full_clang_ast(sdk, source);
-    let items = ast::ast_from_str(sdk, source).unwrap();
+    let target = xcode::Target::MacOsX86_64;
+    // ast::print_full_clang_ast(target, source);
+    let items = ast::ast_from_str(target, source).unwrap();
     // println!("{:#?}", items);
     let mut generator = generator::Generator::new(items);
     generator.generate();

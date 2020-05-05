@@ -1,10 +1,9 @@
 use crate::clang::{self, CursorKind, TypeKind};
-use crate::xcode::{self, AppleSdk};
+use crate::xcode::{self, Target};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 // TODO:
-// - pass the architecture (aarch64 or x86_64) explicitly to clang
 // - alignment, packing, sizes
 // - const
 // - real ObjC type encoding of C blocks
@@ -1793,14 +1792,14 @@ type TagIdMap = HashMap<String, u32>;
 /// Prints the full clang AST.
 ///
 /// Should only be used for debugging purpose. Definitions with cycles can end up in a stack overflow.
-pub fn print_full_clang_ast(sdk: AppleSdk, source: &str) {
+pub fn print_full_clang_ast(target: Target, source: &str) {
     // Preprocess before to get more easily interesting tokens coming from #defines.
-    let source: &str = &xcode::preprocess_objc(source, sdk);
+    let source: &str = &xcode::preprocess_objc(source, target);
 
     // The documentation says that files specified as unsaved must exist so create a dummy temporary empty file
     let file = tempfile::NamedTempFile::new().unwrap();
     let index = clang::Index::new(false, true);
-    let (args, options) = parser_configuration(sdk);
+    let (args, options) = parser_configuration(target);
 
     let tu = index
         .parse(
@@ -1813,24 +1812,24 @@ pub fn print_full_clang_ast(sdk: AppleSdk, source: &str) {
     show_tree(&tu.cursor(), 0);
 }
 
-fn parser_configuration(sdk: AppleSdk) -> (Vec<Cow<'static, str>>, clang::TuOptions) {
+fn parser_configuration(target: Target) -> (Vec<Cow<'static, str>>, clang::TuOptions) {
     use clang::TuOptions;
     (
-        xcode::clang_options(sdk),
+        xcode::clang_options(target),
         TuOptions::SKIP_FUNCTION_BODIES
             | TuOptions::INCLUDE_ATTRIBUTED_TYPES // Needed to get nullability
             | TuOptions::VISIT_IMPLICIT_ATTRIBUTES, // TODO: Check if needed
     )
 }
 
-pub fn ast_from_str(sdk: AppleSdk, source: &str) -> Result<Vec<AttributedItem>, ParseError> {
+pub fn ast_from_str(target: Target, source: &str) -> Result<Vec<AttributedItem>, ParseError> {
     // Preprocess before to get more easily interesting tokens coming from #defines.
-    let source: &str = &xcode::preprocess_objc(source, sdk);
+    let source: &str = &xcode::preprocess_objc(source, target);
 
     // The documentation says that files specified as unsaved must exist so create a dummy temporary empty file
     let file = tempfile::NamedTempFile::new().unwrap();
     let index = clang::Index::new(false, true);
-    let (args, options) = parser_configuration(sdk);
+    let (args, options) = parser_configuration(target);
 
     let tu = index.parse(
         &args,
@@ -2020,7 +2019,7 @@ mod tests {
             attrs: vec![],
         }];
 
-        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
+        let parsed_items = ast_from_str(Target::MacOsX86_64, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -2110,7 +2109,7 @@ mod tests {
             attrs: vec![],
         }];
 
-        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
+        let parsed_items = ast_from_str(Target::MacOsX86_64, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -2150,7 +2149,7 @@ mod tests {
             },
         ];
 
-        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
+        let parsed_items = ast_from_str(Target::MacOsX86_64, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -2201,7 +2200,7 @@ mod tests {
             },
         ];
 
-        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
+        let parsed_items = ast_from_str(Target::MacOsX86_64, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -2276,7 +2275,7 @@ mod tests {
             },
         ];
 
-        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
+        let parsed_items = ast_from_str(Target::MacOsX86_64, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -2377,7 +2376,7 @@ mod tests {
             },
         ];
 
-        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
+        let parsed_items = ast_from_str(Target::MacOsX86_64, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -2443,7 +2442,7 @@ mod tests {
             attrs: vec![],
         }];
 
-        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
+        let parsed_items = ast_from_str(Target::MacOsX86_64, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -2489,7 +2488,7 @@ mod tests {
             },
         ];
 
-        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
+        let parsed_items = ast_from_str(Target::MacOsX86_64, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -2524,7 +2523,7 @@ mod tests {
             attrs: vec![],
         }];
 
-        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
+        let parsed_items = ast_from_str(Target::MacOsX86_64, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -2708,7 +2707,7 @@ mod tests {
             },
         ];
 
-        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
+        let parsed_items = ast_from_str(Target::MacOsX86_64, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -2953,7 +2952,7 @@ mod tests {
             },
         ];
 
-        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
+        let parsed_items = ast_from_str(Target::MacOsX86_64, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -3098,7 +3097,7 @@ mod tests {
             },
         ];
 
-        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
+        let parsed_items = ast_from_str(Target::MacOsX86_64, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -3135,7 +3134,7 @@ mod tests {
             attrs: vec![],
         }];
 
-        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
+        let parsed_items = ast_from_str(Target::MacOsX86_64, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -3247,7 +3246,7 @@ mod tests {
             },
         ];
 
-        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
+        let parsed_items = ast_from_str(Target::MacOsX86_64, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -3312,7 +3311,7 @@ mod tests {
             },
         ];
 
-        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
+        let parsed_items = ast_from_str(Target::MacOsX86_64, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -3465,7 +3464,7 @@ mod tests {
             attrs: vec![],
         }];
 
-        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
+        let parsed_items = ast_from_str(Target::MacOsX86_64, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -3508,7 +3507,7 @@ mod tests {
             )],
         }];
 
-        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
+        let parsed_items = ast_from_str(Target::MacOsX86_64, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -3690,7 +3689,7 @@ mod tests {
             },
         ];
 
-        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
+        let parsed_items = ast_from_str(Target::MacOsX86_64, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 
@@ -3749,7 +3748,7 @@ mod tests {
             },
         ];
 
-        let parsed_items = ast_from_str(AppleSdk::MacOs, source).unwrap();
+        let parsed_items = ast_from_str(Target::MacOsX86_64, source).unwrap();
         assert_eq!(parsed_items, expected_items);
     }
 }
