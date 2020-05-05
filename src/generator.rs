@@ -160,13 +160,13 @@ fn rust_type_name_for_fixed_int(name: &str) -> Option<&'static str> {
 
 // TODO: Special handling for CFStringEncoding, NSStringEncoding, SSLCipherSuite, ExtAudioFilePropertyID, NSTextCheckingTypes...
 fn rust_type_name_for_enum_underlying(
-    underlying: &ast::ObjCType,
+    underlying: &ast::Type,
     index: &TypeIndex,
 ) -> &'static str {
-    use ast::{NumKind, ObjCType};
+    use ast::{NumKind, Type};
 
     match underlying {
-        ObjCType::Typedef(typedef) => match rust_type_name_for_fixed_int(&typedef.name) {
+        Type::Typedef(typedef) => match rust_type_name_for_fixed_int(&typedef.name) {
             Some(name) => name,
             None => {
                 let objc_type = &index.typedefs[&typedef.name].underlying;
@@ -175,7 +175,7 @@ fn rust_type_name_for_enum_underlying(
         },
         // There are platforms the following is not true (long is 32-bit on Windows),
         // but that should be true on all Apple platforms.
-        ObjCType::Num(kind) => match kind {
+        Type::Num(kind) => match kind {
             NumKind::SChar => "i8",
             NumKind::UChar => "u8",
             NumKind::Int => "i32",

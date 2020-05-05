@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 // TODO:
 // - alignment, packing, sizes
+//  - check size of undeclared struct
 // - const
 // - real ObjC type encoding of C blocks
 // - variable decl
@@ -57,22 +58,22 @@ impl Origin {
     }
 }
 
-fn show_type(desc: &str, clang_type: &clang::Type<'_>, indent_level: usize) {
+fn show_type(desc: &str, clang_ty: &clang::Type<'_>, indent_level: usize) {
     let indent = (0..indent_level)
         .map(|_| "   ")
         .collect::<Vec<&str>>()
         .concat();
 
-    println!("{}{}: {:?}", indent, desc, clang_type);
+    println!("{}{}: {:?}", indent, desc, clang_ty);
 
     println!(
         "{}{} const qualified: {:?}",
         indent,
         desc,
-        clang_type.is_const_qualified()
+        clang_ty.is_const_qualified()
     );
 
-    if let Some(argument_types) = clang_type.argument_types() {
+    if let Some(argument_types) = clang_ty.argument_types() {
         if argument_types.len() > 0 {
             println!("{}{} arguments types:", indent, desc);
             for (i, arg_type) in argument_types.enumerate() {
@@ -82,24 +83,24 @@ fn show_type(desc: &str, clang_type: &clang::Type<'_>, indent_level: usize) {
         }
     }
 
-    if let Some(base_type) = clang_type.objc_object_base_type() {
+    if let Some(base_type) = clang_ty.objc_object_base_type() {
         println!("{}{} ObjC base type types: {:?}", indent, desc, base_type);
     }
 
-    let canonical_type = clang_type.canonical_type();
-    if &canonical_type != clang_type {
+    let canonical_type = clang_ty.canonical_type();
+    if &canonical_type != clang_ty {
         println!("{}{} canonical type: {:?}", indent, desc, canonical_type);
     }
 
-    if let Some(nullability) = clang_type.nullability() {
+    if let Some(nullability) = clang_ty.nullability() {
         println!("{}{} nullability: {:?}", indent, desc, nullability);
     }
 
-    if let Some(class_type) = clang_type.class_type() {
+    if let Some(class_type) = clang_ty.class_type() {
         println!("{}{} class type: {:?}", indent, desc, class_type);
     }
 
-    let objc_protocol_decls = clang_type.objc_protocol_decls();
+    let objc_protocol_decls = clang_ty.objc_protocol_decls();
     if objc_protocol_decls.len() > 0 {
         println!(
             "{}{} objc protocol declarations: {:?}",
@@ -108,7 +109,7 @@ fn show_type(desc: &str, clang_type: &clang::Type<'_>, indent_level: usize) {
             objc_protocol_decls.collect::<Vec<_>>()
         );
     }
-    let objc_type_arg_types = clang_type.objc_type_arg_types();
+    let objc_type_arg_types = clang_ty.objc_type_arg_types();
     if objc_type_arg_types.len() > 0 {
         println!(
             "{}{} objc type arguments: {:?}",
@@ -118,34 +119,34 @@ fn show_type(desc: &str, clang_type: &clang::Type<'_>, indent_level: usize) {
         );
     }
 
-    if let Some(pointee_type) = clang_type.pointee_type() {
+    if let Some(pointee_type) = clang_ty.pointee_type() {
         let pointee_desc = format!("{} pointee", desc);
         show_type(&pointee_desc, &pointee_type, indent_level);
     }
 
-    if let Some(elaborated_type) = clang_type.named_type() {
+    if let Some(elaborated_type) = clang_ty.named_type() {
         let pointee_desc = format!("{} elaborated type", desc);
         show_type(&pointee_desc, &elaborated_type, indent_level);
     }
 
-    if let Some(modified_type) = clang_type.modified_type() {
+    if let Some(modified_type) = clang_ty.modified_type() {
         let modified_desc = format!("{} modified", desc);
         show_type(&modified_desc, &modified_type, indent_level);
     }
 
-    if let Some(decl) = clang_type.declaration() {
+    if let Some(decl) = clang_ty.declaration() {
         println!("{}{} decl: {:?}", indent, desc, decl);
     }
 
-    if let Some(alignment) = clang_type.align_of() {
+    if let Some(alignment) = clang_ty.align_of() {
         println!("{}{} alignment: {:?}", indent, desc, alignment);
     }
 
-    if let Some(size) = clang_type.size_of() {
+    if let Some(size) = clang_ty.size_of() {
         println!("{}{} size: {:?}", indent, desc, size);
     }
 
-    if let Some(template_arguments) = clang_type.template_arguments() {
+    if let Some(template_arguments) = clang_ty.template_arguments() {
         println!(
             "{}{} template arguments: {:?}",
             indent,
@@ -154,12 +155,12 @@ fn show_type(desc: &str, clang_type: &clang::Type<'_>, indent_level: usize) {
         );
     }
 
-    if let Some(result_type) = clang_type.result_type() {
+    if let Some(result_type) = clang_ty.result_type() {
         let result_type_desc = format!("{} result type", desc);
         show_type(&result_type_desc, &result_type, indent_level);
     }
 
-    if let Some(fields) = clang_type.fields() {
+    if let Some(fields) = clang_ty.fields() {
         println!("{}{} fields:", indent, desc);
         for field in fields {
             show_tree(&field, indent_level + 1);
@@ -241,8 +242,8 @@ fn show_tree(cursor: &clang::Cursor<'_>, indent_level: usize) {
         println!("{}template kind: {:?}", indent, template_kind);
     }
 
-    if let Some(clang_type) = cursor.type_() {
-        show_type("type", &clang_type, indent_level);
+    if let Some(clang_ty) = cursor.type_() {
+        show_type("type", &clang_ty, indent_level);
     }
 
     if let Some(enum_underlying_type) = cursor.enum_decl_int_type() {
@@ -602,7 +603,7 @@ fn parm_decl_children<'a>(cursor: &clang::Cursor<'a>) -> impl Iterator<Item = cl
 #[derive(Clone, Debug, PartialEq)]
 pub struct Field {
     pub name: Option<String>,
-    pub objc_type: ObjCType,
+    pub ty: Type,
     pub bit_offset: usize,
 }
 
@@ -610,7 +611,7 @@ impl Field {
     fn from_cursor(cursor: &clang::Cursor<'_>, unnamed_tag_ids: &TagIdMap) -> Self {
         assert_eq!(cursor.kind(), CursorKind::FieldDecl);
         let name = cursor.spelling();
-        let objc_type = ObjCType::from_type(
+        let ty = Type::from_clang_ty(
             &cursor.type_().unwrap(),
             &mut parm_decl_children(cursor),
             unnamed_tag_ids,
@@ -618,7 +619,7 @@ impl Field {
         let bit_offset = cursor.offset_of_field().unwrap();
         Self {
             name,
-            objc_type,
+            ty,
             bit_offset,
         }
     }
@@ -666,8 +667,8 @@ pub struct TagRef {
 }
 
 impl TagRef {
-    fn from_type(clang_type: &clang::Type<'_>, unnamed_tag_ids: &TagIdMap) -> Self {
-        let decl = clang_type.declaration().unwrap();
+    fn from_clang_ty(clang_ty: &clang::Type<'_>, unnamed_tag_ids: &TagIdMap) -> Self {
+        let decl = clang_ty.declaration().unwrap();
 
         let kind = match decl.kind() {
             CursorKind::StructDecl => TagKind::Struct,
@@ -675,7 +676,7 @@ impl TagRef {
             CursorKind::EnumDecl => TagKind::Enum,
             unexpected_kind => panic!(
                 "Unexpected kind for tag declaration {:?}: {:?}",
-                unexpected_kind, clang_type
+                unexpected_kind, clang_ty
             ),
         };
 
@@ -689,62 +690,59 @@ impl TagRef {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Param {
     pub name: Option<String>,
-    pub objc_type: ObjCType,
+    pub ty: Type,
     pub attrs: Vec<Attr>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CallableDesc {
-    pub result: Box<ObjCType>,
+    pub result: Box<Type>,
     pub params: Option<Vec<Param>>,
     pub is_variadic: bool,
     pub attrs: Vec<Attr>,
 }
 
 impl CallableDesc {
-    fn from_type<'a>(
-        clang_type: &clang::Type<'_>,
+    fn from_clang_ty<'a>(
+        clang_ty: &clang::Type<'_>,
         base_parm_decls: &mut impl Iterator<Item = clang::Cursor<'a>>,
         unnamed_tag_ids: &TagIdMap,
     ) -> Self {
-        if clang_type.kind() == TypeKind::Attributed {
-            let mut callable = Self::from_type(
-                &clang_type.modified_type().unwrap(),
+        if clang_ty.kind() == TypeKind::Attributed {
+            let mut callable = Self::from_clang_ty(
+                &clang_ty.modified_type().unwrap(),
                 base_parm_decls,
                 unnamed_tag_ids,
             );
-            let spelling = clang_type.spelling();
+            let spelling = clang_ty.spelling();
             // Yes, that is very ugly but I could not find a better way to get that attribute
             // when it's applied to a C function.
             if spelling.contains("__attribute__((ns_returns_retained))") {
                 callable.attrs.push(Attr::NSReturnsRetained);
             } else {
-                panic!(
-                    "Have to check what this Attributed is for - {:?}",
-                    clang_type
-                );
+                panic!("Have to check what this Attributed is for - {:?}", clang_ty);
             }
             return callable;
         }
 
         // result must be processed before parameters due to the order the entities are in base_parm_decls.
-        let result = Box::new(ObjCType::from_type(
-            &clang_type.result_type().unwrap(),
+        let result = Box::new(Type::from_clang_ty(
+            &clang_ty.result_type().unwrap(),
             base_parm_decls,
             unnamed_tag_ids,
         ));
 
-        let params = match clang_type.kind() {
+        let params = match clang_ty.kind() {
             TypeKind::FunctionNoProto => None,
             TypeKind::FunctionProto => Some({
-                clang_type
+                clang_ty
                     .argument_types()
                     .unwrap()
                     .map(|_| {
                         // Not using the value of argument types, only their count.
                         // The param decl taken from the cursor seems to always have better information.
                         let parm_decl = base_parm_decls.next().unwrap();
-                        let objc_type = ObjCType::from_type(
+                        let ty = Type::from_clang_ty(
                             &parm_decl.type_().unwrap(),
                             &mut parm_decl_children(&parm_decl),
                             unnamed_tag_ids,
@@ -752,7 +750,7 @@ impl CallableDesc {
                         let attrs = Attr::from_decl(&parm_decl);
                         Param {
                             name: parm_decl.spelling(),
-                            objc_type,
+                            ty,
                             attrs,
                         }
                     })
@@ -760,14 +758,14 @@ impl CallableDesc {
             }),
             unexpected_kind => panic!(
                 "Unexpected kind for function declaration {:?}: {:?}",
-                unexpected_kind, clang_type
+                unexpected_kind, clang_ty
             ),
         };
 
         Self {
             result,
             params,
-            is_variadic: clang_type.is_variadic_function(),
+            is_variadic: clang_ty.is_variadic_function(),
             attrs: Vec::new(),
         }
     }
@@ -780,10 +778,10 @@ pub struct TypedefRef {
 }
 
 impl TypedefRef {
-    fn from_type(clang_type: &clang::Type<'_>) -> Self {
-        assert_eq!(clang_type.kind(), TypeKind::Typedef);
-        let name = clang_type.spelling();
-        let nullability = clang_type.nullability().and_then(Into::into);
+    fn from_clang_ty(clang_ty: &clang::Type<'_>) -> Self {
+        assert_eq!(clang_ty.kind(), TypeKind::Typedef);
+        let name = clang_ty.spelling();
+        let nullability = clang_ty.nullability().and_then(Into::into);
         Self { name, nullability }
     }
 
@@ -797,7 +795,7 @@ impl TypedefRef {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Pointer {
-    pub pointee: Box<ObjCType>,
+    pub pointee: Box<Type>,
     pub nullability: Option<Nullability>,
 }
 
@@ -813,7 +811,7 @@ impl Pointer {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Array {
     pub size: Option<usize>,
-    pub element: Box<ObjCType>,
+    pub element: Box<Type>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -847,8 +845,8 @@ pub struct EnumValue {
     pub attrs: Vec<Attr>,
 }
 
-fn type_signedness(clang_type: &clang::Type<'_>) -> Option<Signedness> {
-    match clang_type.kind() {
+fn type_signedness(clang_ty: &clang::Type<'_>) -> Option<Signedness> {
+    match clang_ty.kind() {
         TypeKind::SChar
         | TypeKind::CharS
         | TypeKind::Short
@@ -864,15 +862,15 @@ fn type_signedness(clang_type: &clang::Type<'_>) -> Option<Signedness> {
         | TypeKind::UInt
         | TypeKind::ULong
         | TypeKind::ULongLong => Some(Signedness::Unsigned),
-        TypeKind::Attributed => type_signedness(&clang_type.modified_type().unwrap()),
+        TypeKind::Attributed => type_signedness(&clang_ty.modified_type().unwrap()),
         TypeKind::Typedef => type_signedness(
-            &clang_type
+            &clang_ty
                 .declaration()
                 .unwrap()
                 .typedef_decl_underlying_type()
                 .unwrap(),
         ),
-        TypeKind::Elaborated => type_signedness(&clang_type.named_type().unwrap()),
+        TypeKind::Elaborated => type_signedness(&clang_ty.named_type().unwrap()),
         _ => None,
     }
 }
@@ -915,7 +913,7 @@ pub enum Unsupported {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum ObjCType {
+pub enum Type {
     Void,
     Bool,
     Num(NumKind),
@@ -930,13 +928,13 @@ pub enum ObjCType {
     Unsupported(Unsupported),
 }
 
-impl ObjCType {
-    fn from_type<'a>(
-        clang_type: &clang::Type<'_>,
+impl Type {
+    fn from_clang_ty<'a>(
+        clang_ty: &clang::Type<'_>,
         base_parm_decls: &mut impl Iterator<Item = clang::Cursor<'a>>,
         unnamed_tag_ids: &TagIdMap,
     ) -> Self {
-        match clang_type.kind() {
+        match clang_ty.kind() {
             TypeKind::Void => Self::Void,
             // SChar is "signed char", CharS is "char" when it is signed by default.
             TypeKind::SChar | TypeKind::CharS => Self::Num(NumKind::SChar),
@@ -954,9 +952,9 @@ impl ObjCType {
             TypeKind::Double => Self::Num(NumKind::Double),
             TypeKind::LongDouble => Self::Num(NumKind::LongDouble),
             TypeKind::Pointer => {
-                let pointee_type = clang_type.pointee_type().unwrap();
+                let pointee_type = clang_ty.pointee_type().unwrap();
                 Self::Pointer(Pointer {
-                    pointee: Box::new(Self::from_type(
+                    pointee: Box::new(Self::from_clang_ty(
                         &pointee_type,
                         base_parm_decls,
                         unnamed_tag_ids,
@@ -966,7 +964,7 @@ impl ObjCType {
             }
             TypeKind::ObjCObjectPointer => {
                 let pointee_type = {
-                    let mut pointee = clang_type.pointee_type().unwrap();
+                    let mut pointee = clang_ty.pointee_type().unwrap();
                     loop {
                         match pointee.kind() {
                             // TODO: Check what's the difference between ObjCObject and ObjCInterface
@@ -992,7 +990,11 @@ impl ObjCType {
                 let type_args: Vec<ObjCTypeArg> = pointee_type
                     .objc_type_arg_types()
                     .map(|arg| {
-                        match Self::from_type(&arg, &mut Vec::new().into_iter(), unnamed_tag_ids) {
+                        match Self::from_clang_ty(
+                            &arg,
+                            &mut Vec::new().into_iter(),
+                            unnamed_tag_ids,
+                        ) {
                             Self::ObjPtr(ptr) => ObjCTypeArg::ObjPtr(ptr),
                             Self::Typedef(typedef) => ObjCTypeArg::Typedef(typedef),
                             unexpected => {
@@ -1023,12 +1025,12 @@ impl ObjCType {
                 }
             }
             TypeKind::Attributed => {
-                let modified = Self::from_type(
-                    &clang_type.modified_type().unwrap(),
+                let modified = Self::from_clang_ty(
+                    &clang_ty.modified_type().unwrap(),
                     base_parm_decls,
                     unnamed_tag_ids,
                 );
-                if let Some(nullability) = clang_type.nullability() {
+                if let Some(nullability) = clang_ty.nullability() {
                     // Note that even if Into::into returns None we probably want to override the one existing with None.
                     let nullability = nullability.into();
                     match modified {
@@ -1045,7 +1047,7 @@ impl ObjCType {
                 }
             }
             TypeKind::ObjCTypeParam => Self::ObjPtr(ObjPtr {
-                kind: ObjPtrKind::TypeParam(clang_type.spelling()),
+                kind: ObjPtrKind::TypeParam(clang_ty.spelling()),
                 nullability: None,
             }),
             TypeKind::ObjCId => Self::ObjPtr(ObjPtr {
@@ -1060,14 +1062,14 @@ impl ObjCType {
                 nullability: None,
             }),
             TypeKind::Typedef => {
-                let decl = clang_type.declaration().unwrap();
+                let decl = clang_ty.declaration().unwrap();
                 if decl.kind() == CursorKind::TemplateTypeParameter {
                     Self::ObjPtr(ObjPtr {
-                        kind: ObjPtrKind::TypeParam(clang_type.spelling()),
+                        kind: ObjPtrKind::TypeParam(clang_ty.spelling()),
                         nullability: None,
                     })
                 } else {
-                    let typedef = TypedefRef::from_type(&clang_type);
+                    let typedef = TypedefRef::from_clang_ty(&clang_ty);
                     if typedef.name == "instancetype" {
                         Self::ObjPtr(ObjPtr {
                             kind: ObjPtrKind::Instancetype,
@@ -1078,36 +1080,36 @@ impl ObjCType {
                     }
                 }
             }
-            TypeKind::Elaborated => Self::from_type(
-                &clang_type.named_type().unwrap(),
+            TypeKind::Elaborated => Self::from_clang_ty(
+                &clang_ty.named_type().unwrap(),
                 base_parm_decls,
                 unnamed_tag_ids,
             ),
             TypeKind::Record | TypeKind::Enum => {
-                Self::Tag(TagRef::from_type(&clang_type, unnamed_tag_ids))
+                Self::Tag(TagRef::from_clang_ty(&clang_ty, unnamed_tag_ids))
             }
             TypeKind::FunctionNoProto | TypeKind::FunctionProto => Self::Function(
-                CallableDesc::from_type(&clang_type, base_parm_decls, unnamed_tag_ids),
+                CallableDesc::from_clang_ty(&clang_ty, base_parm_decls, unnamed_tag_ids),
             ),
             TypeKind::ConstantArray => Self::Array(Array {
-                size: Some(clang_type.num_elements().unwrap()),
-                element: Box::new(Self::from_type(
-                    &clang_type.element_type().unwrap(),
+                size: Some(clang_ty.num_elements().unwrap()),
+                element: Box::new(Self::from_clang_ty(
+                    &clang_ty.element_type().unwrap(),
                     base_parm_decls,
                     unnamed_tag_ids,
                 )),
             }),
             TypeKind::IncompleteArray => Self::Array(Array {
                 size: None,
-                element: Box::new(Self::from_type(
-                    &clang_type.element_type().unwrap(),
+                element: Box::new(Self::from_clang_ty(
+                    &clang_ty.element_type().unwrap(),
                     base_parm_decls,
                     unnamed_tag_ids,
                 )),
             }),
             TypeKind::BlockPointer => Self::ObjPtr(ObjPtr {
-                kind: ObjPtrKind::Block(CallableDesc::from_type(
-                    &clang_type.pointee_type().unwrap(),
+                kind: ObjPtrKind::Block(CallableDesc::from_clang_ty(
+                    &clang_ty.pointee_type().unwrap(),
                     base_parm_decls,
                     unnamed_tag_ids,
                 )),
@@ -1118,7 +1120,7 @@ impl ObjCType {
             TypeKind::Unexposed => Self::Unsupported(Unsupported::Unexposed),
             TypeKind::Complex => Self::Unsupported(Unsupported::Complex),
             TypeKind::ExtVector => Self::Unsupported(Unsupported::ExtVector),
-            unknown_kind => panic!("Unhandled type kind {:?}: {:?}", unknown_kind, clang_type),
+            unknown_kind => panic!("Unhandled type kind {:?}: {:?}", unknown_kind, clang_ty),
         }
     }
 }
@@ -1177,7 +1179,7 @@ impl Location {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObjCParam {
     pub name: String,
-    pub objc_type: ObjCType,
+    pub ty: Type,
     pub attrs: Vec<Attr>,
 }
 
@@ -1185,17 +1187,13 @@ impl ObjCParam {
     fn from_cursor(decl: &clang::Cursor<'_>, unnamed_tag_ids: &TagIdMap) -> Self {
         assert_eq!(decl.kind(), CursorKind::ParmDecl);
         let name = decl.spelling().unwrap();
-        let objc_type = ObjCType::from_type(
+        let ty = Type::from_clang_ty(
             &decl.type_().unwrap(),
             &mut parm_decl_children(decl),
             unnamed_tag_ids,
         );
         let attrs = Attr::from_decl(&decl);
-        Self {
-            name,
-            objc_type,
-            attrs,
-        }
+        Self { name, ty, attrs }
     }
 }
 
@@ -1210,7 +1208,7 @@ pub struct ObjCMethod {
     pub name: String,
     pub kind: ObjCMethodKind,
     pub params: Vec<ObjCParam>,
-    pub result: ObjCType,
+    pub result: Type,
     pub attrs: Vec<Attr>,
     pub type_encoding: String,
 }
@@ -1229,7 +1227,7 @@ impl ObjCMethod {
             .map(|arg| ObjCParam::from_cursor(&arg, unnamed_tag_ids))
             .collect();
 
-        let result = ObjCType::from_type(
+        let result = Type::from_clang_ty(
             &cursor.result_type().unwrap(),
             &mut parm_decl_children(cursor),
             unnamed_tag_ids,
@@ -1284,7 +1282,7 @@ pub enum PropOwnership {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Property {
     pub name: String,
-    pub value: ObjCType,
+    pub value: Type,
     pub is_atomic: bool,
     pub is_writable: bool,
     pub is_class: bool,
@@ -1299,7 +1297,7 @@ impl Property {
         assert_eq!(cursor.kind(), CursorKind::ObjCPropertyDecl);
 
         let name = cursor.spelling().unwrap();
-        let value = ObjCType::from_type(
+        let value = Type::from_clang_ty(
             &cursor.type_().unwrap(),
             &mut parm_decl_children(&cursor),
             unnamed_tag_ids,
@@ -1620,7 +1618,7 @@ impl ProtocolDef {
 #[derive(Clone, Debug, PartialEq)]
 pub struct TypedefDecl {
     pub name: String,
-    pub underlying: ObjCType,
+    pub underlying: Type,
     pub origin: Option<Origin>,
 }
 
@@ -1629,7 +1627,7 @@ impl TypedefDecl {
         assert_eq!(decl.kind(), CursorKind::TypedefDecl);
 
         let name = decl.spelling().unwrap();
-        let underlying = ObjCType::from_type(
+        let underlying = Type::from_clang_ty(
             &decl.typedef_decl_underlying_type().unwrap(),
             &mut parm_decl_children(&decl),
             unnamed_tag_ids,
@@ -1702,11 +1700,11 @@ pub struct FuncDecl {
 impl FuncDecl {
     fn from_cursor(decl: &clang::Cursor<'_>, unnamed_tag_ids: &TagIdMap) -> Self {
         assert_eq!(decl.kind(), CursorKind::FunctionDecl);
-        let clang_type = decl.type_().unwrap();
+        let clang_ty = decl.type_().unwrap();
 
         let name = decl.spelling().unwrap();
         let desc =
-            CallableDesc::from_type(&clang_type, &mut parm_decl_children(&decl), unnamed_tag_ids);
+            CallableDesc::from_clang_ty(&clang_ty, &mut parm_decl_children(&decl), unnamed_tag_ids);
         let origin = Origin::from_cursor(decl);
 
         Self { name, desc, origin }
@@ -1716,7 +1714,7 @@ impl FuncDecl {
 #[derive(Clone, Debug, PartialEq)]
 pub struct EnumDef {
     pub id: TagId,
-    pub underlying: ObjCType,
+    pub underlying: Type,
     pub values: Vec<EnumValue>,
     pub origin: Option<Origin>,
 }
@@ -1727,7 +1725,7 @@ impl EnumDef {
 
         let id = TagId::from_cursor(decl, unnamed_tag_ids);
 
-        let underlying = ObjCType::from_type(
+        let underlying = Type::from_clang_ty(
             &decl.enum_decl_int_type().unwrap(),
             &mut parm_decl_children(&decl),
             unnamed_tag_ids,
@@ -2020,7 +2018,7 @@ mod tests {
         let expected_items = vec![AttributedItem {
             item: Item::TypedefDecl(TypedefDecl {
                 name: "I".to_string(),
-                underlying: ObjCType::Num(NumKind::Int),
+                underlying: Type::Num(NumKind::Int),
                 origin: Some(Origin::Framework("Foundation".to_string())),
             }),
             attrs: vec![],
@@ -2054,7 +2052,7 @@ mod tests {
                         kind: ObjCMethodKind::Instance,
                         params: vec![ObjCParam {
                             name: "x".to_string(),
-                            objc_type: ObjCType::ObjPtr(ObjPtr {
+                            ty: Type::ObjPtr(ObjPtr {
                                 kind: ObjPtrKind::Id(IdObjPtr {
                                     protocols: vec!["P1".to_string(), "P2".to_string()],
                                 }),
@@ -2062,7 +2060,7 @@ mod tests {
                             }),
                             attrs: vec![],
                         }],
-                        result: ObjCType::Void,
+                        result: Type::Void,
                         attrs: vec![],
                         type_encoding: "v24@0:8@16".to_string(),
                     },
@@ -2071,7 +2069,7 @@ mod tests {
                         kind: ObjCMethodKind::Class,
                         params: vec![ObjCParam {
                             name: "y".to_string(),
-                            objc_type: ObjCType::ObjPtr(ObjPtr {
+                            ty: Type::ObjPtr(ObjPtr {
                                 kind: ObjPtrKind::SomeInstance(SomeInstanceObjPtr {
                                     interface: "B".to_string(),
                                     protocols: vec!["P2".to_string()],
@@ -2081,7 +2079,7 @@ mod tests {
                             }),
                             attrs: vec![],
                         }],
-                        result: ObjCType::Void,
+                        result: Type::Void,
                         attrs: vec![],
                         type_encoding: "v24@0:8@16".to_string(),
                     },
@@ -2090,7 +2088,7 @@ mod tests {
                         kind: ObjCMethodKind::Instance,
                         params: vec![ObjCParam {
                             name: "z".to_string(),
-                            objc_type: ObjCType::ObjPtr(ObjPtr {
+                            ty: Type::ObjPtr(ObjPtr {
                                 kind: ObjPtrKind::SomeInstance(SomeInstanceObjPtr {
                                     interface: "B".to_string(),
                                     protocols: vec!["P2".to_string()],
@@ -2100,7 +2098,7 @@ mod tests {
                             }),
                             attrs: vec![],
                         }],
-                        result: ObjCType::ObjPtr(ObjPtr {
+                        result: Type::ObjPtr(ObjPtr {
                             kind: ObjPtrKind::Id(IdObjPtr {
                                 protocols: vec!["P1".to_string(), "P2".to_string()],
                             }),
@@ -2193,7 +2191,7 @@ mod tests {
                         name: "x".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
-                        result: ObjCType::ObjPtr(ObjPtr {
+                        result: Type::ObjPtr(ObjPtr {
                             kind: ObjPtrKind::TypeParam("X".to_string()),
                             nullability: Some(Nullability::NonNull),
                         }),
@@ -2246,7 +2244,7 @@ mod tests {
                                 name: "x".to_string(),
                                 kind: ObjCMethodKind::Instance,
                                 params: vec![],
-                                result: ObjCType::Void,
+                                result: Type::Void,
                                 attrs: vec![],
                                 type_encoding: "v16@0:8".to_string(),
                             },
@@ -2257,7 +2255,7 @@ mod tests {
                                 name: "y".to_string(),
                                 kind: ObjCMethodKind::Class,
                                 params: vec![],
-                                result: ObjCType::Void,
+                                result: Type::Void,
                                 attrs: vec![],
                                 type_encoding: "v16@0:8".to_string(),
                             },
@@ -2268,7 +2266,7 @@ mod tests {
                                 name: "z".to_string(),
                                 kind: ObjCMethodKind::Instance,
                                 params: vec![],
-                                result: ObjCType::Num(NumKind::Int),
+                                result: Type::Num(NumKind::Int),
                                 attrs: vec![],
                                 type_encoding: "i16@0:8".to_string(),
                             },
@@ -2326,7 +2324,7 @@ mod tests {
                         name: "foo".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
-                        result: ObjCType::Void,
+                        result: Type::Void,
                         attrs: vec![],
                         type_encoding: "v16@0:8".to_string(),
                     }],
@@ -2344,7 +2342,7 @@ mod tests {
                         name: "firstUnnamedCategoryMethod".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
-                        result: ObjCType::Void,
+                        result: Type::Void,
                         attrs: vec![],
                         type_encoding: "v16@0:8".to_string(),
                     }],
@@ -2362,13 +2360,13 @@ mod tests {
                         name: "secondUnnamedCategoryMethod".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
-                        result: ObjCType::Void,
+                        result: Type::Void,
                         attrs: vec![],
                         type_encoding: "v16@0:8".to_string(),
                     }],
                     properties: vec![Property {
                         name: "propertyOnUnnamedCategory".to_string(),
-                        value: ObjCType::Num(NumKind::Int),
+                        value: Type::Num(NumKind::Int),
                         is_atomic: true,
                         is_writable: false,
                         is_class: false,
@@ -2409,7 +2407,7 @@ mod tests {
                         name: "x".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
-                        result: ObjCType::ObjPtr(ObjPtr {
+                        result: Type::ObjPtr(ObjPtr {
                             kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
                             nullability: None,
                         }),
@@ -2420,7 +2418,7 @@ mod tests {
                         name: "y".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
-                        result: ObjCType::ObjPtr(ObjPtr {
+                        result: Type::ObjPtr(ObjPtr {
                             kind: ObjPtrKind::Id(IdObjPtr {
                                 protocols: vec!["P".to_string()],
                             }),
@@ -2433,7 +2431,7 @@ mod tests {
                         name: "z".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
-                        result: ObjCType::ObjPtr(ObjPtr {
+                        result: Type::ObjPtr(ObjPtr {
                             kind: ObjPtrKind::Id(IdObjPtr {
                                 protocols: vec!["P".to_string()],
                             }),
@@ -2466,7 +2464,7 @@ mod tests {
             AttributedItem {
                 item: Item::TypedefDecl(TypedefDecl {
                     name: "I".to_string(),
-                    underlying: ObjCType::Num(NumKind::Int),
+                    underlying: Type::Num(NumKind::Int),
                     origin: None,
                 }),
                 attrs: vec![],
@@ -2481,7 +2479,7 @@ mod tests {
                         name: "foo".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
-                        result: ObjCType::Typedef(TypedefRef {
+                        result: Type::Typedef(TypedefRef {
                             name: "I".to_string(),
                             nullability: None,
                         }),
@@ -2517,7 +2515,7 @@ mod tests {
                     name: "foo".to_string(),
                     kind: ObjCMethodKind::Instance,
                     params: vec![],
-                    result: ObjCType::ObjPtr(ObjPtr {
+                    result: Type::ObjPtr(ObjPtr {
                         kind: ObjPtrKind::Instancetype,
                         nullability: Some(Nullability::NonNull),
                     }),
@@ -2554,7 +2552,7 @@ mod tests {
                     id: TagId::Named("S".to_string()),
                     fields: vec![Field {
                         name: Some("x".to_string()),
-                        objc_type: ObjCType::Num(NumKind::Int),
+                        ty: Type::Num(NumKind::Int),
                         bit_offset: 0,
                     }],
                     kind: RecordKind::Struct,
@@ -2565,7 +2563,7 @@ mod tests {
             AttributedItem {
                 item: Item::TypedefDecl(TypedefDecl {
                     name: "T".to_string(),
-                    underlying: ObjCType::Tag(TagRef {
+                    underlying: Type::Tag(TagRef {
                         id: TagId::Named("S".to_string()),
                         kind: TagKind::Struct,
                         attrs: vec![],
@@ -2585,7 +2583,7 @@ mod tests {
                             name: "standardStruct".to_string(),
                             kind: ObjCMethodKind::Instance,
                             params: vec![],
-                            result: ObjCType::Tag(TagRef {
+                            result: Type::Tag(TagRef {
                                 id: TagId::Named("S".to_string()),
                                 kind: TagKind::Struct,
                                 attrs: vec![],
@@ -2597,7 +2595,7 @@ mod tests {
                             name: "inlineUnnamedStruct".to_string(),
                             kind: ObjCMethodKind::Instance,
                             params: vec![],
-                            result: ObjCType::Tag(TagRef {
+                            result: Type::Tag(TagRef {
                                 id: TagId::Unnamed(1),
                                 kind: TagKind::Struct,
                                 attrs: vec![],
@@ -2609,8 +2607,8 @@ mod tests {
                             name: "pointerToStructTypedef".to_string(),
                             kind: ObjCMethodKind::Instance,
                             params: vec![],
-                            result: ObjCType::Pointer(Pointer {
-                                pointee: Box::new(ObjCType::Typedef(TypedefRef {
+                            result: Type::Pointer(Pointer {
+                                pointee: Box::new(Type::Typedef(TypedefRef {
                                     name: "T".to_string(),
                                     nullability: None,
                                 })),
@@ -2623,8 +2621,8 @@ mod tests {
                             name: "pointerToUndeclaredStruct".to_string(),
                             kind: ObjCMethodKind::Instance,
                             params: vec![],
-                            result: ObjCType::Pointer(Pointer {
-                                pointee: Box::new(ObjCType::Tag(TagRef {
+                            result: Type::Pointer(Pointer {
+                                pointee: Box::new(Type::Tag(TagRef {
                                     id: TagId::Named("Undeclared".to_string()),
                                     kind: TagKind::Struct,
                                     attrs: vec![],
@@ -2638,8 +2636,8 @@ mod tests {
                             name: "pointerToStructDeclaredAfterwards".to_string(),
                             kind: ObjCMethodKind::Instance,
                             params: vec![],
-                            result: ObjCType::Pointer(Pointer {
-                                pointee: Box::new(ObjCType::Tag(TagRef {
+                            result: Type::Pointer(Pointer {
+                                pointee: Box::new(Type::Tag(TagRef {
                                     id: TagId::Named("DeclaredAfterwards".to_string()),
                                     kind: TagKind::Struct,
                                     attrs: vec![],
@@ -2662,12 +2660,12 @@ mod tests {
                     fields: vec![
                         Field {
                             name: Some("f".to_string()),
-                            objc_type: ObjCType::Num(NumKind::Float),
+                            ty: Type::Num(NumKind::Float),
                             bit_offset: 0,
                         },
                         Field {
                             name: None,
-                            objc_type: ObjCType::Tag(TagRef {
+                            ty: Type::Tag(TagRef {
                                 id: TagId::Unnamed(2),
                                 kind: TagKind::Union,
                                 attrs: vec![],
@@ -2686,12 +2684,12 @@ mod tests {
                     fields: vec![
                         Field {
                             name: Some("i".to_string()),
-                            objc_type: ObjCType::Num(NumKind::Int),
+                            ty: Type::Num(NumKind::Int),
                             bit_offset: 0,
                         },
                         Field {
                             name: Some("d".to_string()),
-                            objc_type: ObjCType::Num(NumKind::Double),
+                            ty: Type::Num(NumKind::Double),
                             bit_offset: 0,
                         },
                     ],
@@ -2704,7 +2702,7 @@ mod tests {
                     id: TagId::Named("DeclaredAfterwards".to_string()),
                     fields: vec![Field {
                         name: Some("c".to_string()),
-                        objc_type: ObjCType::Num(NumKind::SChar),
+                        ty: Type::Num(NumKind::SChar),
                         bit_offset: 0,
                     }],
                     kind: RecordKind::Struct,
@@ -2736,12 +2734,12 @@ mod tests {
             AttributedItem {
                 item: Item::TypedefDecl(TypedefDecl {
                     name: "T".to_string(),
-                    underlying: ObjCType::Pointer(Pointer {
-                        pointee: Box::new(ObjCType::Function(CallableDesc {
-                            result: Box::new(ObjCType::Void),
+                    underlying: Type::Pointer(Pointer {
+                        pointee: Box::new(Type::Function(CallableDesc {
+                            result: Box::new(Type::Void),
                             params: Some(vec![Param {
                                 name: Some("typedefParam".to_string()),
-                                objc_type: ObjCType::Num(NumKind::Int),
+                                ty: Type::Num(NumKind::Int),
                                 attrs: vec![],
                             }]),
                             is_variadic: false,
@@ -2765,9 +2763,9 @@ mod tests {
                             name: "returningFunctionPointerWithUndefinedParameters".to_string(),
                             kind: ObjCMethodKind::Instance,
                             params: vec![],
-                            result: ObjCType::Pointer(Pointer {
-                                pointee: Box::new(ObjCType::Function(CallableDesc {
-                                    result: Box::new(ObjCType::Num(NumKind::Int)),
+                            result: Type::Pointer(Pointer {
+                                pointee: Box::new(Type::Function(CallableDesc {
+                                    result: Box::new(Type::Num(NumKind::Int)),
                                     params: None,
                                     is_variadic: true,
                                     attrs: vec![],
@@ -2782,12 +2780,12 @@ mod tests {
                             name: "returningFunctionPointerVariadic".to_string(),
                             kind: ObjCMethodKind::Instance,
                             params: vec![],
-                            result: ObjCType::Pointer(Pointer {
-                                pointee: Box::new(ObjCType::Function(CallableDesc {
-                                    result: Box::new(ObjCType::Num(NumKind::Int)),
+                            result: Type::Pointer(Pointer {
+                                pointee: Box::new(Type::Function(CallableDesc {
+                                    result: Box::new(Type::Num(NumKind::Int)),
                                     params: Some(vec![Param {
                                         name: None,
-                                        objc_type: ObjCType::Num(NumKind::Float),
+                                        ty: Type::Num(NumKind::Float),
                                         attrs: vec![],
                                     }]),
                                     is_variadic: true,
@@ -2803,9 +2801,9 @@ mod tests {
                             name: "returningFunctionPointerWithNoParameters".to_string(),
                             kind: ObjCMethodKind::Instance,
                             params: vec![],
-                            result: ObjCType::Pointer(Pointer {
-                                pointee: Box::new(ObjCType::Function(CallableDesc {
-                                    result: Box::new(ObjCType::Num(NumKind::Int)),
+                            result: Type::Pointer(Pointer {
+                                pointee: Box::new(Type::Function(CallableDesc {
+                                    result: Box::new(Type::Num(NumKind::Int)),
                                     params: Some(vec![]),
                                     is_variadic: false,
                                     attrs: vec![],
@@ -2820,7 +2818,7 @@ mod tests {
                             name: "returningFunctionPointerTypedef".to_string(),
                             kind: ObjCMethodKind::Instance,
                             params: vec![],
-                            result: ObjCType::Typedef(TypedefRef {
+                            result: Type::Typedef(TypedefRef {
                                 name: "T".to_string(),
                                 nullability: None,
                             }),
@@ -2832,14 +2830,14 @@ mod tests {
                             name: "returningFunctionPointerReturningFunctionPointer".to_string(),
                             kind: ObjCMethodKind::Instance,
                             params: vec![],
-                            result: ObjCType::Pointer(Pointer {
-                                pointee: Box::new(ObjCType::Function(CallableDesc {
-                                    result: Box::new(ObjCType::Pointer(Pointer {
-                                        pointee: Box::new(ObjCType::Function(CallableDesc {
-                                            result: Box::new(ObjCType::Num(NumKind::SChar)),
+                            result: Type::Pointer(Pointer {
+                                pointee: Box::new(Type::Function(CallableDesc {
+                                    result: Box::new(Type::Pointer(Pointer {
+                                        pointee: Box::new(Type::Function(CallableDesc {
+                                            result: Box::new(Type::Num(NumKind::SChar)),
                                             params: Some(vec![Param {
                                                 name: Some("outerParam".to_string()),
-                                                objc_type: ObjCType::Num(NumKind::Float),
+                                                ty: Type::Num(NumKind::Float),
                                                 attrs: vec![],
                                             }]),
                                             is_variadic: false,
@@ -2849,7 +2847,7 @@ mod tests {
                                     })),
                                     params: Some(vec![Param {
                                         name: Some("innerParam".to_string()),
-                                        objc_type: ObjCType::Num(NumKind::Double),
+                                        ty: Type::Num(NumKind::Double),
                                         attrs: vec![],
                                     }]),
                                     is_variadic: false,
@@ -2868,7 +2866,7 @@ mod tests {
                             params: vec![
                                 ObjCParam {
                                     name: "typedefParam".to_string(),
-                                    objc_type: ObjCType::Typedef(TypedefRef {
+                                    ty: Type::Typedef(TypedefRef {
                                         name: "T".to_string(),
                                         nullability: None,
                                     }),
@@ -2876,9 +2874,9 @@ mod tests {
                                 },
                                 ObjCParam {
                                     name: "complicatedParam".to_string(),
-                                    objc_type: ObjCType::Pointer(Pointer {
-                                        pointee: Box::new(ObjCType::Function(CallableDesc {
-                                            result: Box::new(ObjCType::ObjPtr(ObjPtr {
+                                    ty: Type::Pointer(Pointer {
+                                        pointee: Box::new(Type::Function(CallableDesc {
+                                            result: Box::new(Type::ObjPtr(ObjPtr {
                                                 kind: ObjPtrKind::SomeInstance(
                                                     SomeInstanceObjPtr {
                                                         interface: "A".to_string(),
@@ -2891,24 +2889,22 @@ mod tests {
                                             params: Some(vec![
                                                 Param {
                                                     name: Some("someFloat".to_string()),
-                                                    objc_type: ObjCType::Num(NumKind::Float),
+                                                    ty: Type::Num(NumKind::Float),
                                                     attrs: vec![],
                                                 },
                                                 Param {
                                                     name: Some("functionPointerParam".to_string()),
-                                                    objc_type: ObjCType::Pointer(Pointer {
-                                                        pointee: Box::new(ObjCType::Function(
+                                                    ty: Type::Pointer(Pointer {
+                                                        pointee: Box::new(Type::Function(
                                                             CallableDesc {
-                                                                result: Box::new(ObjCType::Num(
+                                                                result: Box::new(Type::Num(
                                                                     NumKind::Int,
                                                                 )),
                                                                 params: Some(vec![Param {
                                                                     name: Some(
                                                                         "someChar".to_string(),
                                                                     ),
-                                                                    objc_type: ObjCType::Num(
-                                                                        NumKind::SChar,
-                                                                    ),
+                                                                    ty: Type::Num(NumKind::SChar),
                                                                     attrs: vec![],
                                                                 }]),
                                                                 is_variadic: false,
@@ -2928,9 +2924,9 @@ mod tests {
                                     attrs: vec![],
                                 },
                             ],
-                            result: ObjCType::Pointer(Pointer {
-                                pointee: Box::new(ObjCType::Function(CallableDesc {
-                                    result: Box::new(ObjCType::ObjPtr(ObjPtr {
+                            result: Type::Pointer(Pointer {
+                                pointee: Box::new(Type::Function(CallableDesc {
+                                    result: Box::new(Type::ObjPtr(ObjPtr {
                                         kind: ObjPtrKind::SomeInstance(SomeInstanceObjPtr {
                                             interface: "A".to_string(),
                                             protocols: vec![],
@@ -2940,7 +2936,7 @@ mod tests {
                                     })),
                                     params: Some(vec![Param {
                                         name: Some("returnedFunctionParameter".to_string()),
-                                        objc_type: ObjCType::Num(NumKind::Short),
+                                        ty: Type::Num(NumKind::Short),
                                         attrs: vec![],
                                     }]),
                                     is_variadic: false,
@@ -2984,8 +2980,8 @@ mod tests {
             AttributedItem {
                 item: Item::TypedefDecl(TypedefDecl {
                     name: "Class".to_string(),
-                    underlying: ObjCType::Pointer(Pointer {
-                        pointee: Box::new(ObjCType::Tag(TagRef {
+                    underlying: Type::Pointer(Pointer {
+                        pointee: Box::new(Type::Tag(TagRef {
                             id: TagId::Named("objc_class".to_string()),
                             kind: TagKind::Struct,
                             attrs: vec![],
@@ -3001,7 +2997,7 @@ mod tests {
                     id: TagId::Named("objc_object".to_string()),
                     fields: vec![Field {
                         name: Some("isa".to_string()),
-                        objc_type: ObjCType::ObjPtr(ObjPtr {
+                        ty: Type::ObjPtr(ObjPtr {
                             kind: ObjPtrKind::Class,
                             nullability: Some(Nullability::NonNull),
                         }),
@@ -3015,8 +3011,8 @@ mod tests {
             AttributedItem {
                 item: Item::TypedefDecl(TypedefDecl {
                     name: "id".to_string(),
-                    underlying: ObjCType::Pointer(Pointer {
-                        pointee: Box::new(ObjCType::Tag(TagRef {
+                    underlying: Type::Pointer(Pointer {
+                        pointee: Box::new(Type::Tag(TagRef {
                             id: TagId::Named("objc_object".to_string()),
                             kind: TagKind::Struct,
                             attrs: vec![],
@@ -3030,8 +3026,8 @@ mod tests {
             AttributedItem {
                 item: Item::TypedefDecl(TypedefDecl {
                     name: "SEL".to_string(),
-                    underlying: ObjCType::Pointer(Pointer {
-                        pointee: Box::new(ObjCType::Tag(TagRef {
+                    underlying: Type::Pointer(Pointer {
+                        pointee: Box::new(Type::Tag(TagRef {
                             id: TagId::Named("objc_selector".to_string()),
                             kind: TagKind::Struct,
                             attrs: vec![],
@@ -3045,16 +3041,16 @@ mod tests {
             AttributedItem {
                 item: Item::TypedefDecl(TypedefDecl {
                     name: "IMP".to_string(),
-                    underlying: ObjCType::Pointer(Pointer {
-                        pointee: Box::new(ObjCType::Function(CallableDesc {
-                            result: Box::new(ObjCType::ObjPtr(ObjPtr {
+                    underlying: Type::Pointer(Pointer {
+                        pointee: Box::new(Type::Function(CallableDesc {
+                            result: Box::new(Type::ObjPtr(ObjPtr {
                                 kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
                                 nullability: Some(Nullability::Nullable),
                             })),
                             params: Some(vec![
                                 Param {
                                     name: None,
-                                    objc_type: ObjCType::ObjPtr(ObjPtr {
+                                    ty: Type::ObjPtr(ObjPtr {
                                         kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
                                         nullability: Some(Nullability::NonNull),
                                     }),
@@ -3062,7 +3058,7 @@ mod tests {
                                 },
                                 Param {
                                     name: None,
-                                    objc_type: ObjCType::ObjCSel(Some(Nullability::NonNull)),
+                                    ty: Type::ObjCSel(Some(Nullability::NonNull)),
                                     attrs: vec![],
                                 },
                             ]),
@@ -3085,10 +3081,10 @@ mod tests {
                             kind: ObjCMethodKind::Instance,
                             params: vec![ObjCParam {
                                 name: "aSelector".to_string(),
-                                objc_type: ObjCType::ObjCSel(None),
+                                ty: Type::ObjCSel(None),
                                 attrs: vec![],
                             }],
-                            result: ObjCType::Typedef(TypedefRef {
+                            result: Type::Typedef(TypedefRef {
                                 name: "IMP".to_string(),
                                 nullability: None,
                             }),
@@ -3120,10 +3116,10 @@ mod tests {
             item: Item::FuncDecl(FuncDecl {
                 name: "NSLog".to_string(),
                 desc: CallableDesc {
-                    result: Box::new(ObjCType::Void),
+                    result: Box::new(Type::Void),
                     params: Some(vec![Param {
                         name: Some("format".to_string()),
-                        objc_type: ObjCType::ObjPtr(ObjPtr {
+                        ty: Type::ObjPtr(ObjPtr {
                             kind: ObjPtrKind::SomeInstance(SomeInstanceObjPtr {
                                 interface: "NSString".to_string(),
                                 protocols: vec![],
@@ -3170,13 +3166,13 @@ mod tests {
                             kind: ObjCMethodKind::Instance,
                             params: vec![ObjCParam {
                                 name: "consumedParam".to_string(),
-                                objc_type: ObjCType::ObjPtr(ObjPtr {
+                                ty: Type::ObjPtr(ObjPtr {
                                     kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
                                     nullability: None,
                                 }),
                                 attrs: vec![Attr::NSConsumed],
                             }],
-                            result: ObjCType::Void,
+                            result: Type::Void,
                             attrs: vec![],
                             type_encoding: "v24@0:8@16".to_string(),
                         },
@@ -3185,9 +3181,9 @@ mod tests {
                             kind: ObjCMethodKind::Instance,
                             params: vec![ObjCParam {
                                 name: "block".to_string(),
-                                objc_type: ObjCType::ObjPtr(ObjPtr {
+                                ty: Type::ObjPtr(ObjPtr {
                                     kind: ObjPtrKind::Block(CallableDesc {
-                                        result: Box::new(ObjCType::Void),
+                                        result: Box::new(Type::Void),
                                         params: Some(vec![]),
                                         is_variadic: false,
                                         attrs: vec![],
@@ -3196,7 +3192,7 @@ mod tests {
                                 }),
                                 attrs: vec![Attr::Noescape],
                             }],
-                            result: ObjCType::Void,
+                            result: Type::Void,
                             attrs: vec![],
                             type_encoding: "v24@0:8@?16".to_string(),
                         },
@@ -3210,10 +3206,10 @@ mod tests {
                 item: Item::FuncDecl(FuncDecl {
                     name: "function_with_consumed_param".to_string(),
                     desc: CallableDesc {
-                        result: Box::new(ObjCType::Void),
+                        result: Box::new(Type::Void),
                         params: Some(vec![Param {
                             name: Some("consumedParam".to_string()),
-                            objc_type: ObjCType::ObjPtr(ObjPtr {
+                            ty: Type::ObjPtr(ObjPtr {
                                 kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
                                 nullability: None,
                             }),
@@ -3230,12 +3226,12 @@ mod tests {
                 item: Item::FuncDecl(FuncDecl {
                     name: "function_with_noescape_block".to_string(),
                     desc: CallableDesc {
-                        result: Box::new(ObjCType::Void),
+                        result: Box::new(Type::Void),
                         params: Some(vec![Param {
                             name: None,
-                            objc_type: ObjCType::ObjPtr(ObjPtr {
+                            ty: Type::ObjPtr(ObjPtr {
                                 kind: ObjPtrKind::Block(CallableDesc {
-                                    result: Box::new(ObjCType::Void),
+                                    result: Box::new(Type::Void),
                                     params: Some(vec![]),
                                     is_variadic: false,
                                     attrs: vec![],
@@ -3279,7 +3275,7 @@ mod tests {
                             name: "methodWithRetainedReturn".to_string(),
                             kind: ObjCMethodKind::Instance,
                             params: vec![],
-                            result: ObjCType::ObjPtr(ObjPtr {
+                            result: Type::ObjPtr(ObjPtr {
                                 kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
                                 nullability: None,
                             }),
@@ -3290,7 +3286,7 @@ mod tests {
                             name: "unavailableMethod".to_string(),
                             kind: ObjCMethodKind::Instance,
                             params: vec![],
-                            result: ObjCType::Void,
+                            result: Type::Void,
                             attrs: vec![Attr::Unavailable],
                             type_encoding: "v16@0:8".to_string(),
                         },
@@ -3304,7 +3300,7 @@ mod tests {
                 item: Item::FuncDecl(FuncDecl {
                     name: "function_with_retained_return".to_string(),
                     desc: CallableDesc {
-                        result: Box::new(ObjCType::ObjPtr(ObjPtr {
+                        result: Box::new(Type::ObjPtr(ObjPtr {
                             kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
                             nullability: None,
                         })),
@@ -3354,7 +3350,7 @@ mod tests {
                         name: "alloc".to_string(),
                         kind: ObjCMethodKind::Class,
                         params: vec![],
-                        result: ObjCType::ObjPtr(ObjPtr {
+                        result: Type::ObjPtr(ObjPtr {
                             kind: ObjPtrKind::Instancetype,
                             nullability: None,
                         }),
@@ -3365,7 +3361,7 @@ mod tests {
                         name: "init".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
-                        result: ObjCType::ObjPtr(ObjPtr {
+                        result: Type::ObjPtr(ObjPtr {
                             kind: ObjPtrKind::Instancetype,
                             nullability: None,
                         }),
@@ -3377,10 +3373,10 @@ mod tests {
                         kind: ObjCMethodKind::Instance,
                         params: vec![ObjCParam {
                             name: "something".to_string(),
-                            objc_type: ObjCType::Num(NumKind::Int),
+                            ty: Type::Num(NumKind::Int),
                             attrs: vec![],
                         }],
-                        result: ObjCType::ObjPtr(ObjPtr {
+                        result: Type::ObjPtr(ObjPtr {
                             kind: ObjPtrKind::Instancetype,
                             nullability: None,
                         }),
@@ -3391,7 +3387,7 @@ mod tests {
                         name: "initAnything".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
-                        result: ObjCType::ObjPtr(ObjPtr {
+                        result: Type::ObjPtr(ObjPtr {
                             kind: ObjPtrKind::Instancetype,
                             nullability: None,
                         }),
@@ -3402,7 +3398,7 @@ mod tests {
                         name: "initReturningAutoreleased".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
-                        result: ObjCType::ObjPtr(ObjPtr {
+                        result: Type::ObjPtr(ObjPtr {
                             kind: ObjPtrKind::Instancetype,
                             nullability: None,
                         }),
@@ -3413,7 +3409,7 @@ mod tests {
                         name: "initReturningNotRetained".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
-                        result: ObjCType::ObjPtr(ObjPtr {
+                        result: Type::ObjPtr(ObjPtr {
                             kind: ObjPtrKind::Instancetype,
                             nullability: None,
                         }),
@@ -3424,7 +3420,7 @@ mod tests {
                         name: "new".to_string(),
                         kind: ObjCMethodKind::Class,
                         params: vec![],
-                        result: ObjCType::ObjPtr(ObjPtr {
+                        result: Type::ObjPtr(ObjPtr {
                             kind: ObjPtrKind::Instancetype,
                             nullability: None,
                         }),
@@ -3435,7 +3431,7 @@ mod tests {
                         name: "copy".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
-                        result: ObjCType::ObjPtr(ObjPtr {
+                        result: Type::ObjPtr(ObjPtr {
                             kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
                             nullability: None,
                         }),
@@ -3446,7 +3442,7 @@ mod tests {
                         name: "mutableCopy".to_string(),
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
-                        result: ObjCType::ObjPtr(ObjPtr {
+                        result: Type::ObjPtr(ObjPtr {
                             kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
                             nullability: None,
                         }),
@@ -3457,7 +3453,7 @@ mod tests {
                         name: "normalClassMethod".to_string(),
                         kind: ObjCMethodKind::Class,
                         params: vec![],
-                        result: ObjCType::ObjPtr(ObjPtr {
+                        result: Type::ObjPtr(ObjPtr {
                             kind: ObjPtrKind::Instancetype,
                             nullability: None,
                         }),
@@ -3489,7 +3485,7 @@ mod tests {
         let expected_items = vec![AttributedItem {
             item: Item::EnumDef(EnumDef {
                 id: TagId::Named("CIDataMatrixCodeECCVersion".to_string()),
-                underlying: ObjCType::Num(NumKind::Long),
+                underlying: Type::Num(NumKind::Long),
                 values: vec![
                     EnumValue {
                         name: "CIDataMatrixCodeECCVersion000".to_string(),
@@ -3541,7 +3537,7 @@ mod tests {
             AttributedItem {
                 item: Item::TypedefDecl(TypedefDecl {
                     name: "MTLIndirectCommandType".to_string(),
-                    underlying: ObjCType::Tag(TagRef {
+                    underlying: Type::Tag(TagRef {
                         id: TagId::Named("MTLIndirectCommandType".to_string()),
                         kind: TagKind::Enum,
                         attrs: vec![
@@ -3580,7 +3576,7 @@ mod tests {
             AttributedItem {
                 item: Item::EnumDef(EnumDef {
                     id: TagId::Named("MTLIndirectCommandType".to_string()),
-                    underlying: ObjCType::Num(NumKind::ULong),
+                    underlying: Type::Num(NumKind::ULong),
                     values: vec![
                         EnumValue {
                             name: "MTLIndirectCommandTypeDraw".to_string(),
@@ -3713,8 +3709,8 @@ mod tests {
             AttributedItem {
                 item: Item::TypedefDecl(TypedefDecl {
                     name: "CFSomethingRef".to_string(),
-                    underlying: ObjCType::Pointer(Pointer {
-                        pointee: Box::new(ObjCType::Tag(TagRef {
+                    underlying: Type::Pointer(Pointer {
+                        pointee: Box::new(Type::Tag(TagRef {
                             id: TagId::Named("opaqueCFSomething".to_string()),
                             kind: TagKind::Struct,
                             attrs: vec![Attr::ObjCBridge {
@@ -3737,7 +3733,7 @@ mod tests {
                     methods: vec![],
                     properties: vec![Property {
                         name: "prop".to_string(),
-                        value: ObjCType::Typedef(TypedefRef {
+                        value: Type::Typedef(TypedefRef {
                             name: "CFSomethingRef".to_string(),
                             nullability: Some(Nullability::Nullable),
                         }),
