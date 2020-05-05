@@ -4,8 +4,8 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 // TODO:
-// - support parsing code for different platforms (iOS, macOS, ...)
-// - alignment, packing, sizes (and make sure the size and offset of each item is the same for clang and Rust as bindgen does)
+// - pass the architecture (aarch64 or x86_64) explicitly to clang
+// - alignment, packing, sizes
 // - const
 // - try getting the best definition of a function (unfortunately libclang's "canonical" seems to just be the first one)
 // - real ObjC type encoding of C blocks
@@ -598,18 +598,23 @@ fn parm_decl_children<'a>(cursor: &clang::Cursor<'a>) -> impl Iterator<Item = cl
 pub struct Field {
     pub name: Option<String>,
     pub objc_type: ObjCType,
+    pub bit_offset: usize,
 }
 
 impl Field {
     fn from_cursor(cursor: &clang::Cursor<'_>, unnamed_tag_ids: &TagIdMap) -> Self {
         assert_eq!(cursor.kind(), CursorKind::FieldDecl);
+        let name = cursor.spelling();
+        let objc_type = ObjCType::from_type(
+            &cursor.type_().unwrap(),
+            &mut parm_decl_children(cursor),
+            unnamed_tag_ids,
+        );
+        let bit_offset = cursor.offset_of_field().unwrap();
         Self {
-            name: cursor.spelling(),
-            objc_type: ObjCType::from_type(
-                &cursor.type_().unwrap(),
-                &mut parm_decl_children(cursor),
-                unnamed_tag_ids,
-            ),
+            name,
+            objc_type,
+            bit_offset,
         }
     }
 }
@@ -2526,6 +2531,7 @@ mod tests {
                     fields: vec![Field {
                         name: Some("x".to_string()),
                         objc_type: ObjCType::Num(NumKind::Int),
+                        bit_offset: 0,
                     }],
                     kind: RecordKind::Struct,
                     origin: None,
@@ -2628,6 +2634,7 @@ mod tests {
                         Field {
                             name: Some("f".to_string()),
                             objc_type: ObjCType::Num(NumKind::Float),
+                            bit_offset: 0,
                         },
                         Field {
                             name: None,
@@ -2636,6 +2643,7 @@ mod tests {
                                 kind: TagKind::Union,
                                 attrs: vec![],
                             }),
+                            bit_offset: 64,
                         },
                     ],
                     origin: None,
@@ -2650,10 +2658,12 @@ mod tests {
                         Field {
                             name: Some("i".to_string()),
                             objc_type: ObjCType::Num(NumKind::Int),
+                            bit_offset: 0,
                         },
                         Field {
                             name: Some("d".to_string()),
                             objc_type: ObjCType::Num(NumKind::Double),
+                            bit_offset: 0,
                         },
                     ],
                     origin: None,
@@ -2666,6 +2676,7 @@ mod tests {
                     fields: vec![Field {
                         name: Some("c".to_string()),
                         objc_type: ObjCType::Num(NumKind::SChar),
+                        bit_offset: 0,
                     }],
                     kind: RecordKind::Struct,
                     origin: None,
@@ -2959,6 +2970,7 @@ mod tests {
                             kind: ObjPtrKind::Class,
                             nullability: Some(Nullability::NonNull),
                         }),
+                        bit_offset: 0,
                     }],
                     kind: RecordKind::Struct,
                     origin: None,

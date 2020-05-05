@@ -840,6 +840,16 @@ impl<'a> Type<'a> {
         }
     }
 
+    pub fn offset_of(&self, field_name: &str) -> Option<usize> {
+        let field_name = CString::new(field_name).unwrap();
+        let offset = unsafe { clang_sys::clang_Type_getOffsetOf(self.raw, field_name.as_ptr()) };
+        if offset < 0 {
+            None
+        } else {
+            Some(offset as _)
+        }
+    }
+
     pub fn num_elements(&self) -> Option<usize> {
         let size = unsafe { clang_sys::clang_getNumElements(self.raw) };
         if size >= 0 {
