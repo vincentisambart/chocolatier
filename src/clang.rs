@@ -818,6 +818,10 @@ impl<'a> Type<'a> {
         unsafe { clang_sys::clang_isFunctionTypeVariadic(self.raw) != 0 }
     }
 
+    pub fn is_const_qualified(&self) -> bool {
+        unsafe { clang_sys::clang_isConstQualifiedType(self.raw) != 0 }
+    }
+
     pub fn nullability(&self) -> Option<Nullability> {
         Nullability::from_raw(unsafe { clang_sys::clang_Type_getNullability(self.raw) })
     }

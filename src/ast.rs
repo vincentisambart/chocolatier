@@ -65,6 +65,13 @@ fn show_type(desc: &str, clang_type: &clang::Type<'_>, indent_level: usize) {
 
     println!("{}{}: {:?}", indent, desc, clang_type);
 
+    println!(
+        "{}{} const qualified: {:?}",
+        indent,
+        desc,
+        clang_type.is_const_qualified()
+    );
+
     if let Some(argument_types) = clang_type.argument_types() {
         if argument_types.len() > 0 {
             println!("{}{} arguments types:", indent, desc);
