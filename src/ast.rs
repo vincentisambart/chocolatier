@@ -7,7 +7,6 @@ use std::collections::{HashMap, HashSet};
 // - pass the architecture (aarch64 or x86_64) explicitly to clang
 // - alignment, packing, sizes
 // - const
-// - try getting the best definition of a function (unfortunately libclang's "canonical" seems to just be the first one)
 // - real ObjC type encoding of C blocks
 // - variable decl
 
@@ -1207,6 +1206,7 @@ pub struct ObjCMethod {
     pub params: Vec<ObjCParam>,
     pub result: ObjCType,
     pub attrs: Vec<Attr>,
+    pub type_encoding: String,
 }
 
 impl ObjCMethod {
@@ -1231,12 +1231,15 @@ impl ObjCMethod {
 
         let attrs = Attr::from_decl(cursor);
 
+        let type_encoding = cursor.objc_type_encoding().unwrap();
+
         Self {
             name: cursor.spelling().unwrap(),
             kind,
             params,
             result,
             attrs,
+            type_encoding,
         }
     }
 }
@@ -2055,6 +2058,7 @@ mod tests {
                         }],
                         result: ObjCType::Void,
                         attrs: vec![],
+                        type_encoding: "v24@0:8@16".to_string(),
                     },
                     ObjCMethod {
                         name: "bar:".to_string(),
@@ -2073,6 +2077,7 @@ mod tests {
                         }],
                         result: ObjCType::Void,
                         attrs: vec![],
+                        type_encoding: "v24@0:8@16".to_string(),
                     },
                     ObjCMethod {
                         name: "foobar:".to_string(),
@@ -2096,6 +2101,7 @@ mod tests {
                             nullability: None,
                         }),
                         attrs: vec![],
+                        type_encoding: "@24@0:8@16".to_string(),
                     },
                 ],
                 properties: vec![],
@@ -2186,6 +2192,7 @@ mod tests {
                             nullability: Some(Nullability::NonNull),
                         }),
                         attrs: vec![],
+                        type_encoding: "@16@0:8".to_string(),
                     }],
                     properties: vec![],
                     origin: None,
@@ -2235,6 +2242,7 @@ mod tests {
                                 params: vec![],
                                 result: ObjCType::Void,
                                 attrs: vec![],
+                                type_encoding: "v16@0:8".to_string(),
                             },
                             is_optional: false,
                         },
@@ -2245,6 +2253,7 @@ mod tests {
                                 params: vec![],
                                 result: ObjCType::Void,
                                 attrs: vec![],
+                                type_encoding: "v16@0:8".to_string(),
                             },
                             is_optional: true,
                         },
@@ -2255,6 +2264,7 @@ mod tests {
                                 params: vec![],
                                 result: ObjCType::Num(NumKind::Int),
                                 attrs: vec![],
+                                type_encoding: "i16@0:8".to_string(),
                             },
                             is_optional: true,
                         },
@@ -2312,6 +2322,7 @@ mod tests {
                         params: vec![],
                         result: ObjCType::Void,
                         attrs: vec![],
+                        type_encoding: "v16@0:8".to_string(),
                     }],
                     properties: vec![],
                     origin: None,
@@ -2329,6 +2340,7 @@ mod tests {
                         params: vec![],
                         result: ObjCType::Void,
                         attrs: vec![],
+                        type_encoding: "v16@0:8".to_string(),
                     }],
                     properties: vec![],
                     origin: None,
@@ -2346,6 +2358,7 @@ mod tests {
                         params: vec![],
                         result: ObjCType::Void,
                         attrs: vec![],
+                        type_encoding: "v16@0:8".to_string(),
                     }],
                     properties: vec![Property {
                         name: "propertyOnUnnamedCategory".to_string(),
@@ -2395,6 +2408,7 @@ mod tests {
                             nullability: None,
                         }),
                         attrs: vec![],
+                        type_encoding: "@16@0:8".to_string(),
                     },
                     ObjCMethod {
                         name: "y".to_string(),
@@ -2407,6 +2421,7 @@ mod tests {
                             nullability: None,
                         }),
                         attrs: vec![],
+                        type_encoding: "@16@0:8".to_string(),
                     },
                     ObjCMethod {
                         name: "z".to_string(),
@@ -2419,6 +2434,7 @@ mod tests {
                             nullability: Some(Nullability::NonNull),
                         }),
                         attrs: vec![],
+                        type_encoding: "@16@0:8".to_string(),
                     },
                 ],
                 properties: vec![],
@@ -2464,6 +2480,7 @@ mod tests {
                             nullability: None,
                         }),
                         attrs: vec![],
+                        type_encoding: "i16@0:8".to_string(),
                     }],
                     properties: vec![],
                     origin: None,
@@ -2499,6 +2516,7 @@ mod tests {
                         nullability: Some(Nullability::NonNull),
                     }),
                     attrs: vec![],
+                    type_encoding: "@16@0:8".to_string(),
                 }],
                 properties: vec![],
                 origin: None,
@@ -2567,6 +2585,7 @@ mod tests {
                                 attrs: vec![],
                             }),
                             attrs: vec![],
+                            type_encoding: "{S=i}16@0:8".to_string(),
                         },
                         ObjCMethod {
                             name: "inlineUnnamedStruct".to_string(),
@@ -2578,6 +2597,7 @@ mod tests {
                                 attrs: vec![],
                             }),
                             attrs: vec![],
+                            type_encoding: "{?=f(?=id)}16@0:8".to_string(),
                         },
                         ObjCMethod {
                             name: "pointerToStructTypedef".to_string(),
@@ -2591,6 +2611,7 @@ mod tests {
                                 nullability: None,
                             }),
                             attrs: vec![],
+                            type_encoding: "^{S=i}16@0:8".to_string(),
                         },
                         ObjCMethod {
                             name: "pointerToUndeclaredStruct".to_string(),
@@ -2605,6 +2626,7 @@ mod tests {
                                 nullability: None,
                             }),
                             attrs: vec![],
+                            type_encoding: "^{Undeclared=}16@0:8".to_string(),
                         },
                         ObjCMethod {
                             name: "pointerToStructDeclaredAfterwards".to_string(),
@@ -2619,6 +2641,7 @@ mod tests {
                                 nullability: None,
                             }),
                             attrs: vec![],
+                            type_encoding: "^{DeclaredAfterwards=c}16@0:8".to_string(),
                         },
                     ],
                     properties: vec![],
@@ -2746,6 +2769,7 @@ mod tests {
                                 nullability: None,
                             }),
                             attrs: vec![],
+                            type_encoding: "^?16@0:8".to_string(),
                         },
                         // - (int(*)(float, ...))returningFunctionPointerVariadic;
                         ObjCMethod {
@@ -2766,6 +2790,7 @@ mod tests {
                                 nullability: None,
                             }),
                             attrs: vec![],
+                            type_encoding: "^?16@0:8".to_string(),
                         },
                         // - (int(*)(void))returningFunctionPointerWithNoParameters;
                         ObjCMethod {
@@ -2782,6 +2807,7 @@ mod tests {
                                 nullability: None,
                             }),
                             attrs: vec![],
+                            type_encoding: "^?16@0:8".to_string(),
                         },
                         // - (T)returningFunctionPointerTypedef;
                         ObjCMethod {
@@ -2793,6 +2819,7 @@ mod tests {
                                 nullability: None,
                             }),
                             attrs: vec![],
+                            type_encoding: "^?16@0:8".to_string(),
                         },
                         // - (char (*(*)(double innerParam))(float outerParam))returningFunctionPointerReturningFunctionPointer;
                         ObjCMethod {
@@ -2825,6 +2852,7 @@ mod tests {
                                 nullability: None,
                             }),
                             attrs: vec![],
+                            type_encoding: "^?16@0:8".to_string(),
                         },
                         // - (A *(*)(short returnedFunctionParameter))takingTypedef:(T)typedefParam andFunctionPointersTakingFunctionPointers:(A *(*)(float someFloat, int (*functionPointerParam)(char someChar)))complicatedParam;
                         ObjCMethod {
@@ -2915,6 +2943,7 @@ mod tests {
                                 nullability: None,
                             }),
                             attrs: vec![],
+                            type_encoding: "^?32@0:8^?16^?24".to_string(),
                         },
                     ],
                     properties: vec![],
@@ -3058,6 +3087,7 @@ mod tests {
                                 nullability: None,
                             }),
                             attrs: vec![],
+                            type_encoding: "^?24@0:8:16".to_string(),
                         },
                         is_optional: false,
                     }],
@@ -3142,6 +3172,7 @@ mod tests {
                             }],
                             result: ObjCType::Void,
                             attrs: vec![],
+                            type_encoding: "v24@0:8@16".to_string(),
                         },
                         ObjCMethod {
                             name: "methodWithNoescapeBlock:".to_string(),
@@ -3161,6 +3192,7 @@ mod tests {
                             }],
                             result: ObjCType::Void,
                             attrs: vec![],
+                            type_encoding: "v24@0:8@?16".to_string(),
                         },
                     ],
                     properties: vec![],
@@ -3246,6 +3278,7 @@ mod tests {
                                 nullability: None,
                             }),
                             attrs: vec![Attr::NSReturnsRetained],
+                            type_encoding: "@16@0:8".to_string(),
                         },
                         ObjCMethod {
                             name: "unavailableMethod".to_string(),
@@ -3253,6 +3286,7 @@ mod tests {
                             params: vec![],
                             result: ObjCType::Void,
                             attrs: vec![Attr::Unavailable],
+                            type_encoding: "v16@0:8".to_string(),
                         },
                     ],
                     properties: vec![],
@@ -3319,6 +3353,7 @@ mod tests {
                             nullability: None,
                         }),
                         attrs: vec![Attr::NSReturnsRetained],
+                        type_encoding: "@16@0:8".to_string(),
                     },
                     ObjCMethod {
                         name: "init".to_string(),
@@ -3329,6 +3364,7 @@ mod tests {
                             nullability: None,
                         }),
                         attrs: vec![Attr::NSConsumesSelf, Attr::NSReturnsRetained],
+                        type_encoding: "@16@0:8".to_string(),
                     },
                     ObjCMethod {
                         name: "initWithSomething:".to_string(),
@@ -3343,6 +3379,7 @@ mod tests {
                             nullability: None,
                         }),
                         attrs: vec![Attr::NSConsumesSelf, Attr::NSReturnsRetained],
+                        type_encoding: "@20@0:8i16".to_string(),
                     },
                     ObjCMethod {
                         name: "initAnything".to_string(),
@@ -3353,6 +3390,7 @@ mod tests {
                             nullability: None,
                         }),
                         attrs: vec![Attr::NSConsumesSelf, Attr::NSReturnsRetained],
+                        type_encoding: "@16@0:8".to_string(),
                     },
                     ObjCMethod {
                         name: "initReturningAutoreleased".to_string(),
@@ -3363,6 +3401,7 @@ mod tests {
                             nullability: None,
                         }),
                         attrs: vec![Attr::NSReturnsAutoreleased, Attr::NSConsumesSelf],
+                        type_encoding: "@16@0:8".to_string(),
                     },
                     ObjCMethod {
                         name: "initReturningNotRetained".to_string(),
@@ -3373,6 +3412,7 @@ mod tests {
                             nullability: None,
                         }),
                         attrs: vec![Attr::NSReturnsNotRetained, Attr::NSConsumesSelf],
+                        type_encoding: "@16@0:8".to_string(),
                     },
                     ObjCMethod {
                         name: "new".to_string(),
@@ -3383,6 +3423,7 @@ mod tests {
                             nullability: None,
                         }),
                         attrs: vec![Attr::NSReturnsRetained],
+                        type_encoding: "@16@0:8".to_string(),
                     },
                     ObjCMethod {
                         name: "copy".to_string(),
@@ -3393,6 +3434,7 @@ mod tests {
                             nullability: None,
                         }),
                         attrs: vec![Attr::NSReturnsRetained],
+                        type_encoding: "@16@0:8".to_string(),
                     },
                     ObjCMethod {
                         name: "mutableCopy".to_string(),
@@ -3403,6 +3445,7 @@ mod tests {
                             nullability: None,
                         }),
                         attrs: vec![Attr::NSReturnsRetained],
+                        type_encoding: "@16@0:8".to_string(),
                     },
                     ObjCMethod {
                         name: "normalClassMethod".to_string(),
@@ -3413,6 +3456,7 @@ mod tests {
                             nullability: None,
                         }),
                         attrs: vec![],
+                        type_encoding: "@16@0:8".to_string(),
                     },
                 ],
                 properties: vec![],
