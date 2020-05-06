@@ -187,7 +187,7 @@ fn rust_type_name_for_enum_underlying(underlying: &ast::Type, index: &TypeIndex)
             NumKind::UShort => "u16",
             NumKind::LongLong => "i64",
             NumKind::ULongLong => "u64",
-            NumKind::Float | NumKind::Double | NumKind::LongDouble => {
+            NumKind::Half | NumKind::Float | NumKind::Double | NumKind::LongDouble => {
                 panic!("enums should not use floating point as underlying type")
             }
         },
@@ -1119,6 +1119,9 @@ fn additional_manual_cleanup(enum_name: &str, mut value_names: Vec<String>) -> V
         }
         "MTLReadWriteTextureTier" | "MTLArgumentBuffersTier" => {
             add_prefix_before_starting_digit(&mut value_names, "TIER_");
+        }
+        "UIImagePickerControllerQualityType" => {
+            add_prefix_before_starting_digit(&mut value_names, "RESOLUTION_");
         }
         "MTLTextureType" => {
             // Has names like "1D", "2D_ARRAY", "CUBE".
