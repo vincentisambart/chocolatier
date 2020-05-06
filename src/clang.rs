@@ -394,7 +394,11 @@ impl<'a> Cursor<'a> {
     }
 
     pub fn storage_class(&self) -> Option<StorageClass> {
-        StorageClass::from(unsafe { clang_sys::clang_Cursor_getStorageClass(self.raw) })
+        StorageClass::from_raw(unsafe { clang_sys::clang_Cursor_getStorageClass(self.raw) })
+    }
+
+    pub fn linkage(&self) -> Option<LinkageKind> {
+        LinkageKind::from_raw(unsafe { clang_sys::clang_getCursorLinkage(self.raw) })
     }
 
     pub fn offset_of_field(&self) -> Option<usize> {
@@ -1670,7 +1674,7 @@ pub enum StorageClass {
 }
 
 impl StorageClass {
-    fn from(storage_class: clang_sys::CX_StorageClass) -> Option<Self> {
+    fn from_raw(storage_class: clang_sys::CX_StorageClass) -> Option<Self> {
         use clang_sys::*;
         #[allow(non_upper_case_globals)]
         match storage_class {
@@ -1681,6 +1685,27 @@ impl StorageClass {
             CX_SC_Auto => Some(StorageClass::Auto),
             CX_SC_Register => Some(StorageClass::Register),
             _ => panic!("unknown storage class {:?}", storage_class),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum LinkageKind {
+    Internal,
+    UniqueExternal,
+    External,
+}
+
+impl LinkageKind {
+    fn from_raw(raw: clang_sys::CXLinkageKind) -> Option<Self> {
+        use clang_sys::*;
+        #[allow(non_upper_case_globals)]
+        match raw {
+            CXLinkage_Invalid | CXLinkage_NoLinkage => None,
+            CXLinkage_Internal => Some(Self::Internal),
+            CXLinkage_UniqueExternal => Some(Self::UniqueExternal),
+            CXLinkage_External => Some(Self::External),
+            _ => panic!("invalid linkage kind {:?}", raw),
         }
     }
 }

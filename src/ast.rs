@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 // TODO:
 // - real ObjC type encoding of C blocks
-// - variable decl
+// - variable value
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Origin {
@@ -302,6 +302,10 @@ fn show_tree(cursor: &clang::Cursor<'_>, indent_level: usize) {
         println!("{}storage class: {:?}", indent, storage_class);
     }
 
+    if let Some(linkage) = cursor.linkage() {
+        println!("{}linkage: {:?}", indent, linkage);
+    }
+
     if let Some(offset_of_field) = cursor.offset_of_field() {
         println!("{}offset of field: {:?}", indent, offset_of_field);
     }
@@ -533,7 +537,7 @@ impl Attr {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Nullability {
     NonNull,
     Nullable,
@@ -1738,6 +1742,7 @@ impl RecordDef {
 pub struct FuncDecl {
     pub name: String,
     pub desc: CallableDesc,
+    pub linkage: Linkage,
     pub origin: Option<Origin>,
 }
 
@@ -1749,9 +1754,15 @@ impl FuncDecl {
         let name = decl.spelling().unwrap();
         let desc =
             CallableDesc::from_clang_ty(&clang_ty, &mut parm_decl_children(&decl), unnamed_tag_ids);
+        let linkage = Linkage::from_cursor(decl);
         let origin = Origin::from_cursor(decl);
 
-        Self { name, desc, origin }
+        Self {
+            name,
+            desc,
+            linkage,
+            origin,
+        }
     }
 }
 
@@ -1806,6 +1817,55 @@ impl EnumDef {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum Linkage {
+    Internal,
+    External,
+}
+
+impl Linkage {
+    fn from_cursor(decl: &clang::Cursor<'_>) -> Self {
+        use clang::LinkageKind;
+        let clang_linkage = decl
+            .linkage()
+            .expect("expecting a cursor with a linkage kind");
+
+        match clang_linkage {
+            LinkageKind::UniqueExternal => panic!("not expecting unique external linkage in ObjC"),
+            LinkageKind::Internal => Self::Internal,
+            LinkageKind::External => Self::External,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct VarDecl {
+    pub name: String,
+    pub ty: AttributedType,
+    pub linkage: Linkage,
+    pub origin: Option<Origin>,
+}
+
+impl VarDecl {
+    fn from_cursor(decl: &clang::Cursor<'_>, unnamed_tag_ids: &TagIdMap) -> Self {
+        assert_eq!(decl.kind(), CursorKind::VarDecl);
+        let name = decl.spelling().unwrap();
+        let ty = AttributedType::from_clang_ty(
+            &decl.type_().unwrap(),
+            &mut parm_decl_children(decl),
+            unnamed_tag_ids,
+        );
+        let linkage = Linkage::from_cursor(decl);
+        let origin = Origin::from_cursor(decl);
+        Self {
+            name,
+            ty,
+            linkage,
+            origin,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Item {
     ProtocolDef(ProtocolDef),
@@ -1815,7 +1875,7 @@ pub enum Item {
     EnumDef(EnumDef),
     TypedefDecl(TypedefDecl),
     FuncDecl(FuncDecl),
-    // VarDecl(VarDecl),
+    VarDecl(VarDecl),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1995,6 +2055,10 @@ pub fn ast_from_str(target: Target, source: &str) -> Result<Vec<AttributedItem>,
                     None
                 }
             }
+            CursorKind::VarDecl => Some(Item::VarDecl(VarDecl::from_cursor(
+                &cursor,
+                &unnamed_tag_ids,
+            ))),
             _ => None,
         };
 

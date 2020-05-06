@@ -51,6 +51,7 @@ impl TypeIndex {
         let mut interfaces = HashMap::new();
         let mut categories = HashMap::new();
         let mut functions = HashMap::new();
+        let mut vars = HashMap::new();
 
         for item in items {
             match &item.item {
@@ -80,6 +81,9 @@ impl TypeIndex {
                 }
                 Item::FuncDecl(decl) => {
                     functions.insert(decl.name.clone(), decl.clone());
+                }
+                Item::VarDecl(decl) => {
+                    vars.insert(decl.name.clone(), decl.clone());
                 }
             }
         }
