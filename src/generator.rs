@@ -1093,7 +1093,7 @@ fn additional_manual_cleanup(enum_name: &str, mut value_names: Vec<String>) -> V
                 name.push_str("_CHARACTERS");
             }
         }
-        "CGImageByteOrderInfo" => {
+        "CGImageByteOrderInfo" | "VTDecodeFrameFlags" => {
             for name in value_names
                 .iter_mut()
                 .filter(|name| starts_with_digit(name))

@@ -5,3 +5,5 @@
 #import <Metal/Metal.h>
 #import <MetalKit/MetalKit.h>
 #import <Network/Network.h>
+#import <CoreVideo/CoreVideo.h>
+#import <VideoToolbox/VideoToolbox.h>
