@@ -4,7 +4,6 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 // TODO:
-// - const -> test needed
 // - real ObjC type encoding of C blocks
 // - variable decl
 
@@ -988,11 +987,12 @@ impl Type {
                 let type_args: Vec<ObjCTypeArg> = pointee_type
                     .objc_type_arg_types()
                     .map(|arg| {
-                        match Self::from_clang_ty(
+                        let attributed = AttributedType::from_clang_ty(
                             &arg,
                             &mut Vec::new().into_iter(),
                             unnamed_tag_ids,
-                        ) {
+                        );
+                        match attributed.ty {
                             Self::ObjPtr(ptr) => ObjCTypeArg::ObjPtr(ptr),
                             Self::Typedef(typedef) => ObjCTypeArg::Typedef(typedef),
                             unexpected => {
@@ -1023,26 +1023,8 @@ impl Type {
                 }
             }
             TypeKind::Attributed => {
-                let modified = Self::from_clang_ty(
-                    &clang_ty.modified_type().unwrap(),
-                    base_parm_decls,
-                    unnamed_tag_ids,
-                );
-                if let Some(nullability) = clang_ty.nullability() {
-                    // Note that even if Into::into returns None we probably want to override the one existing with None.
-                    let nullability = nullability.into();
-                    match modified {
-                        Self::Pointer(ptr) => Self::Pointer(ptr.with_nullability(nullability)),
-                        Self::ObjPtr(ptr) => Self::ObjPtr(ptr.with_nullability(nullability)),
-                        Self::ObjCSel(_) => Self::ObjCSel(nullability),
-                        Self::Typedef(typedef) => {
-                            Self::Typedef(typedef.with_nullability(nullability))
-                        }
-                        _ => modified,
-                    }
-                } else {
-                    modified
-                }
+                show_type("type", clang_ty, 0);
+                panic!("TypeKind::Attributed should have been handled by AttributedType");
             }
             TypeKind::ObjCTypeParam => Self::ObjPtr(ObjPtr {
                 kind: ObjPtrKind::TypeParam(clang_ty.spelling()),
@@ -1121,6 +1103,16 @@ impl Type {
             unknown_kind => panic!("Unhandled type kind {:?}: {:?}", unknown_kind, clang_ty),
         }
     }
+
+    fn with_nullability(self, nullability: Option<Nullability>) -> Self {
+        match self {
+            Self::Pointer(ptr) => Self::Pointer(ptr.with_nullability(nullability)),
+            Self::ObjPtr(ptr) => Self::ObjPtr(ptr.with_nullability(nullability)),
+            Self::ObjCSel(_) => Self::ObjCSel(nullability),
+            Self::Typedef(typedef) => Self::Typedef(typedef.with_nullability(nullability)),
+            _ => self,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1138,15 +1130,41 @@ impl AttributedType {
         base_parm_decls: &mut impl Iterator<Item = clang::Cursor<'a>>,
         unnamed_tag_ids: &TagIdMap,
     ) -> Self {
-        let ty = Type::from_clang_ty(clang_ty, base_parm_decls, unnamed_tag_ids);
-        let is_const_qualified = clang_ty.is_const_qualified();
-        let alignment = clang_ty.align_of();
-        let size = clang_ty.size_of();
+        if clang_ty.kind() == TypeKind::Attributed {
+            let modified = Self::from_clang_ty(
+                &clang_ty.modified_type().unwrap(),
+                base_parm_decls,
+                unnamed_tag_ids,
+            );
+            let mut attributed = if let Some(nullability) = clang_ty.nullability() {
+                // Note that even if Into::into returns None we probably want to override the existing one with None.
+                let nullability = nullability.into();
+                modified.with_nullability(nullability)
+            } else {
+                modified
+            };
+            attributed.is_const_qualified |= clang_ty.is_const_qualified();
+            attributed
+        } else {
+            let ty = Type::from_clang_ty(clang_ty, base_parm_decls, unnamed_tag_ids);
+            let is_const_qualified = clang_ty.is_const_qualified();
+            let alignment = clang_ty.align_of();
+            let size = clang_ty.size_of();
+            Self {
+                ty,
+                is_const_qualified,
+                alignment,
+                size,
+            }
+        }
+    }
+
+    fn with_nullability(self, nullability: Option<Nullability>) -> Self {
         Self {
-            ty,
-            is_const_qualified,
-            alignment,
-            size,
+            ty: self.ty.with_nullability(nullability),
+            is_const_qualified: self.is_const_qualified,
+            alignment: self.alignment,
+            size: self.size,
         }
     }
 }
@@ -1740,7 +1758,7 @@ impl FuncDecl {
 #[derive(Clone, Debug, PartialEq)]
 pub struct EnumDef {
     pub id: TagId,
-    pub underlying: Type,
+    pub underlying: AttributedType,
     pub values: Vec<EnumValue>,
     pub origin: Option<Origin>,
 }
@@ -1751,7 +1769,7 @@ impl EnumDef {
 
         let id = TagId::from_cursor(decl, unnamed_tag_ids);
 
-        let underlying = Type::from_clang_ty(
+        let underlying = AttributedType::from_clang_ty(
             &decl.enum_decl_int_type().unwrap(),
             &mut parm_decl_children(&decl),
             unnamed_tag_ids,
@@ -4068,7 +4086,12 @@ mod tests {
         let expected_items = vec![AttributedItem {
             item: Item::EnumDef(EnumDef {
                 id: TagId::Named("CIDataMatrixCodeECCVersion".to_string()),
-                underlying: Type::Num(NumKind::Long),
+                underlying: AttributedType {
+                    ty: Type::Num(NumKind::Long),
+                    is_const_qualified: false,
+                    alignment: Some(8),
+                    size: Some(8),
+                },
                 values: vec![
                     EnumValue {
                         name: "CIDataMatrixCodeECCVersion000".to_string(),
@@ -4164,7 +4187,12 @@ mod tests {
             AttributedItem {
                 item: Item::EnumDef(EnumDef {
                     id: TagId::Named("MTLIndirectCommandType".to_string()),
-                    underlying: Type::Num(NumKind::ULong),
+                    underlying: AttributedType {
+                        ty: Type::Num(NumKind::ULong),
+                        is_const_qualified: false,
+                        alignment: Some(8),
+                        size: Some(8),
+                    },
                     values: vec![
                         EnumValue {
                             name: "MTLIndirectCommandTypeDraw".to_string(),
@@ -4348,6 +4376,85 @@ mod tests {
                         custom_setter_sel: None,
                         attrs: vec![Attr::NSObject],
                     }],
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
+        ];
+
+        let parsed_items = ast_from_str(Target::MacOsX86_64, source).unwrap();
+        assert_eq!(parsed_items, expected_items);
+    }
+
+    #[test]
+    fn test_const() {
+        let source = "
+            void function_with_nullable_const_param(unsigned char const *_Nullable const);
+            void function_with_nonnull_const_typedef(id _Nonnull const);
+        ";
+
+        let expected_items = vec![
+            AttributedItem {
+                item: Item::FuncDecl(FuncDecl {
+                    name: "function_with_nullable_const_param".to_string(),
+                    desc: CallableDesc {
+                        result: Box::new(AttributedType {
+                            ty: Type::Void,
+                            is_const_qualified: false,
+                            alignment: None,
+                            size: None,
+                        }),
+                        params: Some(vec![Param {
+                            name: None,
+                            ty: AttributedType {
+                                ty: Type::Pointer(Pointer {
+                                    pointee: Box::new(AttributedType {
+                                        ty: Type::Num(NumKind::UChar),
+                                        is_const_qualified: true,
+                                        alignment: Some(1),
+                                        size: Some(1),
+                                    }),
+                                    nullability: Some(Nullability::Nullable),
+                                }),
+                                is_const_qualified: true,
+                                alignment: Some(8),
+                                size: Some(8),
+                            },
+                            attrs: vec![],
+                        }]),
+                        is_variadic: false,
+                        attrs: vec![],
+                    },
+                    origin: None,
+                }),
+                attrs: vec![],
+            },
+            AttributedItem {
+                item: Item::FuncDecl(FuncDecl {
+                    name: "function_with_nonnull_const_typedef".to_string(),
+                    desc: CallableDesc {
+                        result: Box::new(AttributedType {
+                            ty: Type::Void,
+                            is_const_qualified: false,
+                            alignment: None,
+                            size: None,
+                        }),
+                        params: Some(vec![Param {
+                            name: None,
+                            ty: AttributedType {
+                                ty: Type::ObjPtr(ObjPtr {
+                                    kind: ObjPtrKind::Id(IdObjPtr { protocols: vec![] }),
+                                    nullability: Some(Nullability::NonNull),
+                                }),
+                                is_const_qualified: true,
+                                alignment: Some(8),
+                                size: Some(8),
+                            },
+                            attrs: vec![],
+                        }]),
+                        is_variadic: false,
+                        attrs: vec![],
+                    },
                     origin: None,
                 }),
                 attrs: vec![],

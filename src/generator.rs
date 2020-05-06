@@ -500,7 +500,7 @@ impl {base_objc_trait} for {struct_name} {{
         }
         let cleaned_up_names = cleaned_up_names;
 
-        let underlying = rust_type_name_for_enum_underlying(&def.underlying, &self.index);
+        let underlying = rust_type_name_for_enum_underlying(&def.underlying.ty, &self.index);
         let mut code = String::new();
 
         write!(
