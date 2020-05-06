@@ -14,8 +14,8 @@ pub enum Sdk {
 }
 
 impl Sdk {
-    pub fn sdk_name(&self) -> &'static str {
-        match *self {
+    pub fn sdk_name(self) -> &'static str {
+        match self {
             Self::MacOs => "macosx",
             Self::IOs => "iphoneos",
             Self::IOsSimulator => "iphonesimulator",
@@ -44,16 +44,16 @@ pub enum Target {
 }
 
 impl Target {
-    fn triple(&self) -> &'static str {
-        match *self {
+    fn triple(self) -> &'static str {
+        match self {
             Self::MacOsX86_64 => "x86_64-apple-macos",
             Self::IOsArm64 => "arm64-apple-ios",
             Self::IOsSimulatorX86_64 => "x86_64-apple-ios-simulator",
         }
     }
 
-    fn sdk(&self) -> Sdk {
-        match *self {
+    fn sdk(self) -> Sdk {
+        match self {
             Self::MacOsX86_64 => Sdk::MacOs,
             Self::IOsArm64 => Sdk::IOs,
             Self::IOsSimulatorX86_64 => Sdk::IOsSimulator,
