@@ -44,7 +44,7 @@ pub enum Target {
 }
 
 impl Target {
-    fn triple(self) -> &'static str {
+    pub fn triple(self) -> &'static str {
         match self {
             Self::MacOsX86_64 => "x86_64-apple-macos",
             Self::IOsArm64 => "arm64-apple-ios",
@@ -57,6 +57,26 @@ impl Target {
             Self::MacOsX86_64 => Sdk::MacOs,
             Self::IOsArm64 => Sdk::IOs,
             Self::IOsSimulatorX86_64 => Sdk::IOsSimulator,
+        }
+    }
+
+    pub fn variants() -> Vec<&'static str> {
+        [Self::MacOsX86_64, Self::IOsArm64, Self::IOsSimulatorX86_64]
+            .iter()
+            .map(|target| target.triple())
+            .collect()
+    }
+}
+
+impl std::str::FromStr for Target {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "x86_64-apple-macos" => Ok(Self::MacOsX86_64),
+            "arm64-apple-ios" => Ok(Self::IOsArm64),
+            "x86_64-apple-ios-simulator" => Ok(Self::IOsSimulatorX86_64),
+            _ => Err("unknown target"),
         }
     }
 }

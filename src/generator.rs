@@ -259,7 +259,7 @@ impl OutputHandler {
     }
 }
 
-pub(crate) struct Generator {
+pub struct Generator {
     index: TypeIndex,
     items: Vec<ast::AttributedItem>,
     output_handler: OutputHandler,
@@ -292,7 +292,7 @@ fn stable_group_by<T, K: std::hash::Hash + Eq, F: Fn(&T) -> K>(vec: &[T], f: F) 
 }
 
 impl Generator {
-    pub(crate) fn new(items: Vec<ast::AttributedItem>) -> Self {
+    pub fn new(items: Vec<ast::AttributedItem>) -> Self {
         let index = TypeIndex::from(&items);
         let output_handler = OutputHandler::new();
         Generator {
@@ -869,7 +869,7 @@ impl Drop for {untyped_objc_ptr} {{
         .unwrap();
     }
 
-    pub(crate) fn generate(&mut self) {
+    pub fn generate(&mut self) {
         use ast::Item;
         use std::io::Write;
 
