@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 // TODO:
 // - real ObjC type encoding of C blocks
-// - variable value
+// - (static) variable value
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Origin {
@@ -3677,6 +3677,7 @@ mod tests {
                     is_variadic: true,
                     attrs: vec![],
                 },
+                linkage: Linkage::External,
                 origin: None,
             }),
             attrs: vec![],
@@ -3798,6 +3799,7 @@ mod tests {
                         is_variadic: false,
                         attrs: vec![],
                     },
+                    linkage: Linkage::External,
                     origin: None,
                 }),
                 attrs: vec![],
@@ -3838,6 +3840,7 @@ mod tests {
                         is_variadic: false,
                         attrs: vec![],
                     },
+                    linkage: Linkage::External,
                     origin: None,
                 }),
                 attrs: vec![],
@@ -3918,6 +3921,7 @@ mod tests {
                         is_variadic: false,
                         attrs: vec![Attr::NSReturnsRetained],
                     },
+                    linkage: Linkage::External,
                     origin: None,
                 }),
                 attrs: vec![],
@@ -4489,6 +4493,7 @@ mod tests {
                         is_variadic: false,
                         attrs: vec![],
                     },
+                    linkage: Linkage::External,
                     origin: None,
                 }),
                 attrs: vec![],
@@ -4519,6 +4524,7 @@ mod tests {
                         is_variadic: false,
                         attrs: vec![],
                     },
+                    linkage: Linkage::External,
                     origin: None,
                 }),
                 attrs: vec![],
