@@ -44,11 +44,16 @@ pub enum Target {
 }
 
 impl Target {
+    const MACOS_X86_64_TRIPLE: &'static str = "x86_64-apple-macos";
+    const IOS_ARM64_TRIPLE: &'static str = "arm64-apple-ios";
+    const IOS_SIMULATOR_X86_64_TRIPLE: &'static str = "x86_64-apple-ios-simulator";
+
+    /// Triple passed to clang.
     pub fn triple(self) -> &'static str {
         match self {
-            Self::MacOsX86_64 => "x86_64-apple-macos",
-            Self::IOsArm64 => "arm64-apple-ios",
-            Self::IOsSimulatorX86_64 => "x86_64-apple-ios-simulator",
+            Self::MacOsX86_64 => Self::MACOS_X86_64_TRIPLE,
+            Self::IOsArm64 => Self::IOS_ARM64_TRIPLE,
+            Self::IOsSimulatorX86_64 => Self::IOS_SIMULATOR_X86_64_TRIPLE,
         }
     }
 
@@ -60,6 +65,8 @@ impl Target {
         }
     }
 
+    /// All variants of the enum, used by examples to specify the target.
+    /// Use the same values as Target::triple().
     pub fn variants() -> Vec<&'static str> {
         [Self::MacOsX86_64, Self::IOsArm64, Self::IOsSimulatorX86_64]
             .iter()
@@ -71,11 +78,12 @@ impl Target {
 impl std::str::FromStr for Target {
     type Err = &'static str;
 
+    /// Expecting same values as the ones returned by Target::triple().
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "x86_64-apple-macos" => Ok(Self::MacOsX86_64),
-            "arm64-apple-ios" => Ok(Self::IOsArm64),
-            "x86_64-apple-ios-simulator" => Ok(Self::IOsSimulatorX86_64),
+            Self::MACOS_X86_64_TRIPLE => Ok(Self::MacOsX86_64),
+            Self::IOS_ARM64_TRIPLE => Ok(Self::IOsArm64),
+            Self::IOS_SIMULATOR_X86_64_TRIPLE => Ok(Self::IOsSimulatorX86_64),
             _ => Err("unknown target"),
         }
     }

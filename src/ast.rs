@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 // TODO:
-// - real ObjC type encoding of C blocks
+// - real ObjC type encoding of C blocks - clang impl: ASTContext::getObjCEncodingForBlock
 // - (static) variable value
 
 #[derive(Clone, Debug, PartialEq)]
@@ -55,11 +55,17 @@ impl Origin {
     }
 }
 
+const MAX_INDENT_LEVEL: usize = 10;
 fn show_type(desc: &str, clang_ty: &clang::Type<'_>, indent_level: usize) {
     let indent = (0..indent_level)
         .map(|_| "   ")
         .collect::<Vec<&str>>()
         .concat();
+
+    if indent_level >= MAX_INDENT_LEVEL {
+        println!("{}{}: {:?}", indent, desc, clang_ty);
+        return;
+    }
 
     println!("{}{}: {:?}", indent, desc, clang_ty);
 
@@ -170,6 +176,11 @@ fn show_tree(cursor: &clang::Cursor<'_>, indent_level: usize) {
         .map(|_| "   ")
         .collect::<Vec<&str>>()
         .concat();
+
+    if indent_level >= MAX_INDENT_LEVEL {
+        println!("{} {:?}", indent, cursor);
+        return;
+    }
 
     if let Some(name) = cursor.spelling() {
         println!("{}*** kind: {:?} - {} ***", indent, cursor.kind(), name);
@@ -338,6 +349,11 @@ pub enum EnumExtensib {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Attr {
+    FlagEnum,
+    EnumExtensib(EnumExtensib),
+    Unavailable,
+    Deprecated,
+    PlatformAvailability(Vec<PlatformAvailability>),
     Noescape,
     NSReturnsRetained,
     NSReturnsNotRetained,
@@ -347,14 +363,10 @@ pub enum Attr {
     CFReturnsRetained,
     CFReturnsNotRetained,
     CFConsumed,
-    Unavailable,
-    Deprecated,
-    PlatformAvailability(Vec<PlatformAvailability>),
     SwiftName(String),
     ObjCRuntimeName(String),
-    FlagEnum,
-    EnumExtensib(EnumExtensib),
     ObjCBridge { ty_name: String, is_mutable: bool },
+    ObjCDesignatedInitializer,
     NSObject,
 }
 
@@ -443,6 +455,7 @@ impl Attr {
                 CursorKind::NSConsumed => Some(Self::NSConsumed),
                 CursorKind::FlagEnum => Some(Self::FlagEnum),
                 CursorKind::ObjCNSObject => Some(Self::NSObject),
+                CursorKind::ObjCDesignatedInitializer => Some(Self::ObjCDesignatedInitializer),
                 CursorKind::UnexposedAttr => {
                     let extent = match child.extent() {
                         Some(extent) => extent,
@@ -568,10 +581,6 @@ pub struct SomeInstanceObjPtr {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ObjPtrKind {
     Class,
-    // In the clang AST, instancetype is just a typedef for `id`,
-    // but it's generally used to promise to return an instance of the current class,
-    // so special case it.
-    Instancetype,
     Id(IdObjPtr),
     SomeInstance(SomeInstanceObjPtr),
     Block(CallableDesc),
@@ -1055,15 +1064,7 @@ impl Type {
                         nullability: None,
                     })
                 } else {
-                    let typedef = TypedefRef::from_clang_ty(&clang_ty);
-                    if typedef.name == "instancetype" {
-                        Self::ObjPtr(ObjPtr {
-                            kind: ObjPtrKind::Instancetype,
-                            nullability: None,
-                        })
-                    } else {
-                        Self::Typedef(typedef)
-                    }
+                    Self::Typedef(TypedefRef::from_clang_ty(&clang_ty))
                 }
             }
             TypeKind::Elaborated => Self::from_clang_ty(
