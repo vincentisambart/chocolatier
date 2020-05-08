@@ -1,0 +1,5 @@
+error: expected `framework`
+ --> $DIR/incorrect_import.rs:5:13
+  |
+5 |     import!(framwork = "NSFoundation");
+  |             ^^^^^^^^
