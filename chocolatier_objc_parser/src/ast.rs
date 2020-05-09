@@ -2727,8 +2727,8 @@ mod tests {
                     kind: ObjCMethodKind::Instance,
                     params: vec![],
                     result: AttributedType {
-                        ty: Type::ObjPtr(ObjPtr {
-                            kind: ObjPtrKind::Instancetype,
+                        ty: Type::Typedef(TypedefRef {
+                            name: "instancetype".to_string(),
                             nullability: Some(Nullability::NonNull),
                         }),
                         is_const_qualified: false,
@@ -3968,8 +3968,8 @@ mod tests {
                         kind: ObjCMethodKind::Class,
                         params: vec![],
                         result: AttributedType {
-                            ty: Type::ObjPtr(ObjPtr {
-                                kind: ObjPtrKind::Instancetype,
+                            ty: Type::Typedef(TypedefRef {
+                                name: "instancetype".to_string(),
                                 nullability: None,
                             }),
                             is_const_qualified: false,
@@ -3984,8 +3984,8 @@ mod tests {
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
                         result: AttributedType {
-                            ty: Type::ObjPtr(ObjPtr {
-                                kind: ObjPtrKind::Instancetype,
+                            ty: Type::Typedef(TypedefRef {
+                                name: "instancetype".to_string(),
                                 nullability: None,
                             }),
                             is_const_qualified: false,
@@ -4009,8 +4009,8 @@ mod tests {
                             attrs: vec![],
                         }],
                         result: AttributedType {
-                            ty: Type::ObjPtr(ObjPtr {
-                                kind: ObjPtrKind::Instancetype,
+                            ty: Type::Typedef(TypedefRef {
+                                name: "instancetype".to_string(),
                                 nullability: None,
                             }),
                             is_const_qualified: false,
@@ -4025,8 +4025,8 @@ mod tests {
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
                         result: AttributedType {
-                            ty: Type::ObjPtr(ObjPtr {
-                                kind: ObjPtrKind::Instancetype,
+                            ty: Type::Typedef(TypedefRef {
+                                name: "instancetype".to_string(),
                                 nullability: None,
                             }),
                             is_const_qualified: false,
@@ -4041,8 +4041,8 @@ mod tests {
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
                         result: AttributedType {
-                            ty: Type::ObjPtr(ObjPtr {
-                                kind: ObjPtrKind::Instancetype,
+                            ty: Type::Typedef(TypedefRef {
+                                name: "instancetype".to_string(),
                                 nullability: None,
                             }),
                             is_const_qualified: false,
@@ -4057,8 +4057,8 @@ mod tests {
                         kind: ObjCMethodKind::Instance,
                         params: vec![],
                         result: AttributedType {
-                            ty: Type::ObjPtr(ObjPtr {
-                                kind: ObjPtrKind::Instancetype,
+                            ty: Type::Typedef(TypedefRef {
+                                name: "instancetype".to_string(),
                                 nullability: None,
                             }),
                             is_const_qualified: false,
@@ -4073,8 +4073,8 @@ mod tests {
                         kind: ObjCMethodKind::Class,
                         params: vec![],
                         result: AttributedType {
-                            ty: Type::ObjPtr(ObjPtr {
-                                kind: ObjPtrKind::Instancetype,
+                            ty: Type::Typedef(TypedefRef {
+                                name: "instancetype".to_string(),
                                 nullability: None,
                             }),
                             is_const_qualified: false,
@@ -4121,8 +4121,8 @@ mod tests {
                         kind: ObjCMethodKind::Class,
                         params: vec![],
                         result: AttributedType {
-                            ty: Type::ObjPtr(ObjPtr {
-                                kind: ObjPtrKind::Instancetype,
+                            ty: Type::Typedef(TypedefRef {
+                                name: "instancetype".to_string(),
                                 nullability: None,
                             }),
                             is_const_qualified: false,

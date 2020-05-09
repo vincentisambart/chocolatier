@@ -1,5 +1,5 @@
-use chocolatier::ast;
-use chocolatier::xcode::Target;
+use chocolatier_objc_parser::ast;
+use chocolatier_objc_parser::xcode::Target;
 use std::path::PathBuf;
 use structopt::StructOpt;
 
