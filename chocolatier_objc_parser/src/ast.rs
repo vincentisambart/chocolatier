@@ -1899,6 +1899,15 @@ impl From<clang::ClangError> for ParseError {
     }
 }
 
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParseError::ClangError(err) => write!(f, "{}", err),
+            ParseError::CompilationError(s) => f.write_str(&s),
+        }
+    }
+}
+
 type TagIdMap = HashMap<String, u32>;
 
 /// Prints the full clang AST.

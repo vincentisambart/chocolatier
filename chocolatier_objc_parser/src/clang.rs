@@ -177,6 +177,19 @@ pub enum ClangError {
     ASTReadError,
 }
 
+impl std::fmt::Display for ClangError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = match self {
+            ClangError::Failure => "libclang failed parsing",
+            ClangError::Crashed => "libclang crashed",
+            ClangError::InvalidArguments => "libclang was given invalid arguments",
+            ClangError::ASTReadError => "libclang crashed",
+        };
+        f.write_str(message)?;
+        Ok(())
+    }
+}
+
 impl ClangError {
     pub fn from_err_code(err_code: clang_sys::CXErrorCode) -> Option<ClangError> {
         match err_code {
