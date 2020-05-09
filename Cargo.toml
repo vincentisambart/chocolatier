@@ -7,7 +7,17 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-chocolatier_macro = { path = "chocolatier_macro" }
+chocolatier_macro = { path = "chocolatier_macro/" }
 
 [dev-dependencies]
 trybuild = "1.0"
+choco_runtime = { path = "choco_runtime/" }
+
+[workspace]
+members = [
+    "chocolatier_macro",
+    "chocolatier_objc_parser",
+    "choco_runtime",
+    "chocolatier_internal",
+    "chocolat",
+]

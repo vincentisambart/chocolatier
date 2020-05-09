@@ -2,7 +2,7 @@ use chocolatier::chocolatier;
 
 #[chocolatier]
 mod inline {
-    import!(framework = "NSFoundation");
+    import!(framework = "Foundation");
 }
 
 fn main() {}

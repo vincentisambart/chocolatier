@@ -1,0 +1,7 @@
+error: chocolatier requires at least one import!()
+ --> $DIR/empty.rs:3:1
+  |
+3 | #[chocolatier]
+  | ^^^^^^^^^^^^^^
+  |
+  = note: this error originates in an attribute macro (in Nightly builds, run with -Z macro-backtrace for more info)

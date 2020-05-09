@@ -1,6 +1,17 @@
+#![warn(rust_2018_idioms)]
+
+use std::ptr::NonNull;
+
+#[repr(C)]
+pub struct Object {
+    _private: [u8; 0],
+}
+
 // ARC runtime support - https://clang.llvm.org/docs/AutomaticReferenceCounting.html#runtime-support
 #[link(name = "objc", kind = "dylib")]
 extern "C" {
+    // fn objc_autoreleasePoolPush() -> *const ffi::c_void;
+    // fn objc_autoreleasePoolPop(pool: *const ffi::c_void);
     fn objc_release(value: *mut Object);
     fn objc_retain(value: *mut Object) -> *mut Object;
 }
