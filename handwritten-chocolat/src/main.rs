@@ -205,7 +205,11 @@ impl NSStringEncoding {
     const MACOS_ROMAN: Self = Self(30);
 }
 
-trait NSStringInterface: NSObjectInterface {
+trait NSCopyingProtocol {}
+trait NSStringInterface: NSObjectInterface
+where
+    Self: NSCopyingProtocol,
+{
     fn to_string(&self) -> Result<String, std::str::Utf8Error> {
         let raw_self = self.as_raw().as_ptr();
         let cstr = unsafe {
@@ -233,6 +237,7 @@ struct NSString {
 impl NSObjectProtocol for NSString {}
 impl NSObjectInterface for NSString {}
 impl NSStringInterface for NSString {}
+impl NSCopyingProtocol for NSString {}
 
 impl ObjCPtr for NSString {
     unsafe fn from_raw_unchecked(raw: NonNull<Object>) -> Self {

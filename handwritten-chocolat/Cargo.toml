@@ -11,3 +11,6 @@ build = "build.rs"
 
 [build-dependencies]
 cc = "1.0"
+
+[workspace]
+# Not in the chocolatier workspace
