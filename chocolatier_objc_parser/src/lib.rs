@@ -4,4 +4,5 @@
 
 pub mod ast;
 mod clang;
+pub mod index;
 pub mod xcode;
