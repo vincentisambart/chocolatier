@@ -1,46 +1,10 @@
 #![warn(rust_2018_idioms)]
 
+mod custom_parse;
+
 use chocolatier_objc_parser as objc_parser;
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::ToTokens;
-use syn::parse::{Parse, ParseStream};
-
-#[derive(Debug)]
-struct FrameworkImport {
-    framework_token: Ident,
-    eq_token: syn::token::Eq,
-    framework: syn::LitStr,
-}
-
-impl Parse for FrameworkImport {
-    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
-        let framework_token = input.parse()?;
-        if framework_token != "framework" {
-            return Err(syn::Error::new_spanned(
-                framework_token,
-                format!("expected `framework`"),
-            ));
-        }
-        let eq_token = input.parse()?;
-        let framework = input.parse()?;
-        Ok(Self {
-            framework_token,
-            eq_token,
-            framework,
-        })
-    }
-}
-
-#[derive(Debug)]
-enum Import {
-    Framework(FrameworkImport),
-}
-
-impl Parse for Import {
-    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
-        Ok(Self::Framework(input.parse()?))
-    }
-}
 
 fn is_import_macro(mac: &syn::ItemMacro) -> bool {
     mac.mac.path.is_ident("import")
@@ -51,7 +15,7 @@ fn empty_item() -> syn::Item {
 }
 
 // TODO: It might be nice to put the 'extern "C"' block where the first import was.
-fn extract_imports(items: &mut [syn::Item]) -> syn::Result<Vec<Import>> {
+fn extract_imports(items: &mut [syn::Item]) -> syn::Result<Vec<custom_parse::Import>> {
     let mut imports = Vec::new();
     for item in items
         .iter_mut()
@@ -63,20 +27,20 @@ fn extract_imports(items: &mut [syn::Item]) -> syn::Result<Vec<Import>> {
             syn::Item::Macro(mac) => mac,
             _ => unreachable!(),
         };
-        let import = syn::parse2::<Import>(mac.mac.tokens)?;
+        let import = syn::parse2::<custom_parse::Import>(mac.mac.tokens)?;
         imports.push(import)
     }
 
     Ok(imports)
 }
 
-fn parse_objc(imports: &[Import]) -> syn::Result<objc_parser::index::TypeIndex> {
+fn parse_objc(imports: &[custom_parse::Import]) -> syn::Result<objc_parser::index::TypeIndex> {
     use std::fmt::Write;
 
     let mut objc_code = String::new();
     for import in imports {
         match import {
-            Import::Framework(import) => writeln!(
+            custom_parse::Import::Framework(import) => writeln!(
                 &mut objc_code,
                 "#import <{name}/{name}.h>",
                 name = import.framework.value(),
@@ -94,109 +58,6 @@ fn parse_objc(imports: &[Import]) -> syn::Result<objc_parser::index::TypeIndex> 
     let index = objc_parser::index::TypeIndex::new(&ast);
 
     Ok(index)
-}
-
-#[derive(Debug)]
-struct EnumArgs {
-    enum_token: syn::Token![enum],
-    eq_token: syn::Token![=],
-    objc_name: Ident,
-}
-
-impl syn::parse::Parse for EnumArgs {
-    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
-        let enum_token = input.parse::<syn::Token![enum]>()?;
-        let eq_token = input.parse::<syn::Token![=]>()?;
-        let objc_name = input.parse::<syn::Ident>()?;
-        Ok(Self {
-            enum_token,
-            eq_token,
-            objc_name,
-        })
-    }
-}
-
-#[derive(Debug)]
-struct InterfaceArgs {
-    interface_token: Ident,
-    eq_token: syn::token::Eq,
-    objc_name: Ident,
-}
-
-impl syn::parse::Parse for InterfaceArgs {
-    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
-        let interface_token = input.parse::<Ident>()?;
-        if interface_token != "interface" {
-            return Err(syn::Error::new_spanned(
-                interface_token,
-                "expecting \"interface\"",
-            ));
-        }
-        let eq_token = input.parse::<syn::Token![=]>()?;
-        let objc_name = input.parse::<syn::Ident>()?;
-        Ok(Self {
-            interface_token,
-            eq_token,
-            objc_name,
-        })
-    }
-}
-
-#[derive(Debug)]
-struct ProtocolArgs {
-    protocol_token: Ident,
-    eq_token: syn::token::Eq,
-    objc_name: Ident,
-}
-
-impl syn::parse::Parse for ProtocolArgs {
-    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
-        let protocol_token = input.parse::<Ident>()?;
-        if protocol_token != "protocol" {
-            return Err(syn::Error::new_spanned(
-                protocol_token,
-                "expecting \"protocol\"",
-            ));
-        }
-        let eq_token = input.parse::<syn::Token![=]>()?;
-        let objc_name = input.parse::<syn::Ident>()?;
-        Ok(Self {
-            protocol_token,
-            eq_token,
-            objc_name,
-        })
-    }
-}
-
-#[derive(Debug)]
-enum ItemArgs {
-    Enum(EnumArgs),
-    Protocol(ProtocolArgs),
-    Interface(InterfaceArgs),
-}
-
-impl syn::parse::Parse for ItemArgs {
-    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
-        if input.peek(syn::Token![enum]) {
-            Ok(Self::Enum(input.parse()?))
-        } else if let Some((ident, _)) = input.cursor().ident() {
-            if ident == "protocol" {
-                Ok(Self::Protocol(input.parse()?))
-            } else if ident == "interface" {
-                Ok(Self::Interface(input.parse()?))
-            } else {
-                Err(syn::Error::new_spanned(
-                    ident,
-                    "expecting enum/protocol/interface",
-                ))
-            }
-        } else {
-            Err(syn::Error::new(
-                input.cursor().span(),
-                "expecting enum/protocol/interface",
-            ))
-        }
-    }
 }
 
 fn extract_chocolatier_attr(attrs: &mut Vec<syn::Attribute>) -> Option<syn::Attribute> {
@@ -221,22 +82,53 @@ fn is_repr_transparent(attr: &syn::Attribute) -> bool {
     }
 }
 
+fn signed_or_not_to_lit(val: objc_parser::ast::SignedOrNotInt) -> proc_macro2::Literal {
+    use objc_parser::ast::SignedOrNotInt;
+    use proc_macro2::Literal;
+
+    match val {
+        SignedOrNotInt::Signed(i) => Literal::i64_unsuffixed(i),
+        SignedOrNotInt::Unsigned(u) => Literal::u64_unsuffixed(u),
+    }
+}
+
 struct RustProcessor {
     objc_index: objc_parser::index::TypeIndex,
 }
 
 impl RustProcessor {
-    fn process_struct(&self, struc: &mut syn::ItemStruct) -> syn::Result<()> {
+    fn process_trait_item(&self, struc: &mut syn::ItemTrait) -> syn::Result<()> {
         let attr = if let Some(attr) = extract_chocolatier_attr(&mut struc.attrs) {
             attr
         } else {
             return Ok(());
         };
 
-        let arg = attr.parse_args::<ItemArgs>()?;
+        let arg = attr.parse_args::<custom_parse::ItemArgs>()?;
         match arg {
-            ItemArgs::Enum(_) | ItemArgs::Interface(_) => {}
-            ItemArgs::Protocol(protocol) => {
+            custom_parse::ItemArgs::Interface(_) | custom_parse::ItemArgs::Protocol(_) => {}
+            custom_parse::ItemArgs::Enum(enu) => {
+                return Err(syn::Error::new_spanned(
+                    enu.enum_token,
+                    "traits should not need an enum declaration",
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn process_struct_item(&self, struc: &mut syn::ItemStruct) -> syn::Result<()> {
+        let attr = if let Some(attr) = extract_chocolatier_attr(&mut struc.attrs) {
+            attr
+        } else {
+            return Ok(());
+        };
+
+        let args = attr.parse_args::<custom_parse::ItemArgs>()?;
+        match args {
+            custom_parse::ItemArgs::Enum(_) | custom_parse::ItemArgs::Interface(_) => {}
+            custom_parse::ItemArgs::Protocol(protocol) => {
                 return Err(syn::Error::new_spanned(
                     protocol.protocol_token,
                     "protocols should not need a struct declaration",
@@ -251,12 +143,15 @@ impl RustProcessor {
             ));
         }
 
-        // TODO: Check that type of first field is the same as the one of the C type.
+        // TODO: For enums, check that type of first field is the same as the one of the C type.
 
         Ok(())
     }
 
-    fn get_enum_defs(&self, objc_name: &Ident) -> syn::Result<Vec<&objc_parser::ast::EnumDef>> {
+    fn get_objc_enum_defs(
+        &self,
+        objc_name: &Ident,
+    ) -> syn::Result<Vec<&objc_parser::ast::EnumDef>> {
         use objc_parser::ast;
 
         let mut enum_defs = Vec::new();
@@ -287,10 +182,16 @@ impl RustProcessor {
         Ok(enum_defs)
     }
 
-    fn process_enum_impl(&self, enum_args: &EnumArgs, imp: &mut syn::ItemImpl) -> syn::Result<()> {
+    fn process_enum_impl(
+        &self,
+        enum_args: &custom_parse::EnumArgs,
+        imp: &mut syn::ItemImpl,
+    ) -> syn::Result<()> {
         use syn::spanned::Spanned;
 
-        let defs = self.get_enum_defs(&enum_args.objc_name)?;
+        let defs = self.get_objc_enum_defs(&enum_args.objc_name)?;
+        // For all "const CONST_NAME: Self = ObjCEnumValue;" with ObjCEnumValue being an ObjC enum value,
+        // replace it by "Self(xxxx)", with xxxx being the real numerical value in ObjC.
         for item in imp.items.iter_mut() {
             let cnst = match item {
                 syn::ImplItem::Const(cnst) => cnst,
@@ -306,11 +207,7 @@ impl RustProcessor {
                     .filter_map(|def| def.values.iter().filter(|val| ident == &val.name).next())
                     .next()
                 {
-                    use objc_parser::ast::SignedOrNotInt;
-                    let mut lit = match val.value {
-                        SignedOrNotInt::Signed(i) => proc_macro2::Literal::i64_unsuffixed(i),
-                        SignedOrNotInt::Unsigned(u) => proc_macro2::Literal::u64_unsuffixed(u),
-                    };
+                    let mut lit = signed_or_not_to_lit(val.value);
                     lit.set_span(cnst.expr.span());
                     cnst.expr = syn::parse_quote! {Self(#lit)};
                 }
@@ -320,16 +217,17 @@ impl RustProcessor {
         Ok(())
     }
 
-    fn process_impl(&self, imp: &mut syn::ItemImpl) -> syn::Result<()> {
+    fn process_impl_item(&self, imp: &mut syn::ItemImpl) -> syn::Result<()> {
+        // Only interested in impl blocks marked "#[chocolatier(xxxx = xxxxx)]".
         let attr = if let Some(attr) = extract_chocolatier_attr(&mut imp.attrs) {
             attr
         } else {
             return Ok(());
         };
 
-        let arg = attr.parse_args::<ItemArgs>()?;
+        let arg = attr.parse_args::<custom_parse::ItemArgs>()?;
         match arg {
-            ItemArgs::Enum(enum_args) => self.process_enum_impl(&enum_args, imp)?,
+            custom_parse::ItemArgs::Enum(enum_args) => self.process_enum_impl(&enum_args, imp)?,
             _ => {}
         }
 
@@ -339,8 +237,9 @@ impl RustProcessor {
     fn process(&self, items: &mut Vec<syn::Item>) -> syn::Result<()> {
         for item in items.iter_mut() {
             match item {
-                syn::Item::Struct(struc) => self.process_struct(struc)?,
-                syn::Item::Impl(imp) => self.process_impl(imp)?,
+                syn::Item::Struct(struc) => self.process_struct_item(struc)?,
+                syn::Item::Impl(imp) => self.process_impl_item(imp)?,
+                syn::Item::Trait(trai) => self.process_trait_item(trai)?,
                 _ => {}
             }
         }
@@ -376,12 +275,4 @@ pub fn chocolatier(input: TokenStream) -> syn::Result<TokenStream> {
     processor.process(items)?;
 
     Ok(item.into_token_stream())
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
-    }
 }
