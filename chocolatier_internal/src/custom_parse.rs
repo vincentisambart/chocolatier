@@ -1,4 +1,5 @@
 use proc_macro2::Ident;
+use std::borrow::Cow;
 use syn::parse::{Parse, ParseStream};
 
 #[derive(Debug)]
@@ -60,9 +61,9 @@ impl syn::parse::Parse for EnumArgs {
 
 #[derive(Debug)]
 pub struct InterfaceArgs {
-    interface_token: Ident,
-    eq_token: syn::token::Eq,
-    objc_name: Ident,
+    pub interface_token: Ident,
+    pub eq_token: syn::token::Eq,
+    pub objc_name: Ident,
 }
 
 impl syn::parse::Parse for InterfaceArgs {
@@ -179,6 +180,22 @@ pub struct ObjCMethodCall {
     pub params: ObjCMethodParams,
 }
 
+impl ObjCMethodCall {
+    pub fn selector(&self) -> String {
+        match &self.params {
+            ObjCMethodParams::Without(ident) => ident.to_string(),
+            ObjCMethodParams::With(params) => params
+                .iter()
+                .map(|(ident, _, _)| match ident {
+                    Some(ident) => Cow::Owned(std::format!("{}:", ident)),
+                    None => Cow::Borrowed(":"),
+                })
+                .collect::<Vec<_>>()
+                .join(""),
+        }
+    }
+}
+
 impl Parse for ObjCMethodCall {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         let content;
@@ -236,19 +253,29 @@ pub struct ObjCPropertySet {
     pub expr: syn::Expr,
 }
 
-// objc!([self myInstanceMethod:val1 param2:val2])
-// objc!([self innerMethod:val1] myMethod:val2 param2:val3])
-// objc!([Self myClassMethod:val1 param:val2])
-// objc!(myFunc(val1, val2))
-// objc!(self.myInstanceProperty)
-// objc!(Self.myClassProperty)
-//
-// objc!(self.myInstanceProperty = val)
+// Valid uses of the objc!() macro:
+// - objc!([self myInstanceMethod:val1 param2:val2])
+// - objc!([self innerMethod:val1] myMethod:val2 param2:val3])
+// - objc!([Self myClassMethod:val1 param:val2])
+// - objc!(myFunc(val1, val2))
+// - objc!(self.myInstanceProperty)
+// - objc!(Self.myClassProperty)
+// - objc!(self.myInstanceProperty = 1)
 #[derive(Debug)]
-enum ObjCExpr {
+pub enum ObjCExpr {
     MethodCall(ObjCMethodCall),
     PropertyGet(ObjCPropertyGet),
     PropertySet(ObjCPropertySet),
+}
+
+impl ObjCExpr {
+    pub fn receiver(&self) -> &ObjCReceiver {
+        match self {
+            Self::MethodCall(call) => &call.receiver,
+            Self::PropertyGet(get) => &get.receiver,
+            Self::PropertySet(set) => &set.receiver,
+        }
+    }
 }
 
 impl Parse for ObjCExpr {
@@ -304,6 +331,7 @@ mod tests {
                 params: ObjCMethodParams::Without(method_name),
             }) if method_name == "myMethod"
         ));
+
         let nested_call_multiparams: ObjCExpr =
             syn::parse_quote!([[Self alloc] myMethod:1+2 otherParam:3+4]);
         match &nested_call_multiparams {
@@ -325,6 +353,7 @@ mod tests {
             }
             _ => panic!("unexpected expr {:?}", nested_call_multiparams),
         }
+
         let no_method_name: syn::Result<ObjCExpr> = syn::parse_str("self");
         assert!(no_method_name.is_err());
     }
