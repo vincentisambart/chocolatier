@@ -20,9 +20,9 @@ NSUInteger chocolat_Foundation_NSObjectProtocol_instance_hash(id<NSObject> self_
     }
 }
 
-__attribute__((ns_returns_retained)) NSObject *chocolat_Foundation_NSObjectInterface_class_new(void) {
+__attribute__((ns_returns_retained)) NSObject *chocolat_Foundation_NSObjectInterface_class_new(Class klass) {
     @try {
-        return [NSObject new];
+        return [klass new];
     }
     @catch (NSException *exception) {
         abort_on_exception(exception);
@@ -65,9 +65,9 @@ const char *chocolat_Foundation_NSStringInterface_instance_UTF8String(__unsafe_u
     }
 }
 
-__attribute__((ns_returns_retained)) NSString *chocolat_Foundation_NSStringInterface_class_newWithBytes_length_encoding(const void *bytes, NSUInteger len, NSStringEncoding encoding) {
+__attribute__((ns_returns_retained)) NSString *chocolat_Foundation_NSStringInterface_class_newWithBytes_length_encoding(Class klass, const void *bytes, NSUInteger len, NSStringEncoding encoding) {
     @try {
-        return [[NSString alloc] initWithBytes:bytes length:len encoding:encoding];
+        return [[klass alloc] initWithBytes:bytes length:len encoding:encoding];
     }
     @catch (NSException *exception) {
         abort_on_exception(exception);

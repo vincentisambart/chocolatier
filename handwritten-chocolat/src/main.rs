@@ -15,72 +15,82 @@ use std::ffi;
 use std::ptr::NonNull;
 
 #[repr(C)]
-pub struct Object {
+pub struct ObjCObject {
+    _private: [u8; 0],
+}
+#[repr(C)]
+pub struct ObjCClass {
     _private: [u8; 0],
 }
 
 extern "C" {
-    fn chocolat_Foundation_NSObjectProtocol_instance_hash(self_: *mut Object) -> usize;
+    fn chocolat_Foundation_NSObjectProtocol_instance_hash(self_: *mut ObjCObject) -> usize;
     fn chocolat_Foundation_NSObjectProtocol_instance_isEqual(
-        self_: *mut Object,
-        other: *mut Object,
+        self_: *mut ObjCObject,
+        other: *mut ObjCObject,
     ) -> i8;
-    fn chocolat_Foundation_NSObjectProtocol_instance_description(self_: *mut Object)
-        -> *mut Object;
+    fn chocolat_Foundation_NSObjectProtocol_instance_description(
+        self_: *mut ObjCObject,
+    ) -> *mut ObjCObject;
 
-    fn chocolat_Foundation_NSObjectInterface_class_new() -> *mut Object;
+    fn chocolat_Foundation_NSObjectInterface_class_new(
+        class: NonNull<ObjCClass>,
+    ) -> *mut ObjCObject;
 
     fn chocolat_Foundation_NSStringInterface_class_newWithBytes_length_encoding(
+        class: NonNull<ObjCClass>,
         bytes: *const ffi::c_void,
         len: usize,
         encoding: NSStringEncoding,
-    ) -> *mut Object;
+    ) -> *mut ObjCObject;
     fn chocolat_Foundation_NSStringInterface_instance_lengthOfBytesUsingEncoding(
-        self_: *mut Object,
+        self_: *mut ObjCObject,
         encoding: NSStringEncoding,
     ) -> usize;
-    fn chocolat_Foundation_NSStringInterface_instance_UTF8String(self_: *mut Object) -> *const i8;
+    fn chocolat_Foundation_NSStringInterface_instance_UTF8String(
+        self_: *mut ObjCObject,
+    ) -> *const i8;
     fn chocolat_Foundation_NSStringInterface_instance_charAtIndex(
-        self_: *mut Object,
+        self_: *mut ObjCObject,
         index: usize,
     ) -> u16;
-    fn chocolat_Foundation_NSStringInterface_instance_length(self_: *mut Object) -> usize;
+    fn chocolat_Foundation_NSStringInterface_instance_length(self_: *mut ObjCObject) -> usize;
 
-    fn chocolat_Foundation_FooInterface_class_new() -> *mut Object;
-    fn chocolat_Foundation_FooInterface_instance_bar(self_: *mut Object) -> *mut Object;
+    fn chocolat_Foundation_FooInterface_instance_bar(self_: *mut ObjCObject) -> *mut ObjCObject;
 
-    fn chocolat_Foundation_NSArrayInterface_class_new() -> *mut Object;
-    fn chocolat_Foundation_NSArrayInterface_instance_count(self_: *mut Object) -> usize;
-    fn chocolat_Foundation_NSArrayInterface_instance_firstObject(self_: *mut Object)
-        -> *mut Object;
-    fn chocolat_Foundation_NSArrayInterface_instance_lastObject(self_: *mut Object) -> *mut Object;
+    fn chocolat_Foundation_NSArrayInterface_instance_count(self_: *mut ObjCObject) -> usize;
+    fn chocolat_Foundation_NSArrayInterface_instance_firstObject(
+        self_: *mut ObjCObject,
+    ) -> *mut ObjCObject;
+    fn chocolat_Foundation_NSArrayInterface_instance_lastObject(
+        self_: *mut ObjCObject,
+    ) -> *mut ObjCObject;
     fn chocolat_Foundation_NSArrayInterface_instance_objectAtIndex(
-        self_: *mut Object,
+        self_: *mut ObjCObject,
         index: usize,
-    ) -> *mut Object;
+    ) -> *mut ObjCObject;
     fn chocolat_Foundation_NSArrayInterface_instance_arrayByAddingObject(
-        self_: *mut Object,
-        obj: *mut Object,
-    ) -> *mut Object;
+        self_: *mut ObjCObject,
+        obj: *mut ObjCObject,
+    ) -> *mut ObjCObject;
     fn chocolat_Foundation_NSArrayInterface_instance_enumerateObjectsUsingBlock(
-        self_: *mut Object,
+        self_: *mut ObjCObject,
         block: *mut std::ffi::c_void,
     );
 
-    fn chocolat_Foundation_NSMutableArrayInterface_class_new() -> *mut Object;
     fn chocolat_Foundation_NSMutableArrayInterface_instance_addObject(
-        self_: *mut Object,
-        obj: *mut Object,
+        self_: *mut ObjCObject,
+        obj: *mut ObjCObject,
     );
     fn chocolat_Foundation_NSMutableArrayInterface_instance_insertObject_atIndex(
-        self_: *mut Object,
-        obj: *mut Object,
+        self_: *mut ObjCObject,
+        obj: *mut ObjCObject,
         index: usize,
     );
 }
 
 extern "C" {
-    fn CFGetRetainCount(self_: *mut Object) -> isize;
+    fn CFGetRetainCount(self_: *mut ObjCObject) -> isize;
 }
 
 // ARC runtime support - https://clang.llvm.org/docs/AutomaticReferenceCounting.html#runtime-support
@@ -88,25 +98,27 @@ extern "C" {
 extern "C" {
     fn objc_autoreleasePoolPush() -> *const ffi::c_void;
     fn objc_autoreleasePoolPop(pool: *const ffi::c_void);
-    fn objc_release(value: *mut Object);
-    fn objc_retain(value: *mut Object) -> *mut Object;
+    fn objc_release(value: *mut ObjCObject);
+    fn objc_retain(value: *mut ObjCObject) -> *mut ObjCObject;
+    fn objc_getClass(name: *const u8) -> *mut ObjCClass;
 }
 
 trait ObjCPtr: Sized {
-    unsafe fn from_raw_unchecked(ptr: NonNull<Object>) -> Self;
-    fn as_raw(&self) -> NonNull<Object>;
+    fn class() -> NonNull<ObjCClass>;
+    unsafe fn from_raw_unchecked(ptr: NonNull<ObjCObject>) -> Self;
+    fn as_raw(&self) -> NonNull<ObjCObject>;
 }
 
 struct UntypedObjCPtr {
-    raw: NonNull<Object>,
+    raw: NonNull<ObjCObject>,
 }
 
-impl ObjCPtr for UntypedObjCPtr {
-    unsafe fn from_raw_unchecked(raw: NonNull<Object>) -> Self {
+impl UntypedObjCPtr {
+    unsafe fn from_raw_unchecked(raw: NonNull<ObjCObject>) -> Self {
         Self { raw }
     }
 
-    fn as_raw(&self) -> NonNull<Object> {
+    fn as_raw(&self) -> NonNull<ObjCObject> {
         self.raw
     }
 }
@@ -146,6 +158,12 @@ trait NSObjectProtocol: ObjCPtr {
         let raw_ret = NonNull::new(ptr_ret).expect("objc_retain should not return a null pointer.");
         unsafe { Self::from_raw_unchecked(raw_ret) }
     }
+    fn new() -> Self {
+        let raw_ptr = unsafe { chocolat_Foundation_NSObjectInterface_class_new(Self::class()) };
+        let raw = NonNull::new(raw_ptr)
+            .expect("Expecting +[<class_name> new] to return a non null pointer.");
+        unsafe { Self::from_raw_unchecked(raw) }
+    }
 }
 
 trait NSObjectInterface: NSObjectProtocol {}
@@ -158,22 +176,25 @@ impl NSObjectProtocol for NSObject {}
 impl NSObjectInterface for NSObject {}
 
 impl ObjCPtr for NSObject {
-    unsafe fn from_raw_unchecked(raw: NonNull<Object>) -> Self {
+    unsafe fn from_raw_unchecked(raw: NonNull<ObjCObject>) -> Self {
         let ptr = UntypedObjCPtr::from_raw_unchecked(raw);
         Self { ptr }
     }
 
-    fn as_raw(&self) -> NonNull<Object> {
+    fn as_raw(&self) -> NonNull<ObjCObject> {
         self.ptr.as_raw()
     }
-}
 
-impl NSObject {
-    fn new() -> Self {
-        let raw_ptr = unsafe { chocolat_Foundation_NSObjectInterface_class_new() };
-        let raw =
-            NonNull::new(raw_ptr).expect("Expecting +[NSObject new] to return a non null pointer.");
-        unsafe { Self::from_raw_unchecked(raw) }
+    fn class() -> NonNull<ObjCClass> {
+        use std::sync::atomic::{AtomicPtr, Ordering};
+        static CLASS: AtomicPtr<ObjCClass> = AtomicPtr::new(std::ptr::null_mut());
+        let class = CLASS.load(Ordering::Acquire);
+        if let Some(class) = NonNull::new(class) {
+            return class;
+        }
+        let class = unsafe { objc_getClass("NSObject\0".as_ptr()) };
+        CLASS.store(class, Ordering::Release);
+        NonNull::new(class).unwrap()
     }
 }
 
@@ -240,13 +261,25 @@ impl NSStringInterface for NSString {}
 impl NSCopyingProtocol for NSString {}
 
 impl ObjCPtr for NSString {
-    unsafe fn from_raw_unchecked(raw: NonNull<Object>) -> Self {
+    unsafe fn from_raw_unchecked(raw: NonNull<ObjCObject>) -> Self {
         let ptr = UntypedObjCPtr::from_raw_unchecked(raw);
         Self { ptr }
     }
 
-    fn as_raw(&self) -> NonNull<Object> {
+    fn as_raw(&self) -> NonNull<ObjCObject> {
         self.ptr.as_raw()
+    }
+
+    fn class() -> NonNull<ObjCClass> {
+        use std::sync::atomic::{AtomicPtr, Ordering};
+        static CLASS: AtomicPtr<ObjCClass> = AtomicPtr::new(std::ptr::null_mut());
+        let class = CLASS.load(Ordering::Acquire);
+        if let Some(class) = NonNull::new(class) {
+            return class;
+        }
+        let class = unsafe { objc_getClass("NSString\0".as_ptr()) };
+        CLASS.store(class, Ordering::Release);
+        NonNull::new(class).unwrap()
     }
 }
 
@@ -263,7 +296,10 @@ impl NSString {
         let encoding = NSStringEncoding::UTF8;
         let raw_ptr = unsafe {
             chocolat_Foundation_NSStringInterface_class_newWithBytes_length_encoding(
-                bytes, len, encoding,
+                Self::class(),
+                bytes,
+                len,
+                encoding,
             )
         };
         let ptr = NonNull::new(raw_ptr).expect(
@@ -291,28 +327,31 @@ impl NSObjectInterface for Foo {}
 impl FooInterface for Foo {}
 
 impl ObjCPtr for Foo {
-    unsafe fn from_raw_unchecked(raw: NonNull<Object>) -> Self {
+    unsafe fn from_raw_unchecked(raw: NonNull<ObjCObject>) -> Self {
         let ptr = UntypedObjCPtr::from_raw_unchecked(raw);
         Self { ptr }
     }
 
-    fn as_raw(&self) -> NonNull<Object> {
+    fn as_raw(&self) -> NonNull<ObjCObject> {
         self.ptr.as_raw()
+    }
+
+    fn class() -> NonNull<ObjCClass> {
+        use std::sync::atomic::{AtomicPtr, Ordering};
+        static CLASS: AtomicPtr<ObjCClass> = AtomicPtr::new(std::ptr::null_mut());
+        let class = CLASS.load(Ordering::Acquire);
+        if let Some(class) = NonNull::new(class) {
+            return class;
+        }
+        let class = unsafe { objc_getClass("Foo\0".as_ptr()) };
+        CLASS.store(class, Ordering::Release);
+        NonNull::new(class).unwrap()
     }
 }
 
 impl From<Foo> for NSObject {
     fn from(obj: Foo) -> Self {
         unsafe { NSObject::from_raw_unchecked(obj.as_raw()) }
-    }
-}
-
-impl Foo {
-    fn new() -> Self {
-        let raw_ptr = unsafe { chocolat_Foundation_FooInterface_class_new() };
-        let raw =
-            NonNull::new(raw_ptr).expect("Expecting +[Foo new] to return a non null pointer.");
-        unsafe { Self::from_raw_unchecked(raw) }
     }
 }
 
@@ -349,7 +388,7 @@ trait NSArrayInterface<T: ObjCPtr>: NSObjectInterface {
         unsafe { NSArray::from_raw_unchecked(raw) }
     }
     fn enumerate_objects_using_block<
-        F: Fn(NonNull<Object>, usize, &mut u8) + Send + Sync + Clone + 'static,
+        F: Fn(NonNull<ObjCObject>, usize, &mut u8) + Send + Sync + Clone + 'static,
     >(
         &self,
         f: F,
@@ -376,7 +415,7 @@ impl<T: ObjCPtr> NSObjectInterface for NSArray<T> {}
 impl<T: ObjCPtr> NSArrayInterface<T> for NSArray<T> {}
 
 impl<T: ObjCPtr> ObjCPtr for NSArray<T> {
-    unsafe fn from_raw_unchecked(raw: NonNull<Object>) -> Self {
+    unsafe fn from_raw_unchecked(raw: NonNull<ObjCObject>) -> Self {
         let ptr = UntypedObjCPtr::from_raw_unchecked(raw);
         Self {
             ptr,
@@ -384,23 +423,26 @@ impl<T: ObjCPtr> ObjCPtr for NSArray<T> {
         }
     }
 
-    fn as_raw(&self) -> NonNull<Object> {
+    fn as_raw(&self) -> NonNull<ObjCObject> {
         self.ptr.as_raw()
+    }
+
+    fn class() -> NonNull<ObjCClass> {
+        use std::sync::atomic::{AtomicPtr, Ordering};
+        static CLASS: AtomicPtr<ObjCClass> = AtomicPtr::new(std::ptr::null_mut());
+        let class = CLASS.load(Ordering::Acquire);
+        if let Some(class) = NonNull::new(class) {
+            return class;
+        }
+        let class = unsafe { objc_getClass("NSArray\0".as_ptr()) };
+        CLASS.store(class, Ordering::Release);
+        NonNull::new(class).unwrap()
     }
 }
 
 impl<T: ObjCPtr> From<NSArray<T>> for NSObject {
     fn from(obj: NSArray<T>) -> Self {
         unsafe { NSObject::from_raw_unchecked(obj.as_raw()) }
-    }
-}
-
-impl<T: ObjCPtr> NSArray<T> {
-    fn new() -> Self {
-        let raw_ptr = unsafe { chocolat_Foundation_NSArrayInterface_class_new() };
-        let raw =
-            NonNull::new(raw_ptr).expect("Expecting +[NSArray new] to return a non null pointer.");
-        unsafe { Self::from_raw_unchecked(raw) }
     }
 }
 
@@ -433,7 +475,7 @@ impl<T: ObjCPtr> NSArrayInterface<T> for NSMutableArray<T> {}
 impl<T: ObjCPtr> NSMutableArrayInterface<T> for NSMutableArray<T> {}
 
 impl<T: ObjCPtr> ObjCPtr for NSMutableArray<T> {
-    unsafe fn from_raw_unchecked(raw: NonNull<Object>) -> Self {
+    unsafe fn from_raw_unchecked(raw: NonNull<ObjCObject>) -> Self {
         let ptr = UntypedObjCPtr::from_raw_unchecked(raw);
         Self {
             ptr,
@@ -441,8 +483,20 @@ impl<T: ObjCPtr> ObjCPtr for NSMutableArray<T> {
         }
     }
 
-    fn as_raw(&self) -> NonNull<Object> {
+    fn as_raw(&self) -> NonNull<ObjCObject> {
         self.ptr.as_raw()
+    }
+
+    fn class() -> NonNull<ObjCClass> {
+        use std::sync::atomic::{AtomicPtr, Ordering};
+        static CLASS: AtomicPtr<ObjCClass> = AtomicPtr::new(std::ptr::null_mut());
+        let class = CLASS.load(Ordering::Acquire);
+        if let Some(class) = NonNull::new(class) {
+            return class;
+        }
+        let class = unsafe { objc_getClass("NSMutableArray\0".as_ptr()) };
+        CLASS.store(class, Ordering::Release);
+        NonNull::new(class).unwrap()
     }
 }
 
@@ -455,15 +509,6 @@ impl<T: ObjCPtr> From<NSMutableArray<T>> for NSObject {
 impl<T: ObjCPtr> From<NSMutableArray<T>> for NSArray<T> {
     fn from(obj: NSMutableArray<T>) -> Self {
         unsafe { NSArray::from_raw_unchecked(obj.as_raw()) }
-    }
-}
-
-impl<T: ObjCPtr> NSMutableArray<T> {
-    fn new() -> Self {
-        let raw_ptr = unsafe { chocolat_Foundation_NSMutableArrayInterface_class_new() };
-        let raw = NonNull::new(raw_ptr)
-            .expect("Expecting +[NSMutableArray new] to return a non null pointer.");
-        unsafe { Self::from_raw_unchecked(raw) }
     }
 }
 
