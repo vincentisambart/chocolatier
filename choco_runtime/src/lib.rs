@@ -3,7 +3,12 @@
 use std::ptr::NonNull;
 
 #[repr(C)]
-pub struct Object {
+pub struct ObjCObject {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct ObjCClass {
     _private: [u8; 0],
 }
 
@@ -12,26 +17,27 @@ pub struct Object {
 extern "C" {
     // fn objc_autoreleasePoolPush() -> *const ffi::c_void;
     // fn objc_autoreleasePoolPop(pool: *const ffi::c_void);
-    fn objc_release(value: *mut Object);
-    fn objc_retain(value: *mut Object) -> *mut Object;
+    fn objc_release(value: *mut ObjCObject);
+    fn objc_retain(value: *mut ObjCObject) -> *mut ObjCObject;
 }
 
 pub trait ObjCPtr: Sized {
-    unsafe fn from_raw_unchecked(ptr: NonNull<Object>) -> Self;
-    fn as_raw(&self) -> NonNull<Object>;
+    fn class() -> NonNull<ObjCClass>;
+    unsafe fn from_raw_unchecked(ptr: NonNull<ObjCObject>) -> Self;
+    fn as_raw(&self) -> NonNull<ObjCObject>;
 }
 
 #[repr(transparent)]
 pub struct UntypedObjCPtr {
-    raw: NonNull<Object>,
+    raw: NonNull<ObjCObject>,
 }
 
-impl ObjCPtr for UntypedObjCPtr {
-    unsafe fn from_raw_unchecked(raw: NonNull<Object>) -> Self {
+impl UntypedObjCPtr {
+    unsafe fn from_raw_unchecked(raw: NonNull<ObjCObject>) -> Self {
         Self { raw }
     }
 
-    fn as_raw(&self) -> NonNull<Object> {
+    fn as_raw(&self) -> NonNull<ObjCObject> {
         self.raw
     }
 }

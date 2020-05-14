@@ -250,7 +250,7 @@ pub struct ObjCPropertySet {
     pub dot_token: syn::Token![.],
     pub property_name: syn::Ident,
     pub eq_token: syn::Token![=],
-    pub expr: syn::Expr,
+    pub val_expr: syn::Expr,
 }
 
 // Valid uses of the objc!() macro:
@@ -304,13 +304,13 @@ impl Parse for ObjCExpr {
         }
 
         let eq_token: syn::Token![=] = input.parse()?;
-        let expr: syn::Expr = input.parse()?;
+        let val_expr: syn::Expr = input.parse()?;
         let set = ObjCPropertySet {
             receiver,
             dot_token,
             property_name,
             eq_token,
-            expr,
+            val_expr,
         };
         Ok(Self::PropertySet(set))
     }

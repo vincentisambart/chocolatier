@@ -8,21 +8,16 @@ use chocolatier_objc_parser as objc_parser;
 use objc_parser::ast::ObjCMethodKind;
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::ToTokens;
-use syn::visit::Visit;
+use syn::parse_quote;
+use syn::visit_mut::VisitMut;
 
 fn is_import_macro(mac: &syn::ItemMacro) -> bool {
     mac.mac.path.is_ident("import")
 }
 
-fn empty_item() -> syn::Item {
-    syn::Item::Verbatim(TokenStream::new())
-}
-
 fn read_imports(items: &[syn::Item]) -> syn::Result<Vec<custom_parse::Import>> {
     let imports = items
         .iter()
-        .enumerate()
-        .map(|(_, item)| item)
         .filter_map(|item| match item {
             syn::Item::Macro(mac) if is_import_macro(mac) => Some(mac),
             _ => None,
@@ -31,6 +26,30 @@ fn read_imports(items: &[syn::Item]) -> syn::Result<Vec<custom_parse::Import>> {
         .collect::<syn::Result<Vec<_>>>()?;
 
     Ok(imports)
+}
+
+fn replace_imports(items: &mut [syn::Item]) {
+    use custom_parse::Import;
+
+    for item in items.iter_mut() {
+        let mac = match item {
+            syn::Item::Macro(mac) if is_import_macro(mac) => mac,
+            _ => continue,
+        };
+
+        // We can unwrap as read_imports already parsed it successfully.
+        let import: Import = syn::parse2(mac.mac.tokens.clone()).unwrap();
+        let replacement_item: syn::Item = match import {
+            Import::Framework(framework) => {
+                let name = framework.framework.value();
+                parse_quote! {
+                    #[link(name = #name, kind = "framework")]
+                    extern "C" {}
+                }
+            }
+        };
+        *item = replacement_item;
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -46,14 +65,76 @@ struct ObjCMacroUse {
     expr_mac: syn::ExprMacro,
 }
 
-struct ObjCMacroVisitor {
+struct ObjCMacroReplacer<'idx> {
+    objc_index: &'idx objc_parser::index::TypeIndex,
     errs: Vec<syn::Error>,
     impl_kind: Option<ObjCMacroUseImplKind>,
-    uses: Vec<ObjCMacroUse>,
 }
 
-impl syn::visit::Visit<'_> for ObjCMacroVisitor {
-    fn visit_item_impl(&mut self, imp: &'_ syn::ItemImpl) {
+impl ObjCMacroReplacer<'_> {
+    fn process_objc_macro(&mut self, expr_mac: &mut syn::ExprMacro) -> syn::Result<syn::Expr> {
+        use custom_parse::{ObjCExpr, ObjCMethodParams};
+
+        let impl_kind = match &self.impl_kind {
+            Some(impl_kind) => impl_kind,
+            None => {
+                return Err(syn::Error::new_spanned(
+                    expr_mac,
+                    "objc!() must be used in #[chocolatier] marked impl",
+                ))
+            }
+        };
+        // Note that we do not support nesting, as it increases complexity and is probably not useful.
+        let objc_expr: custom_parse::ObjCExpr = expr_mac.mac.parse_body()?;
+        let mac_use = ObjCMacroUse {
+            impl_kind: impl_kind.clone(),
+            expr: objc_expr,
+            expr_mac: expr_mac.clone(),
+        };
+
+        let resolved = resolve_use(self.objc_index, &mac_use)?;
+
+        let func_name_span = match &mac_use.expr {
+            ObjCExpr::MethodCall(call) => match &call.params {
+                ObjCMethodParams::Without(ident) => ident.span(),
+                ObjCMethodParams::With(params) => params[0].0.as_ref().unwrap().span(),
+            },
+            ObjCExpr::PropertyGet(_) => todo!("{}:{}", file!(), line!()),
+            ObjCExpr::PropertySet(_) => todo!("{}:{}", file!(), line!()),
+        };
+
+        let func_name = c_func_name(self.objc_index, &resolved);
+        let func_ident = Ident::new(&func_name, func_name_span);
+
+        let mut params: Vec<syn::Expr> = Vec::new();
+
+        match resolved.method.kind {
+            ObjCMethodKind::Class => match &mac_use.expr.receiver() {
+                custom_parse::ObjCReceiver::SelfValue(_) => todo!(),
+                custom_parse::ObjCReceiver::SelfType(_) => params.push(parse_quote!(Self::class())),
+                custom_parse::ObjCReceiver::Class(_) => todo!("{}:{}", file!(), line!()),
+                custom_parse::ObjCReceiver::MethodCall(_) => todo!("{}:{}", file!(), line!()),
+            },
+            ObjCMethodKind::Instance => params.push(parse_quote!(self)),
+        }
+
+        match &mac_use.expr {
+            ObjCExpr::MethodCall(call) => match &call.params {
+                ObjCMethodParams::Without(_) => {}
+                ObjCMethodParams::With(mac_params) => {
+                    params.extend(mac_params.iter().map(|(_, _, expr)| expr.clone()));
+                }
+            },
+            ObjCExpr::PropertyGet(_) => {}
+            ObjCExpr::PropertySet(set) => params.push(set.val_expr.clone()),
+        }
+
+        Ok(parse_quote!(#func_ident(#(#params),*)))
+    }
+}
+
+impl syn::visit_mut::VisitMut for ObjCMacroReplacer<'_> {
+    fn visit_item_impl_mut(&mut self, imp: &'_ mut syn::ItemImpl) {
         use custom_parse::ItemArgs;
 
         let (_, args) = match read_chocolatier_attr(&imp.attrs) {
@@ -76,53 +157,43 @@ impl syn::visit::Visit<'_> for ObjCMacroVisitor {
         };
         std::mem::swap(&mut self.impl_kind, &mut new_impl_kind);
 
-        syn::visit::visit_item_impl(self, imp);
+        syn::visit_mut::visit_item_impl_mut(self, imp);
 
         std::mem::swap(&mut self.impl_kind, &mut new_impl_kind);
     }
 
-    fn visit_expr_macro(&mut self, expr_mac: &'_ syn::ExprMacro) {
-        if expr_mac.mac.path.is_ident("objc") {
-            let impl_kind = match &self.impl_kind {
-                Some(impl_kind) => impl_kind,
-                None => {
-                    let err = syn::Error::new_spanned(
-                        expr_mac,
-                        "objc!() must be used in #[chocolatier] marked impl",
-                    );
-                    self.errs.push(err);
-                    return;
-                }
-            };
-            // Note that we do not support nesting, as it increases complexity and is probably not useful.
-            match expr_mac.mac.parse_body::<custom_parse::ObjCExpr>() {
-                Ok(expr) => self.uses.push(ObjCMacroUse {
-                    impl_kind: impl_kind.clone(),
-                    expr,
-                    expr_mac: expr_mac.clone(),
-                }),
-                Err(err) => self.errs.push(err),
+    fn visit_expr_mut(&mut self, expr: &mut syn::Expr) {
+        let expr_mac = match expr {
+            syn::Expr::Macro(expr_mac) if expr_mac.mac.path.is_ident("objc") => expr_mac,
+            _ => return syn::visit_mut::visit_expr_mut(self, expr),
+        };
+
+        match self.process_objc_macro(expr_mac) {
+            Ok(new_expr) => *expr = new_expr,
+            Err(err) => {
+                self.errs.push(err);
             }
-        } else {
-            syn::visit::visit_expr_macro(self, expr_mac);
         }
     }
 }
 
-fn find_objc_macro_uses(items: &[syn::Item]) -> syn::Result<Vec<ObjCMacroUse>> {
-    let mut visitor = ObjCMacroVisitor {
+fn replace_objc_macro_uses(
+    objc_index: &objc_parser::index::TypeIndex,
+    items: &mut [syn::Item],
+) -> syn::Result<()> {
+    let mut replacer = ObjCMacroReplacer {
+        objc_index: objc_index,
         errs: Vec::new(),
         impl_kind: None,
-        uses: Vec::new(),
     };
-    for item in items {
-        visitor.visit_item(&item);
-        if let Some(err) = visitor.errs.drain(..).next() {
+    for item in items.iter_mut() {
+        replacer.visit_item_mut(item);
+        if let Some(err) = replacer.errs.drain(..).next() {
             return Err(err);
         }
-        assert!(visitor.impl_kind.is_none());
+        assert!(replacer.impl_kind.is_none());
     }
-    Ok(visitor.uses)
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -188,7 +259,7 @@ fn resolve_method(
                 None => {
                     return Err(syn::Error::new_spanned(
                         expr_mac,
-                        std::format!("could not find any interface named {}", name),
+                        format!("could not find any interface named {}", name),
                     ));
                 }
             };
@@ -238,7 +309,7 @@ fn resolve_method(
                 None => {
                     return Err(syn::Error::new_spanned(
                         expr_mac,
-                        std::format!("could not find any interface named {}", name),
+                        format!("could not find any interface named {}", name),
                     ));
                 }
             };
@@ -301,7 +372,7 @@ fn resolve_use(
             name: interface.to_string(),
             method_kind: ObjCMethodKind::Class,
         },
-        ObjCReceiver::MethodCall(_) => todo!(),
+        ObjCReceiver::MethodCall(_) => todo!("{}:{}", file!(), line!()),
     };
     match &mac_use.expr {
         custom_parse::ObjCExpr::MethodCall(call) => {
@@ -315,7 +386,7 @@ fn resolve_use(
                     };
                     return Err(syn::Error::new_spanned(
                         &mac_use.expr_mac,
-                        std::format!(
+                        format!(
                             "could not find method {}[{} {}]",
                             method_kind_symbol,
                             receiver.name(),
@@ -325,51 +396,15 @@ fn resolve_use(
                 }
             }
         }
-        custom_parse::ObjCExpr::PropertyGet(_) => todo!(),
-        custom_parse::ObjCExpr::PropertySet(_) => todo!(),
+        custom_parse::ObjCExpr::PropertyGet(_) => todo!("{}:{}", file!(), line!()),
+        custom_parse::ObjCExpr::PropertySet(_) => todo!("{}:{}", file!(), line!()),
     }
 }
 
-fn resolve_uses(
-    objc_index: &objc_parser::index::TypeIndex,
-    uses: &[ObjCMacroUse],
-) -> syn::Result<Vec<ObjCMacroResolvedUse>> {
-    uses.iter()
-        .map(|mac_use| resolve_use(objc_index, &mac_use))
-        .collect()
-}
-
-// fn resolve_type(
-//     objc_index: &objc_parser::index::TypeIndex,
-//     ty: &objc_parser::ast::AttributedType,
-//     src_macro: syn::ExprMacro,
-// ) -> syn::Result<()> {
-//     use objc_parser::ast::Type;
-
-//     match &ty.ty {
-//         Type::Void => todo!(),
-//         Type::Bool => todo!(),
-//         Type::Num(_) => todo!(),
-//         Type::Tag(_) => todo!(),
-//         Type::Typedef(typedef) => match typedef.name.as_str() {
-//             "instancetype" => todo!(),
-//             _ => todo!(),
-//         },
-//         Type::Pointer(_) => todo!(),
-//         Type::Function(_) => todo!(),
-//         Type::ObjPtr(_) => todo!(),
-//         Type::ObjCSel(_) => todo!(),
-//         Type::Array(_) => todo!(),
-//         Type::Unsupported(_) => {
-//             return Err(syn::Error::new_spanned(src_macro, "unsupported type used"))
-//         }
-//     }
-// }
-
-fn generate_c_method(
+fn c_func_name(
     objc_index: &objc_parser::index::TypeIndex,
     resolved_use: &ObjCMacroResolvedUse,
-) -> syn::Result<()> {
+) -> String {
     use objc_parser::ast::Origin;
 
     let (receiver_name, method_kind, origin, receiver_kind_name) = match &resolved_use.receiver {
@@ -409,26 +444,14 @@ fn generate_c_method(
     // We might have to use env!("CARGO_PKG_NAME") as-is, in the generated code.
     // Also make sure that it works when generating the ObjC code.
 
-    let _c_func_name = std::format!(
+    format!(
         "choco_{origin_name}_{receiver_name}{receiver_kind_name}_{method_kind_name}_{escaped_sel}",
         origin_name = origin_name,
         receiver_name = receiver_name,
         receiver_kind_name = receiver_kind_name,
         method_kind_name = method_kind_name,
         escaped_sel = escaped_sel
-    );
-
-    todo!()
-}
-
-fn generate_c_methods(
-    objc_index: &objc_parser::index::TypeIndex,
-    resolved_uses: &[ObjCMacroResolvedUse],
-) -> syn::Result<()> {
-    for resolved_use in resolved_uses {
-        generate_c_method(&objc_index, resolved_use)?;
-    }
-    Ok(())
+    )
 }
 
 fn parse_imported_objc(
@@ -583,7 +606,7 @@ fn get_objc_enum_defs<'objc>(
             None => {
                 return Err(syn::Error::new_spanned(
                     objc_name,
-                    std::format!("could not find enum type {}", str_name),
+                    format!("could not find enum type {}", str_name),
                 ));
             }
         },
@@ -655,16 +678,16 @@ fn process_impl_item(
 }
 
 pub fn chocolatier(input: TokenStream) -> syn::Result<TokenStream> {
-    let mut item_mod: syn::ItemMod = syn::parse2(input)?;
+    let item_mod: syn::ItemMod = syn::parse2(input)?;
 
-    let items = if let Some((_, ref items)) = item_mod.content {
-        items
-    } else {
+    if item_mod.content.is_none() {
         return Err(syn::Error::new(
             Span::call_site(),
             "chocolatier must not be used on empty module declaration",
         ));
-    };
+    }
+
+    let (_, ref items) = item_mod.content.as_ref().unwrap();
 
     let imports = read_imports(items)?;
 
@@ -677,13 +700,13 @@ pub fn chocolatier(input: TokenStream) -> syn::Result<TokenStream> {
 
     let objc_index = parse_imported_objc(&imports)?;
 
-    let uses = find_objc_macro_uses(items)?;
-    let resolved_uses = resolve_uses(&objc_index, &uses)?;
-    generate_c_methods(&objc_index, &resolved_uses)?;
+    let mut rewritten_item_mod = item_mod.clone();
 
-    // Start modifying the Rust AST from here.
-    let (_, ref mut items) = item_mod.content.as_mut().unwrap();
-    for item in items.iter_mut() {
+    let (_, ref mut mut_items) = rewritten_item_mod.content.as_mut().unwrap();
+
+    let _uses = replace_objc_macro_uses(&objc_index, mut_items)?;
+
+    for item in mut_items.iter_mut() {
         match item {
             syn::Item::Struct(struc) => process_struct_item(&objc_index, struc)?,
             syn::Item::Impl(imp) => process_impl_item(&objc_index, imp)?,
@@ -692,5 +715,7 @@ pub fn chocolatier(input: TokenStream) -> syn::Result<TokenStream> {
         }
     }
 
-    Ok(item_mod.into_token_stream())
+    replace_imports(mut_items);
+
+    Ok(rewritten_item_mod.into_token_stream())
 }
