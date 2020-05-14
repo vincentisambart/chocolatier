@@ -34,15 +34,22 @@ fn read_imports(items: &[syn::Item]) -> syn::Result<Vec<custom_parse::Import>> {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-enum ObjCMacroUseLocation {
+enum ObjCMacroUseImplKind {
     Protocol(syn::Ident),
     Interface(syn::Ident),
 }
 
+#[derive(Debug)]
+struct ObjCMacroUse {
+    impl_kind: ObjCMacroUseImplKind,
+    expr: custom_parse::ObjCExpr,
+    expr_mac: syn::ExprMacro,
+}
+
 struct ObjCMacroVisitor {
     errs: Vec<syn::Error>,
-    location: Option<ObjCMacroUseLocation>,
-    uses: Vec<(ObjCMacroUseLocation, custom_parse::ObjCExpr)>,
+    impl_kind: Option<ObjCMacroUseImplKind>,
+    uses: Vec<ObjCMacroUse>,
 }
 
 impl syn::visit::Visit<'_> for ObjCMacroVisitor {
@@ -58,26 +65,26 @@ impl syn::visit::Visit<'_> for ObjCMacroVisitor {
             }
         };
 
-        let mut new_location = match args {
+        let mut new_impl_kind = match args {
             ItemArgs::Enum(_) => return,
             ItemArgs::Protocol(protocol) => {
-                Some(ObjCMacroUseLocation::Protocol(protocol.objc_name))
+                Some(ObjCMacroUseImplKind::Protocol(protocol.objc_name))
             }
             ItemArgs::Interface(interface) => {
-                Some(ObjCMacroUseLocation::Interface(interface.objc_name))
+                Some(ObjCMacroUseImplKind::Interface(interface.objc_name))
             }
         };
-        std::mem::swap(&mut self.location, &mut new_location);
+        std::mem::swap(&mut self.impl_kind, &mut new_impl_kind);
 
         syn::visit::visit_item_impl(self, imp);
 
-        std::mem::swap(&mut self.location, &mut new_location);
+        std::mem::swap(&mut self.impl_kind, &mut new_impl_kind);
     }
 
     fn visit_expr_macro(&mut self, expr_mac: &'_ syn::ExprMacro) {
         if expr_mac.mac.path.is_ident("objc") {
-            let location = match &self.location {
-                Some(location) => location,
+            let impl_kind = match &self.impl_kind {
+                Some(impl_kind) => impl_kind,
                 None => {
                     let err = syn::Error::new_spanned(
                         expr_mac,
@@ -89,7 +96,11 @@ impl syn::visit::Visit<'_> for ObjCMacroVisitor {
             };
             // Note that we do not support nesting, as it increases complexity and is probably not useful.
             match expr_mac.mac.parse_body::<custom_parse::ObjCExpr>() {
-                Ok(expr) => self.uses.push((location.clone(), expr)),
+                Ok(expr) => self.uses.push(ObjCMacroUse {
+                    impl_kind: impl_kind.clone(),
+                    expr,
+                    expr_mac: expr_mac.clone(),
+                }),
                 Err(err) => self.errs.push(err),
             }
         } else {
@@ -98,12 +109,10 @@ impl syn::visit::Visit<'_> for ObjCMacroVisitor {
     }
 }
 
-fn find_objc_macro_uses(
-    items: &[syn::Item],
-) -> syn::Result<Vec<(ObjCMacroUseLocation, custom_parse::ObjCExpr)>> {
+fn find_objc_macro_uses(items: &[syn::Item]) -> syn::Result<Vec<ObjCMacroUse>> {
     let mut visitor = ObjCMacroVisitor {
         errs: Vec::new(),
-        location: None,
+        impl_kind: None,
         uses: Vec::new(),
     };
     for item in items {
@@ -111,7 +120,7 @@ fn find_objc_macro_uses(
         if let Some(err) = visitor.errs.drain(..).next() {
             return Err(err);
         }
-        assert!(visitor.location.is_none());
+        assert!(visitor.impl_kind.is_none());
     }
     Ok(visitor.uses)
 }
@@ -156,12 +165,19 @@ impl ResolvedReceiver {
     }
 }
 
-fn find_method(
+#[derive(Debug, Clone)]
+struct ObjCMacroResolvedUse {
+    receiver: ResolvedReceiver,
+    method: objc_parser::ast::ObjCMethod,
+    src_macro: syn::ExprMacro,
+}
+
+fn resolve_method(
     objc_index: &objc_parser::index::TypeIndex,
-    error_spanned: &dyn ToTokens,
+    expr_mac: &syn::ExprMacro,
     receiver: ResolvedReceiver,
     sel: &str,
-) -> syn::Result<Option<(ResolvedReceiver, objc_parser::ast::ObjCMethod)>> {
+) -> syn::Result<Option<ObjCMacroResolvedUse>> {
     match receiver {
         ResolvedReceiver::Interface {
             ref name,
@@ -171,7 +187,7 @@ fn find_method(
                 Some(def) => def,
                 None => {
                     return Err(syn::Error::new_spanned(
-                        error_spanned,
+                        expr_mac,
                         std::format!("could not find any interface named {}", name),
                     ));
                 }
@@ -181,7 +197,11 @@ fn find_method(
                 .iter()
                 .find(|method| method.name == sel && method.kind == method_kind)
             {
-                return Ok(Some((receiver, method.clone())));
+                return Ok(Some(ObjCMacroResolvedUse {
+                    receiver: receiver,
+                    method: method.clone(),
+                    src_macro: expr_mac.clone(),
+                }));
             }
 
             if let Some(superclass) = &def.superclass {
@@ -189,10 +209,10 @@ fn find_method(
                     name: superclass.clone(),
                     method_kind,
                 };
-                if let Some((real_receiver, method)) =
-                    find_method(objc_index, error_spanned, superclass_receiver, sel)?
+                if let Some(resolved_use) =
+                    resolve_method(objc_index, expr_mac, superclass_receiver, sel)?
                 {
-                    return Ok(Some((real_receiver, method)));
+                    return Ok(Some(resolved_use));
                 }
             }
 
@@ -201,10 +221,10 @@ fn find_method(
                     name: protocol.clone(),
                     method_kind,
                 };
-                if let Some((real_receiver, method)) =
-                    find_method(objc_index, error_spanned, protocol_receiver, sel)?
+                if let Some(resolved_use) =
+                    resolve_method(objc_index, expr_mac, protocol_receiver, sel)?
                 {
-                    return Ok(Some((real_receiver, method)));
+                    return Ok(Some(resolved_use));
                 }
             }
             Ok(None)
@@ -217,7 +237,7 @@ fn find_method(
                 Some(def) => def,
                 None => {
                     return Err(syn::Error::new_spanned(
-                        error_spanned,
+                        expr_mac,
                         std::format!("could not find any interface named {}", name),
                     ));
                 }
@@ -227,7 +247,11 @@ fn find_method(
                 .iter()
                 .find(|method| method.method.name == sel && method.method.kind == method_kind)
             {
-                return Ok(Some((receiver, method.method.clone())));
+                return Ok(Some(ObjCMacroResolvedUse {
+                    receiver: receiver,
+                    method: method.method.clone(),
+                    src_macro: expr_mac.clone(),
+                }));
             }
 
             for protocol in &def.inherited_protocols {
@@ -235,10 +259,10 @@ fn find_method(
                     name: protocol.clone(),
                     method_kind,
                 };
-                if let Some((real_receiver, method)) =
-                    find_method(objc_index, error_spanned, protocol_receiver, sel)?
+                if let Some(resolved_use) =
+                    resolve_method(objc_index, expr_mac, protocol_receiver, sel)?
                 {
-                    return Ok(Some((real_receiver, method)));
+                    return Ok(Some(resolved_use));
                 }
             }
             Ok(None)
@@ -248,65 +272,49 @@ fn find_method(
 
 fn resolve_use(
     objc_index: &objc_parser::index::TypeIndex,
-    loc: &ObjCMacroUseLocation,
-    expr: &custom_parse::ObjCExpr,
-) -> syn::Result<(ResolvedReceiver, objc_parser::ast::ObjCMethod)> {
+    mac_use: &ObjCMacroUse,
+) -> syn::Result<ObjCMacroResolvedUse> {
     use custom_parse::ObjCReceiver;
 
-    let (receiver, receiver_spanned): (ResolvedReceiver, &dyn ToTokens) = match expr.receiver() {
-        ObjCReceiver::SelfValue(self_ident) => match loc {
-            ObjCMacroUseLocation::Interface(interface) => (
-                ResolvedReceiver::Interface {
-                    name: interface.to_string(),
-                    method_kind: ObjCMethodKind::Instance,
-                },
-                self_ident,
-            ),
-            ObjCMacroUseLocation::Protocol(protoc) => (
-                ResolvedReceiver::Protocol {
-                    name: protoc.to_string(),
-                    method_kind: ObjCMethodKind::Instance,
-                },
-                self_ident,
-            ),
+    let receiver = match mac_use.expr.receiver() {
+        ObjCReceiver::SelfValue(_) => match &mac_use.impl_kind {
+            ObjCMacroUseImplKind::Interface(interface) => ResolvedReceiver::Interface {
+                name: interface.to_string(),
+                method_kind: ObjCMethodKind::Instance,
+            },
+            ObjCMacroUseImplKind::Protocol(protoc) => ResolvedReceiver::Protocol {
+                name: protoc.to_string(),
+                method_kind: ObjCMethodKind::Instance,
+            },
         },
-        ObjCReceiver::SelfType(self_ident) => match loc {
-            ObjCMacroUseLocation::Interface(interface) => (
-                ResolvedReceiver::Interface {
-                    name: interface.to_string(),
-                    method_kind: ObjCMethodKind::Class,
-                },
-                self_ident,
-            ),
-            ObjCMacroUseLocation::Protocol(protocol) => (
-                ResolvedReceiver::Protocol {
-                    name: protocol.to_string(),
-                    method_kind: ObjCMethodKind::Class,
-                },
-                self_ident,
-            ),
-        },
-        ObjCReceiver::Class(interface) => (
-            ResolvedReceiver::Interface {
+        ObjCReceiver::SelfType(_) => match &mac_use.impl_kind {
+            ObjCMacroUseImplKind::Interface(interface) => ResolvedReceiver::Interface {
                 name: interface.to_string(),
                 method_kind: ObjCMethodKind::Class,
             },
-            interface,
-        ),
+            ObjCMacroUseImplKind::Protocol(protocol) => ResolvedReceiver::Protocol {
+                name: protocol.to_string(),
+                method_kind: ObjCMethodKind::Class,
+            },
+        },
+        ObjCReceiver::Class(interface) => ResolvedReceiver::Interface {
+            name: interface.to_string(),
+            method_kind: ObjCMethodKind::Class,
+        },
         ObjCReceiver::MethodCall(_) => todo!(),
     };
-    match expr {
+    match &mac_use.expr {
         custom_parse::ObjCExpr::MethodCall(call) => {
             let sel = call.selector();
-            match find_method(objc_index, receiver_spanned, receiver.clone(), &sel)? {
-                Some((real_receiver, method)) => Ok((real_receiver, method)),
+            match resolve_method(objc_index, &mac_use.expr_mac, receiver.clone(), &sel)? {
+                Some(resolved_use) => Ok(resolved_use),
                 None => {
                     let method_kind_symbol = match receiver.method_kind() {
                         ObjCMethodKind::Class => "+",
                         ObjCMethodKind::Instance => "-",
                     };
                     return Err(syn::Error::new_spanned(
-                        receiver_spanned,
+                        &mac_use.expr_mac,
                         std::format!(
                             "could not find method {}[{} {}]",
                             method_kind_symbol,
@@ -324,10 +332,101 @@ fn resolve_use(
 
 fn resolve_uses(
     objc_index: &objc_parser::index::TypeIndex,
-    uses: &[(ObjCMacroUseLocation, custom_parse::ObjCExpr)],
+    uses: &[ObjCMacroUse],
+) -> syn::Result<Vec<ObjCMacroResolvedUse>> {
+    uses.iter()
+        .map(|mac_use| resolve_use(objc_index, &mac_use))
+        .collect()
+}
+
+// fn resolve_type(
+//     objc_index: &objc_parser::index::TypeIndex,
+//     ty: &objc_parser::ast::AttributedType,
+//     src_macro: syn::ExprMacro,
+// ) -> syn::Result<()> {
+//     use objc_parser::ast::Type;
+
+//     match &ty.ty {
+//         Type::Void => todo!(),
+//         Type::Bool => todo!(),
+//         Type::Num(_) => todo!(),
+//         Type::Tag(_) => todo!(),
+//         Type::Typedef(typedef) => match typedef.name.as_str() {
+//             "instancetype" => todo!(),
+//             _ => todo!(),
+//         },
+//         Type::Pointer(_) => todo!(),
+//         Type::Function(_) => todo!(),
+//         Type::ObjPtr(_) => todo!(),
+//         Type::ObjCSel(_) => todo!(),
+//         Type::Array(_) => todo!(),
+//         Type::Unsupported(_) => {
+//             return Err(syn::Error::new_spanned(src_macro, "unsupported type used"))
+//         }
+//     }
+// }
+
+fn generate_c_method(
+    objc_index: &objc_parser::index::TypeIndex,
+    resolved_use: &ObjCMacroResolvedUse,
 ) -> syn::Result<()> {
-    for (loc, expr) in uses {
-        resolve_use(objc_index, loc, expr)?;
+    use objc_parser::ast::Origin;
+
+    let (receiver_name, method_kind, origin, receiver_kind_name) = match &resolved_use.receiver {
+        ResolvedReceiver::Interface { name, method_kind } => {
+            let origin = objc_index
+                .interfaces
+                .get(name.as_str())
+                .unwrap()
+                .origin
+                .clone();
+            (name, method_kind, origin, "Protocol")
+        }
+        ResolvedReceiver::Protocol { name, method_kind } => {
+            let origin = objc_index
+                .protocols
+                .get(name.as_str())
+                .unwrap()
+                .origin
+                .clone();
+            (name, method_kind, origin, "Interface")
+        }
+    };
+    let origin_name = match &origin {
+        None => "unknown",
+        Some(Origin::ObjCCore) => "core",
+        Some(Origin::System) => "system",
+        Some(Origin::Framework(framework)) => framework.as_str(),
+        Some(Origin::Library(lib)) => lib.as_str(),
+    };
+    let method_kind_name = match method_kind {
+        ObjCMethodKind::Class => "class",
+        ObjCMethodKind::Instance => "instance",
+    };
+    let escaped_sel = resolved_use.method.name.replace(":", "_");
+
+    // TODO: Also add the name of the crate generating the code.
+    // We might have to use env!("CARGO_PKG_NAME") as-is, in the generated code.
+    // Also make sure that it works when generating the ObjC code.
+
+    let _c_func_name = std::format!(
+        "choco_{origin_name}_{receiver_name}{receiver_kind_name}_{method_kind_name}_{escaped_sel}",
+        origin_name = origin_name,
+        receiver_name = receiver_name,
+        receiver_kind_name = receiver_kind_name,
+        method_kind_name = method_kind_name,
+        escaped_sel = escaped_sel
+    );
+
+    todo!()
+}
+
+fn generate_c_methods(
+    objc_index: &objc_parser::index::TypeIndex,
+    resolved_uses: &[ObjCMacroResolvedUse],
+) -> syn::Result<()> {
+    for resolved_use in resolved_uses {
+        generate_c_method(&objc_index, resolved_use)?;
     }
     Ok(())
 }
@@ -438,7 +537,7 @@ fn process_trait_item(
 }
 
 fn process_struct_item(
-    objc_index: &objc_parser::index::TypeIndex,
+    _objc_index: &objc_parser::index::TypeIndex,
     struc: &mut syn::ItemStruct,
 ) -> syn::Result<()> {
     let (attr, args) = match extract_chocolatier_attr(&mut struc.attrs)? {
@@ -556,9 +655,9 @@ fn process_impl_item(
 }
 
 pub fn chocolatier(input: TokenStream) -> syn::Result<TokenStream> {
-    let mut item: syn::ItemMod = syn::parse2(input)?;
+    let mut item_mod: syn::ItemMod = syn::parse2(input)?;
 
-    let items = if let Some((_, ref mut items)) = item.content {
+    let items = if let Some((_, ref items)) = item_mod.content {
         items
     } else {
         return Err(syn::Error::new(
@@ -579,9 +678,11 @@ pub fn chocolatier(input: TokenStream) -> syn::Result<TokenStream> {
     let objc_index = parse_imported_objc(&imports)?;
 
     let uses = find_objc_macro_uses(items)?;
+    let resolved_uses = resolve_uses(&objc_index, &uses)?;
+    generate_c_methods(&objc_index, &resolved_uses)?;
 
-    resolve_uses(&objc_index, &uses)?;
-
+    // Start modifying the Rust AST from here.
+    let (_, ref mut items) = item_mod.content.as_mut().unwrap();
     for item in items.iter_mut() {
         match item {
             syn::Item::Struct(struc) => process_struct_item(&objc_index, struc)?,
@@ -591,5 +692,5 @@ pub fn chocolatier(input: TokenStream) -> syn::Result<TokenStream> {
         }
     }
 
-    Ok(item.into_token_stream())
+    Ok(item_mod.into_token_stream())
 }
