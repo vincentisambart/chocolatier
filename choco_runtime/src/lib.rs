@@ -19,6 +19,7 @@ extern "C" {
     // fn objc_autoreleasePoolPop(pool: *const ffi::c_void);
     fn objc_release(value: *mut ObjCObject);
     fn objc_retain(value: *mut ObjCObject) -> *mut ObjCObject;
+    pub fn objc_getClass(name: *const u8) -> *mut ObjCClass;
 }
 
 pub trait ObjCPtr: Sized {
@@ -33,11 +34,11 @@ pub struct UntypedObjCPtr {
 }
 
 impl UntypedObjCPtr {
-    unsafe fn from_raw_unchecked(raw: NonNull<ObjCObject>) -> Self {
+    pub unsafe fn from_raw_unchecked(raw: NonNull<ObjCObject>) -> Self {
         Self { raw }
     }
 
-    fn as_raw(&self) -> NonNull<ObjCObject> {
+    pub fn as_raw(&self) -> NonNull<ObjCObject> {
         self.raw
     }
 }

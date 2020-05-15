@@ -7,7 +7,9 @@ mod custom_parse;
 use chocolatier_objc_parser as objc_parser;
 use objc_parser::ast::ObjCMethodKind;
 use proc_macro2::{Ident, Span, TokenStream};
+use quote::quote;
 use quote::ToTokens;
+use std::collections::HashMap;
 use syn::parse_quote;
 use syn::visit_mut::VisitMut;
 
@@ -28,10 +30,10 @@ fn read_imports(items: &[syn::Item]) -> syn::Result<Vec<custom_parse::Import>> {
     Ok(imports)
 }
 
-fn replace_imports(items: &mut [syn::Item]) {
+fn replace_imports(items: &mut [syn::Item], c_funcs: &HashMap<String, HashMap<String, CFunc>>) {
     use custom_parse::Import;
 
-    for item in items.iter_mut() {
+    for (i, item) in items.iter_mut().enumerate() {
         let mac = match item {
             syn::Item::Macro(mac) if is_import_macro(mac) => mac,
             _ => continue,
@@ -39,13 +41,39 @@ fn replace_imports(items: &mut [syn::Item]) {
 
         // We can unwrap as read_imports already parsed it successfully.
         let import: Import = syn::parse2(mac.mac.tokens.clone()).unwrap();
-        let replacement_item: syn::Item = match import {
-            Import::Framework(framework) => {
-                let name = framework.framework.value();
-                parse_quote! {
-                    #[link(name = #name, kind = "framework")]
-                    extern "C" {}
-                }
+        let name = match import {
+            Import::Framework(framework) => framework.framework.value(),
+        };
+        let mut funcs = Vec::new();
+        if name == "Foundation" {
+            if let Some(f) = c_funcs.get(ORIGIN_CORE) {
+                funcs.extend(f.values());
+            }
+            if let Some(f) = c_funcs.get(ORIGIN_SYSTEM) {
+                funcs.extend(f.values());
+            }
+        }
+        if i == 0 {
+            if let Some(f) = c_funcs.get(UNKNOWN_ORIGIN) {
+                funcs.extend(f.values());
+            }
+        }
+        if let Some(f) = c_funcs.get(&name) {
+            funcs.extend(f.values());
+        }
+        let func_decls = funcs.iter().map(|f| {
+            // TODO: Use a better span.
+            let f_name = Ident::new(&f.name, Span::call_site());
+            quote! {
+                fn #f_name(class: std::ptr::NonNull<choco_runtime::ObjCClass>) -> std::ptr::NonNull<choco_runtime::ObjCObject>;
+            }
+        });
+
+        // In fact the functions themselves are not in the framework we specify, but they use it.
+        let replacement_item: syn::Item = parse_quote! {
+            #[link(name = #name, kind = "framework")]
+            extern "C" {
+                #(#func_decls)*
             }
         };
         *item = replacement_item;
@@ -65,10 +93,16 @@ struct ObjCMacroUse {
     expr_mac: syn::ExprMacro,
 }
 
+struct CFunc {
+    name: String,
+    resolved_use: ObjCMacroResolvedUse,
+}
+
 struct ObjCMacroReplacer<'idx> {
     objc_index: &'idx objc_parser::index::TypeIndex,
     errs: Vec<syn::Error>,
     impl_kind: Option<ObjCMacroUseImplKind>,
+    c_funcs: HashMap<String, HashMap<String, CFunc>>,
 }
 
 impl ObjCMacroReplacer<'_> {
@@ -103,15 +137,28 @@ impl ObjCMacroReplacer<'_> {
             ObjCExpr::PropertySet(_) => todo!("{}:{}", file!(), line!()),
         };
 
-        let func_name = c_func_name(self.objc_index, &resolved);
-        let func_ident = Ident::new(&func_name, func_name_span);
+        let (func_name, origin_name) = c_func_name(self.objc_index, &resolved);
+
+        let c_func = self
+            .c_funcs
+            .entry(origin_name)
+            .or_insert(HashMap::new())
+            .entry(func_name.clone())
+            .or_insert_with(|| CFunc {
+                name: func_name,
+                resolved_use: resolved,
+            });
+
+        let func_ident = Ident::new(&c_func.name, func_name_span);
 
         let mut params: Vec<syn::Expr> = Vec::new();
 
-        match resolved.method.kind {
+        match c_func.resolved_use.method.kind {
             ObjCMethodKind::Class => match &mac_use.expr.receiver() {
                 custom_parse::ObjCReceiver::SelfValue(_) => todo!(),
-                custom_parse::ObjCReceiver::SelfType(_) => params.push(parse_quote!(Self::class())),
+                custom_parse::ObjCReceiver::SelfType(_) => {
+                    params.push(parse_quote!(<Self as choco_runtime::ObjCPtr>::class()))
+                }
                 custom_parse::ObjCReceiver::Class(_) => todo!("{}:{}", file!(), line!()),
                 custom_parse::ObjCReceiver::MethodCall(_) => todo!("{}:{}", file!(), line!()),
             },
@@ -129,7 +176,13 @@ impl ObjCMacroReplacer<'_> {
             ObjCExpr::PropertySet(set) => params.push(set.val_expr.clone()),
         }
 
-        Ok(parse_quote!(#func_ident(#(#params),*)))
+        Ok(
+            parse_quote! {
+                unsafe {
+                    <Self as choco_runtime::ObjCPtr>::from_raw_unchecked(#func_ident(#(#params),*))
+                }
+            },
+        )
     }
 }
 
@@ -180,11 +233,12 @@ impl syn::visit_mut::VisitMut for ObjCMacroReplacer<'_> {
 fn replace_objc_macro_uses(
     objc_index: &objc_parser::index::TypeIndex,
     items: &mut [syn::Item],
-) -> syn::Result<()> {
+) -> syn::Result<HashMap<String, HashMap<String, CFunc>>> {
     let mut replacer = ObjCMacroReplacer {
         objc_index: objc_index,
         errs: Vec::new(),
         impl_kind: None,
+        c_funcs: HashMap::new(),
     };
     for item in items.iter_mut() {
         replacer.visit_item_mut(item);
@@ -193,7 +247,7 @@ fn replace_objc_macro_uses(
         }
         assert!(replacer.impl_kind.is_none());
     }
-    Ok(())
+    Ok(replacer.c_funcs)
 }
 
 #[derive(Debug, Clone)]
@@ -401,10 +455,14 @@ fn resolve_use(
     }
 }
 
+const UNKNOWN_ORIGIN: &'static str = "_";
+const ORIGIN_CORE: &'static str = "core";
+const ORIGIN_SYSTEM: &'static str = "system";
+
 fn c_func_name(
     objc_index: &objc_parser::index::TypeIndex,
     resolved_use: &ObjCMacroResolvedUse,
-) -> String {
+) -> (String, String) {
     use objc_parser::ast::Origin;
 
     let (receiver_name, method_kind, origin, receiver_kind_name) = match &resolved_use.receiver {
@@ -428,9 +486,9 @@ fn c_func_name(
         }
     };
     let origin_name = match &origin {
-        None => "unknown",
-        Some(Origin::ObjCCore) => "core",
-        Some(Origin::System) => "system",
+        None => UNKNOWN_ORIGIN,
+        Some(Origin::ObjCCore) => ORIGIN_CORE,
+        Some(Origin::System) => ORIGIN_SYSTEM,
         Some(Origin::Framework(framework)) => framework.as_str(),
         Some(Origin::Library(lib)) => lib.as_str(),
     };
@@ -444,13 +502,16 @@ fn c_func_name(
     // We might have to use env!("CARGO_PKG_NAME") as-is, in the generated code.
     // Also make sure that it works when generating the ObjC code.
 
-    format!(
-        "choco_{origin_name}_{receiver_name}{receiver_kind_name}_{method_kind_name}_{escaped_sel}",
-        origin_name = origin_name,
-        receiver_name = receiver_name,
-        receiver_kind_name = receiver_kind_name,
-        method_kind_name = method_kind_name,
-        escaped_sel = escaped_sel
+    (
+        format!(
+            "choco_{origin_name}_{receiver_name}{receiver_kind_name}_{method_kind_name}_{escaped_sel}",
+            origin_name = origin_name,
+            receiver_name = receiver_name,
+            receiver_kind_name = receiver_kind_name,
+            method_kind_name = method_kind_name,
+            escaped_sel = escaped_sel
+        ),
+        origin_name.to_string(),
     )
 }
 
@@ -704,7 +765,7 @@ pub fn chocolatier(input: TokenStream) -> syn::Result<TokenStream> {
 
     let (_, ref mut mut_items) = rewritten_item_mod.content.as_mut().unwrap();
 
-    let _uses = replace_objc_macro_uses(&objc_index, mut_items)?;
+    let c_funcs = replace_objc_macro_uses(&objc_index, mut_items)?;
 
     for item in mut_items.iter_mut() {
         match item {
@@ -715,7 +776,7 @@ pub fn chocolatier(input: TokenStream) -> syn::Result<TokenStream> {
         }
     }
 
-    replace_imports(mut_items);
+    replace_imports(mut_items, &c_funcs);
 
     Ok(rewritten_item_mod.into_token_stream())
 }
