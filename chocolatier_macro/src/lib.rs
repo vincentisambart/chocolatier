@@ -11,3 +11,12 @@ pub fn chocolatier(
     }
     .into()
 }
+
+#[proc_macro_derive(ObjCPtr)]
+pub fn objc_ptr_derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    match chocolatier_internal::objc_ptr_derive(input.into()) {
+        Ok(output) => output,
+        Err(err) => err.to_compile_error(),
+    }
+    .into()
+}

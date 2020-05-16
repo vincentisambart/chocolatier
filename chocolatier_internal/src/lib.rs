@@ -176,13 +176,11 @@ impl ObjCMacroReplacer<'_> {
             ObjCExpr::PropertySet(set) => params.push(set.val_expr.clone()),
         }
 
-        Ok(
-            parse_quote! {
-                unsafe {
-                    <Self as choco_runtime::ObjCPtr>::from_raw_unchecked(#func_ident(#(#params),*))
-                }
-            },
-        )
+        Ok(parse_quote! {
+            unsafe {
+                <Self as choco_runtime::ObjCPtr>::from_raw_unchecked(#func_ident(#(#params),*))
+            }
+        })
     }
 }
 
@@ -779,4 +777,66 @@ pub fn chocolatier(input: TokenStream) -> syn::Result<TokenStream> {
     replace_imports(mut_items, &c_funcs);
 
     Ok(rewritten_item_mod.into_token_stream())
+}
+
+pub fn objc_ptr_derive(input: TokenStream) -> syn::Result<TokenStream> {
+    let struc: syn::ItemStruct = syn::parse2(input)?;
+
+    if !struc.attrs.iter().any(is_repr_transparent) {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "chocolatier structs are expected to be #[repr(transparent)]",
+        ));
+    }
+
+    let name = struc.ident;
+    let zero_terminated_name_str = format!("{}\0", name);
+    let first_field = match struc.fields.iter().next() {
+        Some(field) => field,
+        None => {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "ObjCPtr derive requires one UntypedObjCPtr field",
+            ))
+        }
+    };
+    let first_field_access = match &first_field.ident {
+        Some(ident) => ident.to_token_stream(),
+        None => quote!(0),
+    };
+
+    let creation = match &first_field.ident {
+        // TODO: Handle PhantomData fields.
+        Some(ident) => quote! {
+            Self {
+                #ident: choco_runtime::UntypedObjCPtr::from_raw_unchecked(ptr),
+            }
+        },
+        None => quote! {
+            Self(choco_runtime::UntypedObjCPtr::from_raw_unchecked(ptr))
+        },
+    };
+
+    Ok(quote! {
+        impl choco_runtime::ObjCPtr for #name {
+            fn class() -> std::ptr::NonNull<choco_runtime::ObjCClass> {
+                use std::sync::atomic::{AtomicPtr, Ordering};
+                static CLASS: AtomicPtr<choco_runtime::ObjCClass> =
+                    AtomicPtr::new(std::ptr::null_mut());
+                let class = CLASS.load(Ordering::Acquire);
+                if let Some(class) = std::ptr::NonNull::new(class) {
+                    return class;
+                }
+                let class = unsafe { choco_runtime::objc_getClass(#zero_terminated_name_str.as_ptr()) };
+                CLASS.store(class, Ordering::Release);
+                std::ptr::NonNull::new(class).unwrap()
+            }
+            unsafe fn from_raw_unchecked(ptr: std::ptr::NonNull<choco_runtime::ObjCObject>) -> Self {
+                #creation
+            }
+            fn as_raw(&self) -> std::ptr::NonNull<choco_runtime::ObjCObject> {
+                self.#first_field_access.as_raw()
+            }
+        }
+    })
 }
