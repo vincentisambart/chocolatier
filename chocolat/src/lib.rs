@@ -1,9 +1,27 @@
 #![warn(rust_2018_idioms)]
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
+use chocolatier::chocolatier;
+
+#[chocolatier]
+mod inline {
+    import!(framework = "Foundation");
+
+    #[chocolatier(interface = NSObject)]
+    #[repr(transparent)]
+    #[derive(chocolatier::ObjCPtr)]
+    pub struct NSObject {
+        ptr: choco_runtime::UntypedObjCPtr,
+    }
+
+    #[chocolatier(interface = NSObject)]
+    impl NSObject {
+        pub fn new() -> Self {
+            objc!([Self new])
+        }
+
+        pub fn is_equal(&self, obj: Option<&impl choco_runtime::ObjCPtr>) -> bool {
+            objc!([self isEqual:obj])
+        }
     }
 }
+pub use inline::*;

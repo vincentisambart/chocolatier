@@ -1,16 +1,18 @@
 #![warn(rust_2018_idioms)]
 // TODO:
 // - proper handling of protocol optional methods
+// - consumed self proper handling
 
 mod custom_parse;
 
 use chocolatier_objc_parser::{ast as objc_ast, index as objc_index, xcode};
 use objc_ast::ObjCMethodKind;
 use proc_macro2::{Ident, Span, TokenStream};
-use quote::quote;
-use quote::ToTokens;
+use quote::{format_ident, quote, ToTokens};
 use std::collections::HashMap;
+use std::io::{Read, Write};
 use syn::parse_quote;
+use syn::visit::Visit;
 use syn::visit_mut::VisitMut;
 
 fn is_import_macro(mac: &syn::ItemMacro) -> bool {
@@ -131,8 +133,8 @@ fn replace_imports(items: &mut [syn::Item], c_funcs: &HashMap<String, HashMap<St
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 enum ObjCMacroUseImplKind {
-    Protocol(syn::Ident),
-    Interface(syn::Ident),
+    Protocol(Ident),
+    Interface(Ident),
 }
 
 #[derive(Debug)]
@@ -160,16 +162,57 @@ fn rust_param_conv(
 ) -> syn::Expr {
     let expr = &rust_objc_param.expr;
     match &objc_param.ty.ty {
-        objc_ast::Type::ObjPtr(ptr) => match ptr.nullability {
-            // TODO: Check if it's also of the proper subclass (with for example a "NSArrayInterface" constraint).
-            Some(objc_ast::Nullability::NonNull) => parse_quote! {
-                <(#expr) as choco_runtime::ObjCPtr>::as_raw()
-            },
-            // TODO: Add a method to choco_runtime for proper type and error messages.
-            Some(objc_ast::Nullability::Nullable) | None => parse_quote! {
-                (#expr).map_or(std::ptr::null_mut(), |ptr| ptr.as_raw().as_ptr())
-            },
-        },
+        objc_ast::Type::ObjPtr(ptr) => {
+            let mut restric: Vec<TokenStream> = Vec::new();
+            restric.push(quote! { choco_runtime::ObjCPtr });
+            match &ptr.kind {
+                objc_ast::ObjPtrKind::Class => todo!("{}:{}", file!(), line!()),
+                objc_ast::ObjPtrKind::Id(id) => {
+                    restric.extend(
+                        id.protocols
+                            .iter()
+                            .map(|protoc| format_ident!("{}Protocol", protoc).to_token_stream()),
+                    );
+                }
+                objc_ast::ObjPtrKind::SomeInstance(desc) => {
+                    restric.push(format_ident!("{}Interface", desc.interface).to_token_stream());
+                    restric.extend(
+                        desc.protocols
+                            .iter()
+                            .map(|protoc| format_ident!("{}Protocol", protoc).to_token_stream()),
+                    );
+                }
+                objc_ast::ObjPtrKind::Block(_) => todo!("{}:{}", file!(), line!()),
+                objc_ast::ObjPtrKind::TypeParam(_) => todo!("{}:{}", file!(), line!()),
+            };
+            let is_consumed = objc_param.attrs.contains(&objc_ast::Attr::NSConsumed);
+            match ptr.nullability {
+                Some(objc_ast::Nullability::NonNull) => {
+                    let received_ty = if is_consumed {
+                        quote! { T }
+                    } else {
+                        quote! { &T }
+                    };
+                    parse_quote! {
+                        ({fn conv<T: #(#restric)+*>(ptr: #received_ty) -> std::ptr::NonNull<choco_runtime::ObjCObject> {
+                            ptr.as_raw()
+                        }; conv})(#expr)
+                    }
+                }
+                Some(objc_ast::Nullability::Nullable) | None => {
+                    let received_ty = if is_consumed {
+                        quote! { Option<T> }
+                    } else {
+                        quote! { Option<&T> }
+                    };
+                    parse_quote! {
+                        ({fn conv<T: #(#restric)+*>(ptr: #received_ty) -> *mut choco_runtime::ObjCObject {
+                            ptr.map_or(std::ptr::null_mut(), |ptr| ptr.as_raw().as_ptr())
+                        }; conv})(#expr)
+                    }
+                }
+            }
+        }
         _ => todo!("{}:{}", file!(), line!()),
     }
 }
@@ -267,7 +310,6 @@ impl ObjCMacroReplacer<'_> {
                 },
                 _ => todo!("{}:{}", file!(), line!()),
             },
-            // objc_ast::Type::ObjPtr(ptr) => {}
             _ => todo!("{}:{}", file!(), line!()),
         };
 
@@ -667,7 +709,7 @@ fn read_chocolatier_attr(
 
 fn is_repr_transparent(attr: &syn::Attribute) -> bool {
     if attr.path.is_ident("repr") {
-        if let Ok(arg) = attr.parse_args::<syn::Ident>() {
+        if let Ok(arg) = attr.parse_args::<Ident>() {
             arg == "transparent"
         } else {
             false
@@ -928,4 +970,195 @@ pub fn objc_ptr_derive(input: TokenStream) -> syn::Result<TokenStream> {
             }
         }
     })
+}
+
+struct ModVisit<'a> {
+    out_file: &'a mut std::fs::File,
+}
+
+impl Visit<'_> for ModVisit<'_> {
+    fn visit_item_mod(&mut self, item_mod: &'_ syn::ItemMod) {
+        if !item_mod
+            .attrs
+            .iter()
+            .any(|attr| attr.path.is_ident("chocolatier"))
+        {
+            syn::visit::visit_item_mod(self, item_mod);
+            return;
+        }
+
+        if item_mod.content.is_none() {
+            panic!("chocolatier must not be used on empty module declaration");
+        }
+
+        let (_, ref items) = item_mod.content.as_ref().unwrap();
+
+        let imports = read_imports(items).unwrap();
+
+        if imports.is_empty() {
+            panic!("chocolatier requires at least one import!()");
+        }
+
+        for import in &imports {
+            match import {
+                custom_parse::Import::Framework(import) => writeln!(
+                    self.out_file,
+                    "#import <{name}/{name}.h>",
+                    name = import.framework.value(),
+                )
+                .unwrap(),
+            }
+        }
+
+        let objc_index = parse_imported_objc(&imports).unwrap();
+
+        let mut rewritten_item_mod = item_mod.clone();
+
+        let (_, ref mut mut_items) = rewritten_item_mod.content.as_mut().unwrap();
+
+        let c_funcs = replace_objc_macro_uses(&objc_index, mut_items).unwrap();
+
+        for c_func in c_funcs.values().flat_map(|h| h.values()) {
+            let ret_ty = match &c_func.resolved_use.method.result.ty {
+                objc_ast::Type::Typedef(typedef) => match typedef.name.as_str() {
+                    "BOOL" => "BOOL",
+                    "instancetype" => "id",
+                    _ => todo!("{}:{}", file!(), line!()),
+                },
+                _ => todo!("{}:{}", file!(), line!()),
+            };
+
+            let mut param_decls = Vec::new();
+            match c_func.resolved_use.method.kind {
+                ObjCMethodKind::Class => param_decls.push("Class klass".to_string()),
+                // TODO: self should have a proper type
+                ObjCMethodKind::Instance => {
+                    param_decls.push("__unsafe_unretained id _Nonnull self_".to_string())
+                }
+            }
+
+            for param in &c_func.resolved_use.method.params {
+                match &param.ty.ty {
+                    objc_ast::Type::ObjPtr(ptr) => {
+                        let nullability = match ptr.nullability {
+                            Some(objc_ast::Nullability::NonNull) => " _Nonnull",
+                            Some(objc_ast::Nullability::Nullable) => " _Nullable",
+                            None => "",
+                        };
+                        let ty = match &ptr.kind {
+                            objc_ast::ObjPtrKind::Class => "Class".to_string(),
+                            objc_ast::ObjPtrKind::Id(id) => {
+                                if id.protocols.is_empty() {
+                                    format!("__unsafe_unretained id{}", nullability)
+                                } else {
+                                    format!(
+                                        "__unsafe_unretained id<{}>{}",
+                                        id.protocols.join(", "),
+                                        nullability
+                                    )
+                                }
+                            }
+                            objc_ast::ObjPtrKind::SomeInstance(_) => {
+                                todo!("{}:{}", file!(), line!())
+                            }
+                            objc_ast::ObjPtrKind::Block(_) => todo!("{}:{}", file!(), line!()),
+                            objc_ast::ObjPtrKind::TypeParam(_) => todo!("{}:{}", file!(), line!()),
+                        };
+                        param_decls.push(format!("{} {}", ty, param.name));
+                    }
+                    _ => todo!("{}:{}", file!(), line!()),
+                }
+            }
+
+            let call_target = match c_func.resolved_use.method.kind {
+                ObjCMethodKind::Class => "klass",
+                ObjCMethodKind::Instance => "self_",
+            };
+
+            let call;
+            if c_func.resolved_use.method.params.is_empty() {
+                call = format!("[{} {}]", call_target, c_func.resolved_use.method.name);
+            } else {
+                let params_passing = c_func
+                    .resolved_use
+                    .method
+                    .name
+                    .split_terminator(":")
+                    .zip(&c_func.resolved_use.method.params)
+                    .map(|(part, param)| format!("{}:{}", part, param.name))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+
+                call = format!("[{} {}]", call_target, params_passing);
+            }
+
+            writeln!(
+                self.out_file,
+                "\
+{ret_ty} {name}({param_decls}) {{
+    @try {{
+        return {call};
+    }}
+    @catch (NSException *exception) {{
+        abort_on_exception(exception);
+    }}
+}}
+",
+                ret_ty = ret_ty,
+                name = c_func.name,
+                param_decls = param_decls.join(", "),
+                call = call,
+            )
+            .unwrap();
+        }
+    }
+}
+
+pub fn build_objc_for_files<T: AsRef<str>>(files: &[T]) {
+    let out_dir = std::env::var("OUT_DIR").unwrap();
+    let out_dir = std::path::Path::new(&out_dir);
+    let out_file_path = out_dir.join("chocolatier-generated.m");
+    let mut out_file = std::fs::File::create(&out_file_path).expect("unable to open output file");
+
+    writeln!(
+        &mut out_file,
+        r#"// File automatically generated by chocolatier - Do not modify directly.
+#import <objc/runtime.h>
+#import <Foundation/NSObjCRuntime.h> // for declaration of NSLog
+#import <Foundation/NSException.h>
+#import <stdlib.h> // for declaration of abort()
+
+#if !__has_feature(objc_arc)
+#error This file must be compiled with ARC turned on (-fobjc-arc)
+#endif
+
+static void abort_on_exception(__unsafe_unretained NSException *exception)
+__attribute__((noreturn));
+
+static void abort_on_exception(__unsafe_unretained NSException *exception) {{
+    NSLog(@"Unexpected exception: %@", exception.reason);
+    abort();
+}}
+"#
+    )
+    .unwrap();
+
+    for filename in files {
+        println!("cargo:rerun-if-changed={}", filename.as_ref());
+
+        let mut file = std::fs::File::open(filename.as_ref()).expect("unable to open file");
+        let mut src = String::new();
+        file.read_to_string(&mut src).expect("unable to read file");
+        let parsed_file = syn::parse_file(&src).expect("unable to parse file");
+
+        let mut visit = ModVisit {
+            out_file: &mut out_file,
+        };
+        visit.visit_file(&parsed_file);
+    }
+
+    cc::Build::new()
+        .file(out_file_path)
+        .flag("-fobjc-arc")
+        .compile("chocolatier-generated");
 }

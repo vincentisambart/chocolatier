@@ -8,6 +8,7 @@ edition = "2018"
 
 [dependencies]
 chocolatier_macro = { path = "chocolatier_macro/" }
+chocolatier_internal = { path = "chocolatier_internal/" }
 
 [dev-dependencies]
 trybuild = "1.0"

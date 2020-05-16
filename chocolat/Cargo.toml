@@ -8,3 +8,7 @@ edition = "2018"
 
 [dependencies]
 chocolatier = { path = ".." }
+choco_runtime = { path = "../choco_runtime" }
+
+[build-dependencies]
+chocolatier = { path = ".." }
