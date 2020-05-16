@@ -4,8 +4,8 @@
 
 mod custom_parse;
 
-use chocolatier_objc_parser as objc_parser;
-use objc_parser::ast::ObjCMethodKind;
+use chocolatier_objc_parser::{ast as objc_ast, index as objc_index, xcode};
+use objc_ast::ObjCMethodKind;
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::quote;
 use quote::ToTokens;
@@ -28,6 +28,61 @@ fn read_imports(items: &[syn::Item]) -> syn::Result<Vec<custom_parse::Import>> {
         .collect::<syn::Result<Vec<_>>>()?;
 
     Ok(imports)
+}
+
+fn generate_objc_func_decl(c_func: &CFunc) -> TokenStream {
+    // TODO: Use a better span.
+    let func_name = Ident::new(&c_func.name, Span::call_site());
+
+    let mut params = Vec::new();
+    match c_func.resolved_use.method.kind {
+        ObjCMethodKind::Class => {
+            params.push(quote!(class: std::ptr::NonNull<choco_runtime::ObjCClass>))
+        }
+        ObjCMethodKind::Instance => {
+            params.push(quote!(self_: std::ptr::NonNull<choco_runtime::ObjCObject>))
+        }
+    }
+    params.extend(c_func.resolved_use.method.params.iter().map(|param| {
+        let name = Ident::new(&param.name, Span::call_site());
+        match &param.ty.ty {
+            objc_ast::Type::ObjPtr(ptr) => match ptr.nullability {
+                Some(objc_ast::Nullability::NonNull) => quote! {
+                    #name: std::ptr::NonNull<choco_runtime::ObjCObject>,
+                },
+                Some(objc_ast::Nullability::Nullable) | None => quote! {
+                    #name: *mut choco_runtime::ObjCObject,
+                },
+            },
+            _ => todo!("{}:{}", file!(), line!()),
+        }
+    }));
+
+    let ret = match &c_func.resolved_use.method.result.ty {
+        objc_ast::Type::Void => None,
+        objc_ast::Type::Typedef(typedef) => match typedef.name.as_str() {
+            "BOOL" => {
+                assert_eq!(c_func.resolved_use.method.result.size, Some(1));
+                Some(quote!(i8))
+            }
+            // TODO: Should probably be nullable here and make Rust check it was really not null.
+            "instancetype" => Some(quote! {
+                std::ptr::NonNull<choco_runtime::ObjCObject>
+            }),
+            _ => todo!("{}:{}", file!(), line!()),
+        },
+        // objc_ast::Type::ObjPtr(ptr) => {}
+        _ => todo!("{}:{}", file!(), line!()),
+    };
+
+    match ret {
+        Some(ret) => quote! {
+            fn #func_name(#(#params),*) -> #ret;
+        },
+        None => quote! {
+            fn #func_name(#(#params),*);
+        },
+    }
 }
 
 fn replace_imports(items: &mut [syn::Item], c_funcs: &HashMap<String, HashMap<String, CFunc>>) {
@@ -61,13 +116,7 @@ fn replace_imports(items: &mut [syn::Item], c_funcs: &HashMap<String, HashMap<St
         if let Some(f) = c_funcs.get(&name) {
             funcs.extend(f.values());
         }
-        let func_decls = funcs.iter().map(|f| {
-            // TODO: Use a better span.
-            let f_name = Ident::new(&f.name, Span::call_site());
-            quote! {
-                fn #f_name(class: std::ptr::NonNull<choco_runtime::ObjCClass>) -> std::ptr::NonNull<choco_runtime::ObjCObject>;
-            }
-        });
+        let func_decls = funcs.iter().map(|f| generate_objc_func_decl(f));
 
         // In fact the functions themselves are not in the framework we specify, but they use it.
         let replacement_item: syn::Item = parse_quote! {
@@ -99,10 +148,30 @@ struct CFunc {
 }
 
 struct ObjCMacroReplacer<'idx> {
-    objc_index: &'idx objc_parser::index::TypeIndex,
+    objc_index: &'idx objc_index::TypeIndex,
     errs: Vec<syn::Error>,
     impl_kind: Option<ObjCMacroUseImplKind>,
     c_funcs: HashMap<String, HashMap<String, CFunc>>,
+}
+
+fn rust_param_conv(
+    rust_objc_param: &custom_parse::ObjCMethodParam,
+    objc_param: &objc_ast::ObjCParam,
+) -> syn::Expr {
+    let expr = &rust_objc_param.expr;
+    match &objc_param.ty.ty {
+        objc_ast::Type::ObjPtr(ptr) => match ptr.nullability {
+            // TODO: Check if it's also of the proper subclass (with for example a "NSArrayInterface" constraint).
+            Some(objc_ast::Nullability::NonNull) => parse_quote! {
+                <(#expr) as choco_runtime::ObjCPtr>::as_raw()
+            },
+            // TODO: Add a method to choco_runtime for proper type and error messages.
+            Some(objc_ast::Nullability::Nullable) | None => parse_quote! {
+                (#expr).map_or(std::ptr::null_mut(), |ptr| ptr.as_raw().as_ptr())
+            },
+        },
+        _ => todo!("{}:{}", file!(), line!()),
+    }
 }
 
 impl ObjCMacroReplacer<'_> {
@@ -131,7 +200,7 @@ impl ObjCMacroReplacer<'_> {
         let func_name_span = match &mac_use.expr {
             ObjCExpr::MethodCall(call) => match &call.params {
                 ObjCMethodParams::Without(ident) => ident.span(),
-                ObjCMethodParams::With(params) => params[0].0.as_ref().unwrap().span(),
+                ObjCMethodParams::With(params) => params[0].ident.as_ref().unwrap().span(),
             },
             ObjCExpr::PropertyGet(_) => todo!("{}:{}", file!(), line!()),
             ObjCExpr::PropertySet(_) => todo!("{}:{}", file!(), line!()),
@@ -155,31 +224,55 @@ impl ObjCMacroReplacer<'_> {
 
         match c_func.resolved_use.method.kind {
             ObjCMethodKind::Class => match &mac_use.expr.receiver() {
-                custom_parse::ObjCReceiver::SelfValue(_) => todo!(),
+                custom_parse::ObjCReceiver::SelfValue(_) => todo!("{}:{}", file!(), line!()),
                 custom_parse::ObjCReceiver::SelfType(_) => {
                     params.push(parse_quote!(<Self as choco_runtime::ObjCPtr>::class()))
                 }
                 custom_parse::ObjCReceiver::Class(_) => todo!("{}:{}", file!(), line!()),
                 custom_parse::ObjCReceiver::MethodCall(_) => todo!("{}:{}", file!(), line!()),
             },
-            ObjCMethodKind::Instance => params.push(parse_quote!(self)),
+            ObjCMethodKind::Instance => {
+                params.push(parse_quote!(<Self as choco_runtime::ObjCPtr>::as_raw(self)))
+            }
         }
 
         match &mac_use.expr {
             ObjCExpr::MethodCall(call) => match &call.params {
                 ObjCMethodParams::Without(_) => {}
                 ObjCMethodParams::With(mac_params) => {
-                    params.extend(mac_params.iter().map(|(_, _, expr)| expr.clone()));
+                    assert_eq!(mac_params.len(), c_func.resolved_use.method.params.len());
+                    params.extend(
+                        mac_params
+                            .iter()
+                            .zip(c_func.resolved_use.method.params.iter())
+                            .map(|(rust_objc_param, objc_param)| {
+                                rust_param_conv(rust_objc_param, objc_param)
+                            }),
+                    );
                 }
             },
             ObjCExpr::PropertyGet(_) => {}
             ObjCExpr::PropertySet(set) => params.push(set.val_expr.clone()),
         }
 
+        let func_call = quote! {
+            #func_ident(#(#params),*)
+        };
+
+        let ret_conv = match &c_func.resolved_use.method.result.ty {
+            objc_ast::Type::Typedef(typedef) => match typedef.name.as_str() {
+                "BOOL" => quote!(#func_call != 0),
+                "instancetype" => quote! {
+                    <Self as choco_runtime::ObjCPtr>::from_raw_unchecked(#func_call)
+                },
+                _ => todo!("{}:{}", file!(), line!()),
+            },
+            // objc_ast::Type::ObjPtr(ptr) => {}
+            _ => todo!("{}:{}", file!(), line!()),
+        };
+
         Ok(parse_quote! {
-            unsafe {
-                <Self as choco_runtime::ObjCPtr>::from_raw_unchecked(#func_ident(#(#params),*))
-            }
+            unsafe { #ret_conv }
         })
     }
 }
@@ -229,7 +322,7 @@ impl syn::visit_mut::VisitMut for ObjCMacroReplacer<'_> {
 }
 
 fn replace_objc_macro_uses(
-    objc_index: &objc_parser::index::TypeIndex,
+    objc_index: &objc_index::TypeIndex,
     items: &mut [syn::Item],
 ) -> syn::Result<HashMap<String, HashMap<String, CFunc>>> {
     let mut replacer = ObjCMacroReplacer {
@@ -291,12 +384,12 @@ impl ResolvedReceiver {
 #[derive(Debug, Clone)]
 struct ObjCMacroResolvedUse {
     receiver: ResolvedReceiver,
-    method: objc_parser::ast::ObjCMethod,
+    method: objc_ast::ObjCMethod,
     src_macro: syn::ExprMacro,
 }
 
 fn resolve_method(
-    objc_index: &objc_parser::index::TypeIndex,
+    objc_index: &objc_index::TypeIndex,
     expr_mac: &syn::ExprMacro,
     receiver: ResolvedReceiver,
     sel: &str,
@@ -394,7 +487,7 @@ fn resolve_method(
 }
 
 fn resolve_use(
-    objc_index: &objc_parser::index::TypeIndex,
+    objc_index: &objc_index::TypeIndex,
     mac_use: &ObjCMacroUse,
 ) -> syn::Result<ObjCMacroResolvedUse> {
     use custom_parse::ObjCReceiver;
@@ -458,10 +551,10 @@ const ORIGIN_CORE: &'static str = "core";
 const ORIGIN_SYSTEM: &'static str = "system";
 
 fn c_func_name(
-    objc_index: &objc_parser::index::TypeIndex,
+    objc_index: &objc_index::TypeIndex,
     resolved_use: &ObjCMacroResolvedUse,
 ) -> (String, String) {
-    use objc_parser::ast::Origin;
+    use objc_ast::Origin;
 
     let (receiver_name, method_kind, origin, receiver_kind_name) = match &resolved_use.receiver {
         ResolvedReceiver::Interface { name, method_kind } => {
@@ -513,9 +606,7 @@ fn c_func_name(
     )
 }
 
-fn parse_imported_objc(
-    imports: &[custom_parse::Import],
-) -> syn::Result<objc_parser::index::TypeIndex> {
+fn parse_imported_objc(imports: &[custom_parse::Import]) -> syn::Result<objc_index::TypeIndex> {
     use std::fmt::Write;
 
     let mut objc_code = String::new();
@@ -532,12 +623,12 @@ fn parse_imported_objc(
 
     // TODO: The target should come from the current target, or use multiple targets (should probably be configurable)
     assert!(cfg!(all(target_os = "macos", target_arch = "x86_64")));
-    let target = objc_parser::xcode::Target::MacOsX86_64;
-    let ast = match objc_parser::ast::ast_from_str(target, &objc_code) {
+    let target = xcode::Target::MacOsX86_64;
+    let ast = match objc_ast::ast_from_str(target, &objc_code) {
         Ok(ast) => ast,
         Err(err) => return Err(syn::Error::new(Span::call_site(), err.to_string())),
     };
-    let index = objc_parser::index::TypeIndex::new(&ast);
+    let index = objc_index::TypeIndex::new(&ast);
 
     Ok(index)
 }
@@ -586,8 +677,8 @@ fn is_repr_transparent(attr: &syn::Attribute) -> bool {
     }
 }
 
-fn signed_or_not_to_lit(val: objc_parser::ast::SignedOrNotInt) -> proc_macro2::Literal {
-    use objc_parser::ast::SignedOrNotInt;
+fn signed_or_not_to_lit(val: objc_ast::SignedOrNotInt) -> proc_macro2::Literal {
+    use objc_ast::SignedOrNotInt;
     use proc_macro2::Literal;
 
     match val {
@@ -597,7 +688,7 @@ fn signed_or_not_to_lit(val: objc_parser::ast::SignedOrNotInt) -> proc_macro2::L
 }
 
 fn process_trait_item(
-    _objc_index: &objc_parser::index::TypeIndex,
+    _objc_index: &objc_index::TypeIndex,
     struc: &mut syn::ItemTrait,
 ) -> syn::Result<()> {
     let (_, args) = match extract_chocolatier_attr(&mut struc.attrs)? {
@@ -619,7 +710,7 @@ fn process_trait_item(
 }
 
 fn process_struct_item(
-    _objc_index: &objc_parser::index::TypeIndex,
+    _objc_index: &objc_index::TypeIndex,
     struc: &mut syn::ItemStruct,
 ) -> syn::Result<()> {
     let (attr, args) = match extract_chocolatier_attr(&mut struc.attrs)? {
@@ -650,14 +741,12 @@ fn process_struct_item(
 }
 
 fn get_objc_enum_defs<'objc>(
-    objc_index: &'objc objc_parser::index::TypeIndex,
+    objc_index: &'objc objc_index::TypeIndex,
     objc_name: &Ident,
-) -> syn::Result<Vec<&'objc objc_parser::ast::EnumDef>> {
-    use objc_parser::ast;
-
+) -> syn::Result<Vec<&'objc objc_ast::EnumDef>> {
     let mut enum_defs = Vec::new();
     let str_name = objc_name.to_string();
-    let tag_id = ast::TagId::Named(str_name.clone());
+    let tag_id = objc_ast::TagId::Named(str_name.clone());
     match objc_index.enums.get(&tag_id) {
         Some(objc_def) => enum_defs.push(objc_def),
         None => match objc_index.typedefs.get(&str_name) {
@@ -673,8 +762,8 @@ fn get_objc_enum_defs<'objc>(
 
     for enu in objc_index.enums.values() {
         match &enu.underlying.ty {
-            ast::Type::Typedef(typedef) if typedef.name == str_name => {}
-            ast::Type::Tag(tag) if tag.id == tag_id => {}
+            objc_ast::Type::Typedef(typedef) if typedef.name == str_name => {}
+            objc_ast::Type::Tag(tag) if tag.id == tag_id => {}
             _ => continue,
         }
         enum_defs.push(enu);
@@ -684,7 +773,7 @@ fn get_objc_enum_defs<'objc>(
 }
 
 fn process_enum_impl(
-    objc_index: &objc_parser::index::TypeIndex,
+    objc_index: &objc_index::TypeIndex,
     enum_args: &custom_parse::EnumArgs,
     imp: &mut syn::ItemImpl,
 ) -> syn::Result<()> {
@@ -719,7 +808,7 @@ fn process_enum_impl(
 }
 
 fn process_impl_item(
-    objc_index: &objc_parser::index::TypeIndex,
+    objc_index: &objc_index::TypeIndex,
     imp: &mut syn::ItemImpl,
 ) -> syn::Result<()> {
     // Only interested in impl blocks marked "#[chocolatier(xxxx = xxxxx)]".

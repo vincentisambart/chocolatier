@@ -143,9 +143,16 @@ impl syn::parse::Parse for ItemArgs {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+pub struct ObjCMethodParam {
+    pub ident: Option<syn::Ident>,
+    pub colon_token: syn::Token![:],
+    pub expr: syn::Expr,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub enum ObjCMethodParams {
     Without(syn::Ident),
-    With(Vec<(Option<syn::Ident>, syn::Token![:], syn::Expr)>),
+    With(Vec<ObjCMethodParam>),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -186,7 +193,7 @@ impl ObjCMethodCall {
             ObjCMethodParams::Without(ident) => ident.to_string(),
             ObjCMethodParams::With(params) => params
                 .iter()
-                .map(|(ident, _, _)| match ident {
+                .map(|param| match &param.ident {
                     Some(ident) => Cow::Owned(std::format!("{}:", ident)),
                     None => Cow::Borrowed(":"),
                 })
@@ -204,11 +211,15 @@ impl Parse for ObjCMethodCall {
         let method_name_start: syn::Ident = content.parse()?;
         let params;
         if content.peek(syn::Token![:]) {
-            let mut v: Vec<(Option<syn::Ident>, syn::Token![:], syn::Expr)> = Vec::new();
+            let mut v: Vec<ObjCMethodParam> = Vec::new();
 
             let colon_token = content.parse()?;
             let expr = content.parse()?;
-            v.push((Some(method_name_start), colon_token, expr));
+            v.push(ObjCMethodParam {
+                ident: Some(method_name_start),
+                colon_token,
+                expr,
+            });
 
             loop {
                 if content.is_empty() {
@@ -222,7 +233,11 @@ impl Parse for ObjCMethodCall {
                 };
                 let colon_token = content.parse()?;
                 let expr = content.parse()?;
-                v.push((ident, colon_token, expr));
+                v.push(ObjCMethodParam {
+                    ident,
+                    colon_token,
+                    expr,
+                });
             }
 
             params = ObjCMethodParams::With(v);
@@ -346,8 +361,9 @@ mod tests {
                     params: ObjCMethodParams::Without(method_name),
                 } if method_name == "alloc"));
                 match params.as_slice() {
-                    [(Some(part1), _, _), (Some(part2), _, _)]
-                        if part1 == "myMethod" && part2 == "otherParam" => {}
+                    [param1, param2]
+                        if param1.ident.as_ref().unwrap() == "myMethod"
+                            && param2.ident.as_ref().unwrap() == "otherParam" => {}
                     _ => panic!("unexpected expr {:?}", nested_call_multiparams),
                 }
             }
