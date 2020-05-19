@@ -1022,7 +1022,7 @@ impl Visit<'_> for ModVisit<'_> {
             let ret_ty = match &c_func.resolved_use.method.result.ty {
                 objc_ast::Type::Typedef(typedef) => match typedef.name.as_str() {
                     "BOOL" => "BOOL",
-                    "instancetype" => "id",
+                    "instancetype" => "id", // TODO: Should be an owned id
                     _ => todo!("{}:{}", file!(), line!()),
                 },
                 _ => todo!("{}:{}", file!(), line!()),
